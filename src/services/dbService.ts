@@ -108,6 +108,11 @@ export const mergeUserSafe = (existing: Partial<User> | undefined | null, incomi
 export const dbService = {
   // Backup & Permanent SQLite SQL Synchronization
   async syncUsersToBackup(users: User[], forceSave: boolean = false): Promise<User[]> {
+    if (forceSave) {
+      users.forEach((u) => {
+        if (u) this.removeDeletedUserFromBlacklist(u.id, u.phone);
+      });
+    }
     const deletedBlacklist = this.getDeletedUserBlacklist();
     // Strictly filter out any deleted/blacklisted users and cleanse old Ravi Sahu references
     const cleanInput = users.filter((u) => {
@@ -481,6 +486,29 @@ export const dbService = {
         if (cleanId) set.add(cleanId);
         if (userPhone) set.add(userPhone);
         localStorage.setItem('nexa_deleted_user_identifiers', JSON.stringify(Array.from(set)));
+      }
+    } catch {}
+  },
+
+  removeDeletedUserFromBlacklist(cleanId?: string, userPhone?: string): void {
+    try {
+      if (typeof window !== 'undefined') {
+        const set = this.getDeletedUserBlacklist();
+        if (cleanId) set.delete(String(cleanId).trim());
+        if (userPhone) {
+          const cleanP = String(userPhone).replace(/\D/g, '').slice(-10);
+          set.delete(cleanP);
+        }
+        localStorage.setItem('nexa_deleted_user_identifiers', JSON.stringify(Array.from(set)));
+      }
+    } catch {}
+    try {
+      if (typeof window !== 'undefined') {
+        fetch('/api/unblacklist-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: cleanId, phone: userPhone }),
+        }).catch(() => {});
       }
     } catch {}
   },

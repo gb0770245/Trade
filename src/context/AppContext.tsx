@@ -1568,6 +1568,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: new Date().toISOString(),
     };
 
+    // Clear any previous deletion blacklist for this phone number so re-registration is completely active
+    dbService.removeDeletedUserFromBlacklist(newId, cleaned);
+
     // Save permanently to Cloud SQL, disk backup, and Firestore
     await dbService.saveUser(newUser, true);
     setUser(newUser);

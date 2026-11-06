@@ -968,6 +968,33 @@ function saveDeletedUser(userId: string, phone?: string) {
   }
 }
 
+function unblacklistUser(phone?: string, id?: string) {
+  try {
+    const set = loadDeletedUsers();
+    let modified = false;
+    if (phone) {
+      const cleanP = String(phone).replace(/\D/g, '').slice(-10);
+      if (cleanP && set.has(cleanP)) {
+        set.delete(cleanP);
+        modified = true;
+      }
+    }
+    if (id) {
+      const cleanId = String(id).trim();
+      if (cleanId && set.has(cleanId)) {
+        set.delete(cleanId);
+        modified = true;
+      }
+    }
+    if (modified) {
+      fs.writeFileSync(DELETED_USERS_PATH, JSON.stringify(Array.from(set), null, 2), 'utf-8');
+      console.log(`[Blacklist] Unblacklisted re-registered phone: ${phone}, id: ${id}`);
+    }
+  } catch (err) {
+    console.warn('Could not unblacklist user:', err);
+  }
+}
+
 function isUserDeleted(u: any): boolean {
   if (!u) return false;
   const set = loadDeletedUsers();
@@ -1273,6 +1300,17 @@ app.get('/api/user/:identifier', async (req, res) => {
   }
 });
 
+// API Route: Unblacklist user so re-registered user shows up for admin and functions normally
+app.post('/api/unblacklist-user', (req, res) => {
+  try {
+    const { userId, phone } = req.body;
+    unblacklistUser(phone, userId);
+    return res.json({ success: true, message: 'User removed from blacklist' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // API Route: Save or Update single user permanently into SQLite SQL + Backup
 app.post(['/api/user/save', '/api/user/update'], async (req, res) => {
   try {
@@ -1280,6 +1318,9 @@ app.post(['/api/user/save', '/api/user/update'], async (req, res) => {
     if (!userData || (!userData.id && !userData.phone)) {
       return res.status(400).json({ success: false, error: 'User data with id or phone required' });
     }
+    // Remove from blacklist if previously deleted
+    unblacklistUser(userData.phone, userData.id);
+
     // 1. Upsert directly into SQLite
     const saved = upsertUserInSql(userData);
 
@@ -2170,20 +2211,18 @@ app.post('/api/backup/users', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Expected array of users' });
     }
 
-    const deletedSet = loadDeletedUsers();
-
-    // If an explicitly brand new registration occurs, allow registration
-    if (isNewRegistration && !req.body.forceSave) {
+    // If an explicitly brand new registration or save occurs, allow registration & unblacklist
+    if (isNewRegistration || req.body.forceSave || req.body.allowReregistration) {
       incoming.forEach((u) => {
-        if (u?.id) deletedSet.delete(String(u.id).trim());
-        if (u?.phone) deletedSet.delete(String(u.phone).replace(/\D/g, '').slice(-10));
+        if (u?.phone || u?.id) {
+          unblacklistUser(u?.phone, u?.id);
+        }
       });
-      try {
-        fs.writeFileSync(DELETED_USERS_PATH, JSON.stringify(Array.from(deletedSet), null, 2), 'utf-8');
-      } catch {}
     }
 
-    // STRICT FILTER: Drop any user that was deleted by admin
+    const deletedSet = loadDeletedUsers();
+
+    // STRICT FILTER: Drop any user that was deleted by admin and not explicitly registered
     const cleanIncoming = incoming.filter((u) => {
       if (!u) return false;
       const uId = String(u.id || u.uid || '').trim();
