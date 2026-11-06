@@ -339,6 +339,24 @@ export function deleteOrdersForUserInSql(userId: string, phone?: string): number
   const db = getSqliteDb();
   const cleanId = String(userId || '').trim();
   const cleanPhone = phone ? String(phone).replace(/\D/g, '').slice(-10) : '';
+
+  try {
+    const matching = db.prepare(`
+      SELECT id FROM investment_orders 
+      WHERE user_id = ? 
+         OR user_phone = ? 
+         OR (user_phone IS NOT NULL AND user_phone LIKE ?)
+    `).all(cleanId, cleanPhone, `%${cleanPhone}%`) as { id: string }[];
+
+    for (const m of matching) {
+      if (m?.id) {
+        saveDeletedOrder(String(m.id).trim());
+      }
+    }
+  } catch (err) {
+    console.warn('Error archiving deleted order IDs:', err);
+  }
+
   const res = db.prepare(`
     DELETE FROM investment_orders 
     WHERE user_id = ? 

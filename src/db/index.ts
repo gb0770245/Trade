@@ -7,8 +7,17 @@ declare global {
   var _postgresPool: Pool | undefined;
 }
 
+const getDatabaseUrl = (): string => {
+  return (
+    process.env.DATABASE_URL?.trim() ||
+    process.env.Key?.trim() ||
+    process.env.POSTGRES_URL?.trim() ||
+    ''
+  );
+};
+
 export const isSqlConfigured = Boolean(
-  (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== '') ||
+  (getDatabaseUrl() !== '') ||
   (process.env.SQL_HOST &&
     process.env.SQL_HOST.trim() !== '' &&
     process.env.SQL_DB_NAME &&
@@ -18,8 +27,8 @@ export const isSqlConfigured = Boolean(
 // Function to create or retrieve the connection pool.
 export const createPool = () => {
   if (!global._postgresPool) {
-    if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== '') {
-      const dbUrl = process.env.DATABASE_URL.trim();
+    const dbUrl = getDatabaseUrl();
+    if (dbUrl !== '') {
       const isLocal = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1');
       global._postgresPool = new Pool({
         connectionString: dbUrl,

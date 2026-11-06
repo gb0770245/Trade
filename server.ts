@@ -2637,12 +2637,20 @@ try {
 function loadServerOrders(): any[] {
   const orderMap = new Map<string, any>();
   const deletedSet = loadDeletedOrders();
+  const deletedUsers = loadDeletedUsers();
+
+  const isUserDeleted = (o: any): boolean => {
+    if (!o) return false;
+    const uId = String(o.userId || '').trim();
+    const uPhone = String(o.userPhone || '').replace(/\D/g, '').slice(-10);
+    return Boolean((uId && deletedUsers.has(uId)) || (uPhone && deletedUsers.has(uPhone)));
+  };
 
   // 1. Primary: Load from SQLite SQL database
   try {
     const sqlOrders = getAllOrdersFromSql();
     for (const o of sqlOrders) {
-      if (o && o.id && !deletedSet.has(String(o.id).trim().toLowerCase())) {
+      if (o && o.id && !deletedSet.has(String(o.id).trim().toLowerCase()) && !isUserDeleted(o)) {
         orderMap.set(String(o.id), o);
       }
     }
@@ -2657,7 +2665,7 @@ function loadServerOrders(): any[] {
       if (Array.isArray(parsed)) {
         for (const o of parsed) {
           const strId = String(o?.id || '').trim().toLowerCase();
-          if (o && o.id && !deletedSet.has(strId) && !orderMap.has(String(o.id))) {
+          if (o && o.id && !deletedSet.has(strId) && !isUserDeleted(o) && !orderMap.has(String(o.id))) {
             orderMap.set(String(o.id), o);
             // Also store back to SQLite SQL so it is never lost
             try { upsertOrderInSql(o); } catch {}
@@ -2674,9 +2682,15 @@ function loadServerOrders(): any[] {
 
 function saveServerOrders(ordersList: any[]): void {
   const deletedSet = loadDeletedOrders();
-  const cleanList = (ordersList || []).filter(
-    (o) => o && o.id && !deletedSet.has(String(o.id).trim().toLowerCase())
-  );
+  const deletedUsers = loadDeletedUsers();
+  const cleanList = (ordersList || []).filter((o) => {
+    if (!o || !o.id) return false;
+    if (deletedSet.has(String(o.id).trim().toLowerCase())) return false;
+    const uId = String(o.userId || '').trim();
+    const uPhone = String(o.userPhone || '').replace(/\D/g, '').slice(-10);
+    if ((uId && deletedUsers.has(uId)) || (uPhone && deletedUsers.has(uPhone))) return false;
+    return true;
+  });
 
   // 1. Permanently upsert into SQLite SQL database
   for (const o of cleanList) {
@@ -3984,6 +3998,26 @@ app.delete(['/api/admin/users/:userId', '/api/users/:userId'], async (req, res) 
       return true;
     });
     saveUsersBackup(updatedUsers);
+
+    // 4b. Wipe user's orders completely from orders_backup.json on server disk
+    try {
+      if (fs.existsSync(ORDERS_BACKUP_PATH)) {
+        const diskOrders = JSON.parse(fs.readFileSync(ORDERS_BACKUP_PATH, 'utf-8'));
+        if (Array.isArray(diskOrders)) {
+          const filteredOrders = diskOrders.filter((o) => {
+            const oUid = String(o?.userId || '').trim();
+            const oPhone = String(o?.userPhone || '').replace(/\D/g, '').slice(-10);
+            if (oUid === cleanId || oUid === targetUid || (queryPhone && oPhone === queryPhone)) {
+              return false;
+            }
+            return true;
+          });
+          fs.writeFileSync(ORDERS_BACKUP_PATH, JSON.stringify(filteredOrders, null, 2), 'utf-8');
+        }
+      }
+    } catch (errOrders) {
+      console.warn('Could not filter orders_backup.json on user delete:', errOrders);
+    }
 
     // 5. Delete from Cloud SQL
     try {
