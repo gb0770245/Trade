@@ -44,6 +44,7 @@ import {
   deleteOrdersForUserInSql,
   purgeAllOrdersFromSql,
   loadDeletedOrders,
+  saveDeletedOrder,
   upsertProductInSql,
   getAllProductsFromSql,
   deleteProductFromSql,
@@ -2890,6 +2891,13 @@ app.post(['/api/orders', '/api/admin/orders'], async (req, res) => {
       return res.status(400).json({ success: false, error: 'Order data with ID is required' });
     }
 
+    const cleanOrderId = String(orderData.id).trim().toLowerCase();
+    const deletedOrders = loadDeletedOrders();
+    if (deletedOrders.has(cleanOrderId)) {
+      console.warn(`[Order Rejected] Order ${cleanOrderId} is permanently deleted and blacklisted. Rejecting resurrect.`);
+      return res.status(400).json({ success: false, error: 'Order is permanently deleted and blacklisted' });
+    }
+
     const allUsers = getCachedUsersBackup();
     const enriched = enrichOrderWithUserData(orderData, allUsers);
 
@@ -2986,23 +2994,26 @@ app.delete('/api/orders/:id', async (req, res) => {
     const { id } = req.params;
     const cleanId = String(id).trim();
 
-    // 1. Delete from SQLite SQL database
+    // 1. Blacklist order ID permanently so it can NEVER resurrect
+    saveDeletedOrder(cleanId);
+
+    // 2. Delete from SQLite SQL database
     try {
       deleteOrderFromSql(cleanId);
     } catch (sqlErr) {
       console.warn('Error deleting order from SQLite SQL:', sqlErr);
     }
 
-    // 2. Delete from Cloud SQL PostgreSQL
+    // 3. Delete from Cloud SQL PostgreSQL
     try {
       await deleteOrderFromDb(cleanId);
     } catch (sqlErr) {
       console.warn('Delete order from Cloud SQL warning:', sqlErr);
     }
 
-    // 3. Delete from disk backup
+    // 4. Delete from disk backup
     const diskOrders = loadServerOrders();
-    const filtered = diskOrders.filter((o) => String(o.id) !== cleanId);
+    const filtered = diskOrders.filter((o) => String(o.id).trim().toLowerCase() !== cleanId.toLowerCase());
     saveServerOrders(filtered);
 
     console.log(`[Admin Delete] Order ${cleanId} permanently deleted from SQLite SQL, Cloud SQL, and disk.`);

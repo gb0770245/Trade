@@ -1101,25 +1101,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setIsCloudSynced(true);
         }
 
-        // Permanent SQL + Cloud orders merging: never wipe existing orders if server returns empty
+        // Server-authoritative orders: strictly respect deleted orders and never auto-resurrect from localStorage
         const incomingOrders = Array.isArray(cloudOrders) ? cloudOrders : [];
-        setOrders((prev) => {
-          if (incomingOrders.length > 0) {
-            const combined = deduplicateOrders([...incomingOrders, ...prev]);
-            try {
-              localStorage.setItem(STORAGE_KEY_ORDERS, JSON.stringify(combined));
-            } catch (e) {}
-            return combined;
-          }
-          if (prev.length > 0) {
-            // Keep local orders and auto-sync them to SQL backend in background
-            prev.forEach((ord) => {
-              dbService.saveOrder(ord, user.id).catch(() => {});
-            });
-            return prev;
-          }
-          return [];
+        const deletedBlacklist = dbService.getDeletedOrderBlacklist();
+        const cleanOrders = incomingOrders.filter((o) => {
+          const strId = String(o?.id || '').trim().toLowerCase();
+          return o && o.id && !deletedBlacklist.has(strId);
         });
+        setOrders(cleanOrders);
+        try {
+          localStorage.setItem(STORAGE_KEY_ORDERS, JSON.stringify(cleanOrders));
+        } catch (e) {}
 
         // Permanent SQL + Cloud transactions merging: never wipe existing transactions
         const incomingTxs = Array.isArray(cloudTxs) ? cloudTxs : [];
@@ -1341,8 +1333,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               dbService.getTeamMembersForUser(fresh.id),
             ]);
             if (isMounted) {
-              if (uOrders && uOrders.length > 0) {
-                setOrders((prev) => deduplicateOrders([...uOrders, ...prev]));
+              if (uOrders) {
+                const delBlacklist = dbService.getDeletedOrderBlacklist();
+                const cleanUOrders = uOrders.filter((o) => {
+                  const strId = String(o?.id || '').trim().toLowerCase();
+                  return o && o.id && !delBlacklist.has(strId);
+                });
+                setOrders(cleanUOrders);
+                try {
+                  localStorage.setItem(STORAGE_KEY_ORDERS, JSON.stringify(cleanUOrders));
+                } catch (e) {}
               }
               if (uTxs && uTxs.length > 0) {
                 setTransactions((prev) => deduplicateTransactions([...uTxs, ...prev]));
@@ -3228,10 +3228,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const loadAdminOrders = async () => {
     try {
       const list = await dbService.getAllOrders();
-      if (Array.isArray(list) && list.length > 0) {
-        setAdminOrders((prev) => deduplicateOrders([...list, ...prev]));
-      } else if (list) {
-        setAdminOrders(list);
+      if (Array.isArray(list)) {
+        const delBlacklist = dbService.getDeletedOrderBlacklist();
+        const cleanList = list.filter((o) => {
+          const strId = String(o?.id || '').trim().toLowerCase();
+          return o && o.id && !delBlacklist.has(strId);
+        });
+        setAdminOrders(cleanList);
       }
     } catch (err) {
       console.warn('Failed to load admin orders:', err);
@@ -3339,10 +3342,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const adminDeleteOrder = async (orderId: string) => {
     try {
-      await dbService.deleteOrder(orderId);
-      setAdminOrders((prev) => prev.filter((o) => o.id !== orderId));
-      setOrders((prev) => prev.filter((o) => o.id !== orderId));
-      showToast(`Order #${orderId} deleted permanently.`, 'info');
+      const cleanId = String(orderId).trim();
+      await dbService.deleteOrder(cleanId);
+      setAdminOrders((prev) => prev.filter((o) => String(o.id).trim().toLowerCase() !== cleanId.toLowerCase()));
+      setOrders((prev) => {
+        const remaining = prev.filter((o) => String(o.id).trim().toLowerCase() !== cleanId.toLowerCase());
+        try {
+          localStorage.setItem(STORAGE_KEY_ORDERS, JSON.stringify(remaining));
+        } catch (e) {}
+        return remaining;
+      });
+      showToast(`Order #${cleanId} deleted permanently from all databases!`, 'info');
     } catch {
       showToast('Failed to delete order', 'error');
     }

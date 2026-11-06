@@ -1282,8 +1282,6 @@ export const dbService = {
         if (o && o.id) {
           if (!map.has(String(o.id))) {
             map.set(String(o.id), o);
-            // Save to SQL database in background so it is permanently archived
-            this.saveOrder(o, o.userId || 'unknown').catch(() => {});
           }
         }
       });
