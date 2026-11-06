@@ -32,6 +32,7 @@ import {
   getAllDbNotices,
   upsertDbNotice,
   deleteDbNotice,
+  initPostgresSchema,
 } from './src/db/queries.ts';
 import {
   upsertOrderInSql,
@@ -1640,6 +1641,8 @@ app.get('/api/referral/team/:userId', async (req, res) => {
   }
 });
 
+const processedCommissionCache = new Map<string, number>();
+
 // Multi-Tier Referral Commission Distribution Engine (Server-Authoritative, SQLite + Cloud SQL + Backup)
 export async function distributeReferralCommissionServer(
   payerIdentifier: string,
@@ -1654,9 +1657,53 @@ export async function distributeReferralCommissionServer(
   const numAmount = Number(amount);
   if (isNaN(numAmount) || numAmount <= 0) return { success: false, credited: [] };
 
-  const allUsers = await getCombinedServerUsers();
   const cleanPayer = String(payerIdentifier).trim();
   const cleanPayerPhone = cleanPayer.replace(/\D/g, '').slice(-10);
+  const cleanRef = referenceId ? String(referenceId).trim() : '';
+
+  // 1. Strict Deduplication Lock:
+  // If referenceId provided (e.g. order ID 'ord-123' or deposit tx ID), lock to that exact reference.
+  // Otherwise, lock to payer + action + amount.
+  const dedupeKey = cleanRef
+    ? `${actionType}:${cleanRef}`
+    : `${cleanPayer}:${actionType}:${numAmount.toFixed(2)}`;
+
+  const nowMs = Date.now();
+  const lastProcessed = processedCommissionCache.get(dedupeKey);
+  if (lastProcessed && nowMs - lastProcessed < 15 * 60 * 1000) {
+    console.log(`[Referral Commission] BLOCKED duplicate commission distribution call for key: ${dedupeKey}`);
+    return { success: true, credited: [] };
+  }
+
+  // 2. Also check if commission transactions already exist in transactions log for this reference
+  if (cleanRef) {
+    const existingTxs = loadServerTransactions();
+    const alreadyCredited = existingTxs.some(
+      (t) =>
+        t.type === 'commission' &&
+        (t.referenceNo === `COMM1-${cleanRef}` ||
+          t.referenceNo === `COMM2-${cleanRef}` ||
+          t.referenceNo === `COMM3-${cleanRef}` ||
+          (t.referenceNo && t.referenceNo.includes(cleanRef)))
+    );
+    if (alreadyCredited) {
+      console.log(`[Referral Commission] BLOCKED: Commission already recorded in database for reference: ${cleanRef}`);
+      processedCommissionCache.set(dedupeKey, nowMs);
+      return { success: true, credited: [] };
+    }
+  }
+
+  // Atomically claim lock
+  processedCommissionCache.set(dedupeKey, nowMs);
+
+  // Prune cache if large
+  if (processedCommissionCache.size > 2000) {
+    for (const [k, time] of processedCommissionCache.entries()) {
+      if (nowMs - time > 60 * 60 * 1000) processedCommissionCache.delete(k);
+    }
+  }
+
+  const allUsers = await getCombinedServerUsers();
 
   const payer = allUsers.find(
     (u) =>
@@ -1731,6 +1778,7 @@ export async function distributeReferralCommissionServer(
 
   const credited: any[] = [];
   const rates = [10, 3, 1]; // Tier 1: 10%, Tier 2: 3%, Tier 3: 1%
+  const refSuffix = cleanRef || `${payer.id}-${Date.now().toString().slice(-4)}`;
 
   // 1. Tier 1 Inviter (Direct upliner)
   const tier1 = findUpliner(payer.inviterId, payer.invitedBy);
@@ -1760,7 +1808,7 @@ export async function distributeReferralCommissionServer(
           timestamp: new Date().toLocaleString(),
           createdAt: Date.now(),
           status: 'completed',
-          referenceNo: `COMM1-${payer.id}-${Date.now().toString().slice(-4)}`,
+          referenceNo: `COMM1-${refSuffix}`,
           paymentMethod: 'Referral Commission Wallet',
         };
         txList.unshift(tx1);
@@ -1769,7 +1817,7 @@ export async function distributeReferralCommissionServer(
       } catch (txErr) {}
 
       credited.push({ tier: 1, userId: tier1.id, nickname: tier1.nickname, amount: comm1, rate: rates[0] });
-      console.log(`[Referral Commission] Credited Tier 1 ($${comm1}) to ${tier1.nickname || tier1.id} from ${payer.nickname || payer.id} for ${actionLabel}`);
+      console.log(`[Referral Commission] Credited Tier 1 ($${comm1}) to ${tier1.nickname || tier1.id} from ${payer.nickname || payer.id} for ${actionLabel} [Ref: ${refSuffix}]`);
     }
 
     // 2. Tier 2 Inviter (Upline's upliner)
@@ -1800,7 +1848,7 @@ export async function distributeReferralCommissionServer(
             timestamp: new Date().toLocaleString(),
             createdAt: Date.now(),
             status: 'completed',
-            referenceNo: `COMM2-${payer.id}-${Date.now().toString().slice(-4)}`,
+            referenceNo: `COMM2-${refSuffix}`,
             paymentMethod: 'Referral Commission Wallet',
           };
           txList.unshift(tx2);
@@ -1809,7 +1857,7 @@ export async function distributeReferralCommissionServer(
         } catch (txErr) {}
 
         credited.push({ tier: 2, userId: tier2.id, nickname: tier2.nickname, amount: comm2, rate: rates[1] });
-        console.log(`[Referral Commission] Credited Tier 2 ($${comm2}) to ${tier2.nickname || tier2.id} from ${payer.nickname || payer.id} for ${actionLabel}`);
+        console.log(`[Referral Commission] Credited Tier 2 ($${comm2}) to ${tier2.nickname || tier2.id} from ${payer.nickname || payer.id} for ${actionLabel} [Ref: ${refSuffix}]`);
       }
 
       // 3. Tier 3 Inviter (Tier 2's upliner)
@@ -1840,7 +1888,7 @@ export async function distributeReferralCommissionServer(
               timestamp: new Date().toLocaleString(),
               createdAt: Date.now(),
               status: 'completed',
-              referenceNo: `COMM3-${payer.id}-${Date.now().toString().slice(-4)}`,
+              referenceNo: `COMM3-${refSuffix}`,
               paymentMethod: 'Referral Commission Wallet',
             };
             txList.unshift(tx3);
@@ -1849,7 +1897,7 @@ export async function distributeReferralCommissionServer(
           } catch (txErr) {}
 
           credited.push({ tier: 3, userId: tier3.id, nickname: tier3.nickname, amount: comm3, rate: rates[2] });
-          console.log(`[Referral Commission] Credited Tier 3 ($${comm3}) to ${tier3.nickname || tier3.id} from ${payer.nickname || payer.id} for ${actionLabel}`);
+          console.log(`[Referral Commission] Credited Tier 3 ($${comm3}) to ${tier3.nickname || tier3.id} from ${payer.nickname || payer.id} for ${actionLabel} [Ref: ${refSuffix}]`);
         }
       }
     }
@@ -4380,6 +4428,8 @@ async function startServer() {
     // Asynchronously seed existing users, orders, and settings into Cloud SQL if empty
     setTimeout(async () => {
       try {
+        await initPostgresSchema();
+
         // 1. Users: Cloud SQL is the persistent source of truth
         const sqlUsers = await getAllUsers();
         if (sqlUsers.length === 0) {

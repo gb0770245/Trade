@@ -1,4 +1,5 @@
-import { db, isSqlConfigured } from './index.ts';
+import { db, isSqlConfigured, initPostgresSchema } from './index.ts';
+export { initPostgresSchema };
 import {
   users,
   transactions,

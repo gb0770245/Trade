@@ -1476,143 +1476,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Multi-tier referral commission distribution (Tier 1: 10%, Tier 2: 3%, Tier 3: 1%)
+  // Server-authoritative: Dispatches exactly ONCE to SQLite SQL + Disk + PostgreSQL
   const distributeMultiTierCommissions = async (
     payer: User,
     amount: number,
-    actionType: 'recharge' | 'investment' | 'daily_income'
+    actionType: 'recharge' | 'investment' | 'daily_income',
+    referenceId?: string
   ) => {
     if (!payer || amount <= 0) return;
     if (!payer.inviterId && !payer.invitedBy) return;
 
     try {
-      // 0. Trigger authoritative server-side commission distribution to SQLite, disk backup, and Cloud SQL
-      await dbService.distributeCommissionOnServer(payer.id || payer.phone, amount, actionType);
+      // Trigger authoritative server-side commission distribution to SQLite, disk backup, and Cloud SQL ONCE
+      await dbService.distributeCommissionOnServer(payer.id || payer.phone, amount, actionType, referenceId);
 
-      const actionLabel =
-        actionType === 'daily_income'
-          ? 'Daily Income Return (दैनिक आय कमीशन)'
-          : actionType === 'investment'
-            ? 'Contract Investment (प्लान निवेश)'
-            : 'Recharge (रिचार्ज)';
-
-      // 1. Tier 1 Inviter (Direct inviter)
-      let tier1Inviter: User | null = null;
-      if (payer.inviterId) {
-        tier1Inviter = await dbService.getUser(payer.inviterId);
-      }
-      if (!tier1Inviter && payer.invitedBy) {
-        tier1Inviter = await dbService.findUserByInviteCode(payer.invitedBy);
-      }
-
-      if (tier1Inviter) {
-        const t1Rate = platformSettings.tier1Commission ?? 10;
-        const t1Amount = Number(((amount * t1Rate) / 100).toFixed(2));
-        if (t1Amount > 0) {
-          tier1Inviter.withdrawalBalance = Number(((tier1Inviter.withdrawalBalance || 0) + t1Amount).toFixed(2));
-          tier1Inviter.totalCommissionEarned = Number(((tier1Inviter.totalCommissionEarned || 0) + t1Amount).toFixed(2));
-          await dbService.saveUser(tier1Inviter);
-
-          const commTx1: Transaction = {
-            id: `tx-comm-${Date.now()}-1`,
-            userId: tier1Inviter.id,
-            type: 'commission',
-            amount: t1Amount,
-            title: `Tier 1 Commission (${t1Rate}%) from ${payer.nickname} ${actionLabel}`,
-            timestamp: new Date().toLocaleString(),
-            status: 'completed',
-            referenceNo: `COMM1-${payer.id}-${Date.now().toString().slice(-4)}`,
-          };
-          await dbService.saveTransaction(commTx1, tier1Inviter.id);
-
-          if (user && user.id === tier1Inviter.id) {
-            setUser({ ...tier1Inviter });
-            setTransactions((prev) => [commTx1, ...prev]);
-            const updatedTeam = await dbService.getTeamMembersForUser(tier1Inviter.id);
-            setTeamMembers(updatedTeam);
-          }
-        }
-
-        // 2. Tier 2 Inviter (Inviter's inviter)
-        if (tier1Inviter.inviterId || tier1Inviter.invitedBy) {
-          let tier2Inviter: User | null = null;
-          if (tier1Inviter.inviterId) {
-            tier2Inviter = await dbService.getUser(tier1Inviter.inviterId);
-          }
-          if (!tier2Inviter && tier1Inviter.invitedBy) {
-            tier2Inviter = await dbService.findUserByInviteCode(tier1Inviter.invitedBy);
-          }
-
-          if (tier2Inviter) {
-            const t2Rate = platformSettings.tier2Commission ?? 3;
-            const t2Amount = Number(((amount * t2Rate) / 100).toFixed(2));
-            if (t2Amount > 0) {
-              tier2Inviter.withdrawalBalance = Number(((tier2Inviter.withdrawalBalance || 0) + t2Amount).toFixed(2));
-              tier2Inviter.totalCommissionEarned = Number(((tier2Inviter.totalCommissionEarned || 0) + t2Amount).toFixed(2));
-              await dbService.saveUser(tier2Inviter);
-
-              const commTx2: Transaction = {
-                id: `tx-comm-${Date.now()}-2`,
-                userId: tier2Inviter.id,
-                type: 'commission',
-                amount: t2Amount,
-                title: `Tier 2 Commission (${t2Rate}%) from ${payer.nickname} ${actionLabel}`,
-                timestamp: new Date().toLocaleString(),
-                status: 'completed',
-                referenceNo: `COMM2-${payer.id}-${Date.now().toString().slice(-4)}`,
-              };
-              await dbService.saveTransaction(commTx2, tier2Inviter.id);
-
-              if (user && user.id === tier2Inviter.id) {
-                setUser({ ...tier2Inviter });
-                setTransactions((prev) => [commTx2, ...prev]);
-                const updatedTeam = await dbService.getTeamMembersForUser(tier2Inviter.id);
-                setTeamMembers(updatedTeam);
-              }
-            }
-
-            // 3. Tier 3 Inviter (Tier 2's inviter)
-            if (tier2Inviter.inviterId || tier2Inviter.invitedBy) {
-              let tier3Inviter: User | null = null;
-              if (tier2Inviter.inviterId) {
-                tier3Inviter = await dbService.getUser(tier2Inviter.inviterId);
-              }
-              if (!tier3Inviter && tier2Inviter.invitedBy) {
-                tier3Inviter = await dbService.findUserByInviteCode(tier2Inviter.invitedBy);
-              }
-
-              if (tier3Inviter) {
-                const t3Rate = platformSettings.tier3Commission ?? 1;
-                const t3Amount = Number(((amount * t3Rate) / 100).toFixed(2));
-                if (t3Amount > 0) {
-                  tier3Inviter.withdrawalBalance = Number(((tier3Inviter.withdrawalBalance || 0) + t3Amount).toFixed(2));
-                  tier3Inviter.totalCommissionEarned = Number(((tier3Inviter.totalCommissionEarned || 0) + t3Amount).toFixed(2));
-                  await dbService.saveUser(tier3Inviter);
-
-                  const commTx3: Transaction = {
-                    id: `tx-comm-${Date.now()}-3`,
-                    userId: tier3Inviter.id,
-                    type: 'commission',
-                    amount: t3Amount,
-                    title: `Tier 3 Commission (${t3Rate}%) from ${payer.nickname} ${actionLabel}`,
-                    timestamp: new Date().toLocaleString(),
-                    status: 'completed',
-                    referenceNo: `COMM3-${payer.id}-${Date.now().toString().slice(-4)}`,
-                  };
-                  await dbService.saveTransaction(commTx3, tier3Inviter.id);
-
-                  if (user && user.id === tier3Inviter.id) {
-                    setUser({ ...tier3Inviter });
-                    setTransactions((prev) => [commTx3, ...prev]);
-                    const updatedTeam = await dbService.getTeamMembersForUser(tier3Inviter.id);
-                    setTeamMembers(updatedTeam);
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-
+      // If the current user is an upliner, refresh their active profile from server
       if (user?.id) {
         try {
           const freshUser = await dbService.getUser(user.id);
@@ -1625,7 +1503,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         } catch {}
       }
     } catch (err) {
-      console.error('Error in multi-tier commission distribution:', err);
+      console.error('Error in referral commission distribution:', err);
     }
   };
 
@@ -1906,7 +1784,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAdminTransactions((prev) => prependTxUnique(prev, newTx));
 
     // Distribute multi-tier referral commissions to uplines
-    distributeMultiTierCommissions(updatedUser, amount, 'recharge');
+    distributeMultiTierCommissions(updatedUser, amount, 'recharge', newTx.referenceNo);
 
     confetti({
       particleCount: 100,
@@ -2186,7 +2064,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAdminTransactions((prev) => prependTxUnique(prev, investTx));
 
     // Distribute multi-tier referral commissions to uplines
-    distributeMultiTierCommissions(updatedUser, product.price, 'investment');
+    distributeMultiTierCommissions(updatedUser, product.price, 'investment', newOrder.id);
 
     confetti({
       particleCount: 120,
@@ -2272,7 +2150,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await dbService.saveUser(updatedUser);
 
       // Distribute multi-tier referral commissions to uplines
-      distributeMultiTierCommissions(updatedUser, product.price, 'investment');
+      distributeMultiTierCommissions(updatedUser, product.price, 'investment', newInvOrder.id);
     }
 
     // Save transaction
@@ -2397,7 +2275,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAdminTransactions((prev) => prependTxUnique(prev, divTx));
 
     // Distribute multi-tier referral commissions to upliners on daily returns (Tier 1: 10%, Tier 2: 3%, Tier 3: 1%)
-    await distributeMultiTierCommissions(updatedUser, totalClaim, 'daily_income');
+    await distributeMultiTierCommissions(updatedUser, totalClaim, 'daily_income', divTx.referenceNo);
 
     confetti({
       particleCount: 90,
