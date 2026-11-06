@@ -1,0 +1,30 @@
+{
+  "tier1Commission": 10,
+  "tier2Commission": 3,
+  "tier3Commission": 1,
+  "merchantUpiId": "nexaai.pay@icici",
+  "merchantPayeeName": "Nexa AI Technologies",
+  "isManualUpiEnabled": true,
+  "autoDynamicQrEnabled": true,
+  "requireAdminRechargeApproval": true,
+  "showUpiVpaDetails": false,
+  "minRecharge": 25,
+  "minWithdrawal": 2,
+  "withdrawalFeePercent": 5,
+  "isWithdrawalEnabled": true,
+  "isRechargeEnabled": true,
+  "isSpinEnabled": true,
+  "isBonusEnabled": true,
+  "checkInPayouts": [
+    12,
+    15,
+    18,
+    22,
+    25,
+    28,
+    35
+  ],
+  "checkInDay7ExtraSpin": true,
+  "dailyBonusBase": 50,
+  "adminPin": "8888"
+}

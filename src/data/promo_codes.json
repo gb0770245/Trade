@@ -1,0 +1,24 @@
+[
+  {
+    "id": "promo-hdvip50",
+    "code": "HDVIP50",
+    "amount": 50,
+    "maxUses": 500,
+    "usedCount": 15,
+    "usedBy": [],
+    "expiresAt": null,
+    "isActive": true,
+    "createdAt": "2026-10-31T03:08:35.685Z"
+  },
+  {
+    "id": "promo-nexa2026",
+    "code": "NEXA2026",
+    "amount": 100,
+    "maxUses": 1000,
+    "usedCount": 42,
+    "usedBy": [],
+    "expiresAt": null,
+    "isActive": true,
+    "createdAt": "2026-10-31T03:08:35.635Z"
+  }
+]

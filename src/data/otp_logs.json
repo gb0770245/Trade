@@ -1,0 +1,44 @@
+[
+  {
+    "id": "test-1793442051411",
+    "mobile": "7307112738",
+    "otp": "135790",
+    "purpose": "test",
+    "message": "Dear user, your Nexa AI registration verification code is 135790. Valid for 5 minutes. Do not share with anyone.",
+    "status": "pending",
+    "attempts": 0,
+    "createdAt": "10:20:51 am, 31/10/2026",
+    "expiresAt": 1793442349877,
+    "provider": "apitxt",
+    "senderId": "NEXAAI",
+    "gatewayStatus": "Dispatched via apitxt.com"
+  },
+  {
+    "id": "test-1793442041839",
+    "mobile": "7307112738",
+    "otp": "778899",
+    "purpose": "test",
+    "message": "Dear user, your Nexa AI registration verification code is 778899. Valid for 5 minutes. Do not share with anyone.",
+    "status": "pending",
+    "attempts": 0,
+    "createdAt": "10:20:41 am, 31/10/2026",
+    "expiresAt": 1793442341838,
+    "provider": "apitxt",
+    "senderId": "NEXAAI",
+    "gatewayStatus": "Active OTP Ready (2s Gateway Cooldown Guard)"
+  },
+  {
+    "id": "otp-1793442030363-k7xr",
+    "mobile": "7307112738",
+    "otp": "670216",
+    "purpose": "register",
+    "message": "Dear user, your Nexa AI registration verification code is 670216. Valid for 5 minutes. Do not share with anyone.",
+    "status": "pending",
+    "attempts": 0,
+    "createdAt": "10:20:30 am, 31/10/2026",
+    "expiresAt": 1793442327682,
+    "provider": "apitxt",
+    "senderId": "NEXAAI",
+    "gatewayStatus": "Dispatched via apitxt.com"
+  }
+]

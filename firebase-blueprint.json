@@ -1,0 +1,104 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User account profile, wallet balances, VIP tier, and banking information",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "phone": { "type": "string" },
+        "password": { "type": "string" },
+        "nickname": { "type": "string" },
+        "avatar": { "type": "string" },
+        "invitationCode": { "type": "string" },
+        "invitedBy": { "type": "string" },
+        "inviterName": { "type": "string" },
+        "inviterId": { "type": "string" },
+        "rechargeBalance": { "type": "number" },
+        "withdrawalBalance": { "type": "number" },
+        "productRevenue": { "type": "number" },
+        "vipLevel": { "type": "number" },
+        "totalInvested": { "type": "number" },
+        "checkInStreak": { "type": "number" },
+        "lastCheckInDate": { "type": "string" },
+        "spinChances": { "type": "number" },
+        "status": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "phone", "nickname", "rechargeBalance", "withdrawalBalance"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Financial ledger of recharges, withdrawals, and dividend payouts",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "type": { "type": "string" },
+        "amount": { "type": "number" },
+        "title": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "status": { "type": "string" },
+        "referenceNo": { "type": "string" },
+        "paymentMethod": { "type": "string" }
+      },
+      "required": ["id", "userId", "type", "amount", "status"]
+    },
+    "InvestmentOrder": {
+      "title": "InvestmentOrder",
+      "description": "Active and completed investment contracts and accrued daily dividends",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "productId": { "type": "string" },
+        "productName": { "type": "string" },
+        "price": { "type": "number" },
+        "dailyEarnings": { "type": "number" },
+        "totalRevenue": { "type": "number" },
+        "cycleDays": { "type": "number" },
+        "daysElapsed": { "type": "number" },
+        "totalAccrued": { "type": "number" },
+        "purchaseDate": { "type": "string" },
+        "lastClaimDate": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "userId", "productId", "price", "status"]
+    },
+    "PlatformSettings": {
+      "title": "PlatformSettings",
+      "description": "Global admin controls, merchant payment VPAs, and feature switches",
+      "type": "object",
+      "properties": {
+        "merchantUpiId": { "type": "string" },
+        "minRecharge": { "type": "number" },
+        "minWithdrawal": { "type": "number" },
+        "isWithdrawalEnabled": { "type": "boolean" },
+        "isRechargeEnabled": { "type": "boolean" },
+        "isSpinEnabled": { "type": "boolean" },
+        "tier1Commission": { "type": "number" },
+        "tier2Commission": { "type": "number" },
+        "tier3Commission": { "type": "number" },
+        "dailyBonusBase": { "type": "number" }
+      }
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User document containing balances, VIP rank, and profile credentials"
+    },
+    "/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "Historical record of all wallet credits and debits"
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/InvestmentOrder" },
+      "description": "User investment contract orders and dividend generation"
+    },
+    "/settings/{docId}": {
+      "schema": { "$ref": "#/entities/PlatformSettings" },
+      "description": "Global platform configurations and feature controls"
+    }
+  }
+}

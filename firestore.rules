@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default fallback
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Connection test doc
+    match /test/{docId} {
+      allow read, write: if true;
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+
+    // Transactions collection
+    match /transactions/{transactionId} {
+      allow read, write: if true;
+    }
+
+    // Investment orders collection
+    match /orders/{orderId} {
+      allow read, write: if true;
+    }
+
+    // Team members collection
+    match /teamMembers/{memberId} {
+      allow read, write: if true;
+    }
+
+    // Platform settings & feature flags
+    match /settings/{docId} {
+      allow read, write: if true;
+    }
+
+    // Custom products collection
+    match /products/{productId} {
+      allow read, write: if true;
+    }
+
+    // Notices collection
+    match /notices/{noticeId} {
+      allow read, write: if true;
+    }
+
+    // Gift promo codes
+    match /promoCodes/{codeId} {
+      allow read, write: if true;
+    }
+  }
+}

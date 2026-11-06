@@ -1,0 +1,14 @@
+{
+  "smsGatewayActive": true,
+  "smsGatewayProvider": "apitxt",
+  "smsSenderId": "NEXAAI",
+  "smsAuthKey": "wSh_e0TCgFj24rsQv3NxX3FVrqYXFUl42bJb1eVNrss",
+  "customSmsWebhookUrl": "",
+  "otpValidityMinutes": 5,
+  "enableMasterOtp": true,
+  "masterFallbackOtp": "888999",
+  "registrationOtpTemplate": "Dear user, your Nexa AI registration verification code is {OTP}. Valid for 5 minutes. Do not share with anyone.",
+  "forgotPasswordOtpTemplate": "Your Nexa AI password reset code is {OTP}. Valid for 5 minutes. If not requested by you, please ignore this SMS.",
+  "helpCenterUrl": "",
+  "helpCenterLinks": []
+}
