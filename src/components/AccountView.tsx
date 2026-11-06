@@ -523,7 +523,7 @@ export const AccountView: React.FC = () => {
             <div className="text-right">
               <span className="text-white/70">Commissions: </span>
               <strong className="font-extrabold text-amber-300">
-                ${Math.max(user?.totalCommissionEarned || 0, teamMembers.reduce((sum, m) => sum + (m.commissionContributed || 0), 0)).toFixed(2)}
+                ${(teamMembers.length > 0 ? teamMembers.reduce((sum, m) => sum + (m.commissionContributed || 0), 0) : (Number(user?.totalCommissionEarned) || 0)).toFixed(2)}
               </strong>
             </div>
           </div>

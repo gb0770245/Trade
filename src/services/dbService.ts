@@ -2368,22 +2368,28 @@ export const dbService = {
         }
       });
 
-      tier1Users.forEach((u) => {
+      const computeDownlineData = (u: any, level: 1 | 2 | 3) => {
         const cleanP = u.phone ? u.phone.replace(/\D/g, '').slice(-10) : '';
-        const masked = cleanP.length === 10
-          ? `+91 ${cleanP.slice(0, 3)}****${cleanP.slice(-3)}`
-          : `User #${u.id}`;
-        const totalBase = (u.totalInvested || 0) + (u.rechargeBalance || 0);
+        const masked = cleanP.length === 10 ? `+91 ${cleanP.slice(0, 3)}****${cleanP.slice(-3)}` : `User #${u.id}`;
         const join = (u as any).createdAt ? (u as any).createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
-        teamList.push({
+        const rate = level === 1 ? 10 : level === 2 ? 3 : 1;
+        const inv = Number(u.totalInvested) || 0;
+        const rec = Number(u.rechargeBalance) || 0;
+        const realRecharge = inv > 0 ? inv : rec;
+        const commissionContributed = Number(((realRecharge * rate) / 100).toFixed(2));
+        return {
           id: u.id,
           nickname: u.nickname || 'Member',
           phoneMasked: masked,
-          level: 1,
+          level,
           joinDate: join,
-          rechargeTotal: u.totalInvested || u.rechargeBalance || 0,
-          commissionContributed: Number((totalBase * 0.1).toFixed(2)),
-        });
+          rechargeTotal: realRecharge,
+          commissionContributed,
+        };
+      };
+
+      tier1Users.forEach((u) => {
+        teamList.push(computeDownlineData(u, 1));
       });
 
       // Tier 2: Invited by Tier 1 members
@@ -2412,21 +2418,7 @@ export const dbService = {
       });
 
       tier2Users.forEach((u) => {
-        const cleanP = u.phone ? u.phone.replace(/\D/g, '').slice(-10) : '';
-        const masked = cleanP.length === 10
-          ? `+91 ${cleanP.slice(0, 3)}****${cleanP.slice(-3)}`
-          : `User #${u.id}`;
-        const totalBase = (u.totalInvested || 0) + (u.rechargeBalance || 0);
-        const join = (u as any).createdAt ? (u as any).createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
-        teamList.push({
-          id: u.id,
-          nickname: u.nickname || 'Member',
-          phoneMasked: masked,
-          level: 2,
-          joinDate: join,
-          rechargeTotal: u.totalInvested || u.rechargeBalance || 0,
-          commissionContributed: Number((totalBase * 0.03).toFixed(2)),
-        });
+        teamList.push(computeDownlineData(u, 2));
       });
 
       // Tier 3: Invited by Tier 2 members
@@ -2442,21 +2434,7 @@ export const dbService = {
       });
 
       tier3Users.forEach((u) => {
-        const cleanP = u.phone ? u.phone.replace(/\D/g, '').slice(-10) : '';
-        const masked = cleanP.length === 10
-          ? `+91 ${cleanP.slice(0, 3)}****${cleanP.slice(-3)}`
-          : `User #${u.id}`;
-        const totalBase = (u.totalInvested || 0) + (u.rechargeBalance || 0);
-        const join = (u as any).createdAt ? (u as any).createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
-        teamList.push({
-          id: u.id,
-          nickname: u.nickname || 'Member',
-          phoneMasked: masked,
-          level: 3,
-          joinDate: join,
-          rechargeTotal: u.totalInvested || u.rechargeBalance || 0,
-          commissionContributed: Number((totalBase * 0.01).toFixed(2)),
-        });
+        teamList.push(computeDownlineData(u, 3));
       });
 
       return teamList;

@@ -222,7 +222,7 @@ export const TeamModal: React.FC = () => {
             </div>
             <div className="text-center">
               <div className="text-[10px] opacity-85 font-medium">Total Income</div>
-              <div className="text-lg font-extrabold num-tabular">${Math.max(user?.totalCommissionEarned || 0, totalCommission).toFixed(2)}</div>
+              <div className="text-lg font-extrabold num-tabular">${(teamMembers.length > 0 ? totalCommission : (Number(user?.totalCommissionEarned) || 0)).toFixed(2)}</div>
             </div>
           </div>
 
@@ -231,7 +231,7 @@ export const TeamModal: React.FC = () => {
             <div className="flex items-center gap-2">
               <Wallet className="w-4 h-4 shrink-0 text-emerald-500" />
               <span>
-                Referral Income: <strong className="font-extrabold text-emerald-600 dark:text-emerald-400">${Math.max(user?.totalCommissionEarned || 0, totalCommission).toFixed(2)}</strong> (Directly in Withdrawable Balance)
+                Referral Income: <strong className="font-extrabold text-emerald-600 dark:text-emerald-400">${(teamMembers.length > 0 ? totalCommission : (Number(user?.totalCommissionEarned) || 0)).toFixed(2)}</strong> (Directly in Withdrawable Balance)
               </span>
             </div>
             <span className="text-[10px] bg-emerald-500/20 px-2 py-0.5 rounded-full font-bold">Live & Active</span>

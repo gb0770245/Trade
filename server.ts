@@ -1550,20 +1550,82 @@ app.get('/api/referral/team/:userId', async (req, res) => {
       }
     });
 
-    tier1Users.forEach((u) => {
+    const allTxs = loadServerTransactions();
+    const allOrders = loadServerOrders();
+
+    const computeDownlineData = (u: any, level: 1 | 2 | 3) => {
       const cleanP = u.phone ? u.phone.replace(/\D/g, '').slice(-10) : '';
       const masked = cleanP.length === 10 ? `+91 ${cleanP.slice(0, 3)}****${cleanP.slice(-3)}` : `User #${u.id}`;
-      const totalBase = (u.totalInvested || 0) + (u.rechargeBalance || 0);
       const join = u.createdAt ? u.createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
-      teamList.push({
+      const rate = level === 1 ? 10 : level === 2 ? 3 : 1;
+      const uId = String(u.id).trim();
+
+      // 1. Calculate REAL actual recharge / investment:
+      const uRechargeTxs = allTxs.filter((t) =>
+        (String(t.userId).trim() === uId || (cleanP && t.phone && String(t.phone).replace(/\D/g, '').slice(-10) === cleanP)) &&
+        t.type === 'recharge' &&
+        t.status === 'completed' &&
+        Number(t.amount) > 0
+      );
+      const sumRechargeTxs = uRechargeTxs.reduce((sum, t) => sum + Number(t.amount || 0), 0);
+
+      const uOrders = allOrders.filter((o) =>
+        (String(o.userId).trim() === uId || (cleanP && o.userPhone && String(o.userPhone).replace(/\D/g, '').slice(-10) === cleanP)) &&
+        o.status !== 'cancelled' &&
+        o.status !== 'rejected'
+      );
+      const sumOrders = uOrders.reduce((sum, o) => sum + Number(o.price || 0), 0);
+
+      let realRecharge = 0;
+      if (sumRechargeTxs > 0) {
+        realRecharge = sumRechargeTxs;
+      } else if (sumOrders > 0) {
+        realRecharge = sumOrders;
+      } else {
+        const inv = Number(u.totalInvested) || 0;
+        const rec = Number(u.rechargeBalance) || 0;
+        realRecharge = inv > 0 ? inv : rec;
+      }
+      realRecharge = Number(realRecharge.toFixed(2));
+
+      // 2. Calculate EXACT REAL commission this upliner (userId) received from this downline:
+      const uplinerCommTxs = allTxs.filter((t) => {
+        if (String(t.userId).trim() !== String(userId).trim() || t.type !== 'commission') return false;
+        const ref = String(t.referenceNo || '');
+        const title = String(t.title || '').toLowerCase();
+        const uNick = String(u.nickname || '').trim().toLowerCase();
+
+        if (ref.includes(uId) || (cleanP && ref.includes(cleanP))) return true;
+        if ((t as any).downlineUserId && String((t as any).downlineUserId).trim() === uId) return true;
+        if (cleanP && cleanP.length >= 10 && title.includes(cleanP)) return true;
+        if (uNick && uNick.length >= 3 && title.includes(uNick)) return true;
+        if (title.includes(`from ${uId}`) || title.includes(`user #${uId}`)) return true;
+        if (uOrders.some((o) => ref.includes(String(o.id)))) return true;
+        return false;
+      });
+
+      const actualEarnedFromTxs = uplinerCommTxs.reduce((sum, t) => sum + Number(t.amount || 0), 0);
+
+      let commissionContributed = 0;
+      if (actualEarnedFromTxs > 0) {
+        commissionContributed = Number(actualEarnedFromTxs.toFixed(2));
+      } else if (realRecharge > 0) {
+        commissionContributed = Number(((realRecharge * rate) / 100).toFixed(2));
+      }
+
+      return {
         id: u.id,
         nickname: u.nickname || 'Member',
         phoneMasked: masked,
-        level: 1,
+        level,
         joinDate: join,
-        rechargeTotal: u.totalInvested || u.rechargeBalance || 0,
-        commissionContributed: Number((totalBase * 0.1).toFixed(2)),
-      });
+        rechargeTotal: realRecharge,
+        commissionContributed,
+      };
+    };
+
+    tier1Users.forEach((u) => {
+      teamList.push(computeDownlineData(u, 1));
     });
 
     // Tier 2: Invited by Tier 1 members
@@ -1592,19 +1654,7 @@ app.get('/api/referral/team/:userId', async (req, res) => {
     });
 
     tier2Users.forEach((u) => {
-      const cleanP = u.phone ? u.phone.replace(/\D/g, '').slice(-10) : '';
-      const masked = cleanP.length === 10 ? `+91 ${cleanP.slice(0, 3)}****${cleanP.slice(-3)}` : `User #${u.id}`;
-      const totalBase = (u.totalInvested || 0) + (u.rechargeBalance || 0);
-      const join = u.createdAt ? u.createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
-      teamList.push({
-        id: u.id,
-        nickname: u.nickname || 'Member',
-        phoneMasked: masked,
-        level: 2,
-        joinDate: join,
-        rechargeTotal: u.totalInvested || u.rechargeBalance || 0,
-        commissionContributed: Number((totalBase * 0.03).toFixed(2)),
-      });
+      teamList.push(computeDownlineData(u, 2));
     });
 
     // Tier 3: Invited by Tier 2 members
@@ -1620,19 +1670,7 @@ app.get('/api/referral/team/:userId', async (req, res) => {
     });
 
     tier3Users.forEach((u) => {
-      const cleanP = u.phone ? u.phone.replace(/\D/g, '').slice(-10) : '';
-      const masked = cleanP.length === 10 ? `+91 ${cleanP.slice(0, 3)}****${cleanP.slice(-3)}` : `User #${u.id}`;
-      const totalBase = (u.totalInvested || 0) + (u.rechargeBalance || 0);
-      const join = u.createdAt ? u.createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
-      teamList.push({
-        id: u.id,
-        nickname: u.nickname || 'Member',
-        phoneMasked: masked,
-        level: 3,
-        joinDate: join,
-        rechargeTotal: u.totalInvested || u.rechargeBalance || 0,
-        commissionContributed: Number((totalBase * 0.01).toFixed(2)),
-      });
+      teamList.push(computeDownlineData(u, 3));
     });
 
     return res.json({ success: true, count: teamList.length, members: teamList });
@@ -2024,22 +2062,25 @@ export async function reconcileAllReferralStatsServer(targetUserId?: string): Pr
       });
 
       // Compute Total Referral Commission Contributed
+      const getRealBase = (u: any) => {
+        const inv = Number(u.totalInvested) || 0;
+        const rec = Number(u.rechargeBalance) || 0;
+        return inv > 0 ? inv : rec;
+      };
+
       let tier1Comm = 0;
       tier1Users.forEach((u) => {
-        const base = (Number(u.totalInvested) || 0) + (Number(u.rechargeBalance) || 0);
-        tier1Comm += base * 0.10;
+        tier1Comm += getRealBase(u) * 0.10;
       });
 
       let tier2Comm = 0;
       tier2Users.forEach((u) => {
-        const base = (Number(u.totalInvested) || 0) + (Number(u.rechargeBalance) || 0);
-        tier2Comm += base * 0.03;
+        tier2Comm += getRealBase(u) * 0.03;
       });
 
       let tier3Comm = 0;
       tier3Users.forEach((u) => {
-        const base = (Number(u.totalInvested) || 0) + (Number(u.rechargeBalance) || 0);
-        tier3Comm += base * 0.01;
+        tier3Comm += getRealBase(u) * 0.01;
       });
 
       const totalCalculatedCommission = Number((tier1Comm + tier2Comm + tier3Comm).toFixed(2));
