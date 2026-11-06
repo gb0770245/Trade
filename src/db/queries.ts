@@ -383,6 +383,16 @@ export async function deleteOrderFromDb(orderId: string | number) {
   }
 }
 
+// Purge all orders from Cloud SQL PostgreSQL
+export async function purgeAllOrdersFromDb(): Promise<void> {
+  if (!isSqlConfigured) return;
+  try {
+    await db.delete(investmentOrders);
+  } catch (err) {
+    console.warn('Error purging orders from DB:', err);
+  }
+}
+
 // Fetch all investment orders from Cloud SQL
 export async function getAllDbOrders() {
   if (!isSqlConfigured) return [];

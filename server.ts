@@ -32,14 +32,17 @@ import {
   getAllDbNotices,
   upsertDbNotice,
   deleteDbNotice,
+  purgeAllOrdersFromDb,
   initPostgresSchema,
 } from './src/db/queries.ts';
 import {
+  getSqliteDb,
   upsertOrderInSql,
   getAllOrdersFromSql,
   getOrdersForUserFromSql,
   deleteOrderFromSql,
   deleteOrdersForUserInSql,
+  purgeAllOrdersFromSql,
   loadDeletedOrders,
   upsertProductInSql,
   getAllProductsFromSql,
@@ -59,6 +62,7 @@ import {
   updateUserReferralsInSql,
   updateUserWalletBalanceInSql,
 } from './src/db/sqliteUsers.ts';
+import { isSqlConfigured, createPool } from './src/db/index.ts';
 
 dotenv.config();
 
@@ -2617,42 +2621,14 @@ app.delete('/api/promos/:id', async (req, res) => {
 // ==========================================
 const ORDERS_BACKUP_PATH = path.resolve(process.cwd(), 'src/data/orders_backup.json');
 
-// Initialize & sync existing disk orders into SQLite SQL database on boot
+// Initialize SQLite orders table without any demo seeding
 function initAndSyncSqlOrders(): void {
   try {
-    let diskOrders: any[] = [];
-    if (fs.existsSync(ORDERS_BACKUP_PATH)) {
-      try {
-        const parsed = JSON.parse(fs.readFileSync(ORDERS_BACKUP_PATH, 'utf-8'));
-        if (Array.isArray(parsed)) diskOrders = parsed;
-      } catch {}
-    }
-
-    // Upsert any disk backup orders into SQLite database
-    for (const ord of diskOrders) {
-      if (ord && ord.id) {
-        try {
-          upsertOrderInSql(ord);
-        } catch (e) {
-          console.warn('Initial SQLite sync error for order:', ord.id, e);
-        }
-      }
-    }
-
-    // Sync all canonical real user orders for registered platform members
-    try {
-      const allUsers = getCachedUsersBackup();
-      syncAllRealUserOrders(allUsers);
-    } catch (e) {
-      console.warn('Error running syncAllRealUserOrders on boot:', e);
-    }
-
-    // Now read back from SQLite and ensure disk backup has everything
+    getSqliteDb();
+    // Strictly load real live orders without any demo seed
     const allSqlOrders = getAllOrdersFromSql();
-    if (allSqlOrders.length > 0) {
-      fs.writeFileSync(ORDERS_BACKUP_PATH, JSON.stringify(allSqlOrders, null, 2), 'utf-8');
-      console.log(`[SQL Database] ${allSqlOrders.length} investment orders loaded and verified permanent in SQLite database.`);
-    }
+    saveServerOrders(allSqlOrders);
+    console.log(`[SQL Database] ${allSqlOrders.length} investment orders active in SQLite database.`);
   } catch (err) {
     console.warn('[SQL Database] Order init sync warning:', err);
   }
@@ -3031,6 +3007,19 @@ app.delete('/api/orders/:id', async (req, res) => {
 
     console.log(`[Admin Delete] Order ${cleanId} permanently deleted from SQLite SQL, Cloud SQL, and disk.`);
     return res.json({ success: true, message: 'Order removed permanently from SQL database and backup' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Purge all orders permanently (Wipe demo orders from SQLite, PostgreSQL, and disk)
+app.post(['/api/admin/orders/purge-all-orders', '/api/orders/purge-all'], async (req, res) => {
+  try {
+    purgeAllOrdersFromSql();
+    await purgeAllOrdersFromDb();
+    fs.writeFileSync(ORDERS_BACKUP_PATH, JSON.stringify([], null, 2), 'utf-8');
+    console.log('[Admin Orders] All orders completely purged from SQLite, PostgreSQL, and disk.');
+    return res.json({ success: true, message: 'All demo and old orders purged permanently from all databases and disk.' });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -4432,6 +4421,64 @@ app.post('/api/razorpay/webhook', async (req: any, res) => {
   }
 });
 
+// Live PostgreSQL Database Inspector Endpoint: Check tables, record counts, and saved data
+app.get(['/api/admin/sql-inspector', '/api/sql-status', '/api/db-status'], async (req, res) => {
+  try {
+    const isConnected = isSqlConfigured;
+    if (!isConnected) {
+      return res.json({
+        success: false,
+        connected: false,
+        message: 'PostgreSQL database is NOT configured or DATABASE_URL is missing.',
+        fallback: 'Running on local SQLite database & JSON backups',
+      });
+    }
+
+    const pool = createPool();
+    const [
+      usersCountRes,
+      ordersCountRes,
+      txCountRes,
+      settingsCountRes,
+      productsCountRes,
+      recentUsersRes,
+      recentOrdersRes,
+      settingsRes,
+    ] = await Promise.all([
+      pool.query('SELECT COUNT(*)::int as count FROM users').catch(() => ({ rows: [{ count: 0 }] })),
+      pool.query('SELECT COUNT(*)::int as count FROM investment_orders').catch(() => ({ rows: [{ count: 0 }] })),
+      pool.query('SELECT COUNT(*)::int as count FROM transactions').catch(() => ({ rows: [{ count: 0 }] })),
+      pool.query('SELECT COUNT(*)::int as count FROM platform_settings').catch(() => ({ rows: [{ count: 0 }] })),
+      pool.query('SELECT COUNT(*)::int as count FROM products').catch(() => ({ rows: [{ count: 0 }] })),
+      pool.query('SELECT uid, phone, nickname, recharge_balance, withdrawal_balance, vip_level, role FROM users ORDER BY id DESC LIMIT 15').catch(() => ({ rows: [] })),
+      pool.query('SELECT id, user_id, product_name, price, daily_earnings, status, purchase_date FROM investment_orders ORDER BY purchase_timestamp DESC LIMIT 15').catch(() => ({ rows: [] })),
+      pool.query('SELECT key, value FROM platform_settings').catch(() => ({ rows: [] })),
+    ]);
+
+    return res.json({
+      success: true,
+      connected: true,
+      databaseType: 'PostgreSQL (Render Cloud Database)',
+      status: 'Live & Active',
+      tableCounts: {
+        users: usersCountRes.rows[0]?.count ?? 0,
+        investment_orders: ordersCountRes.rows[0]?.count ?? 0,
+        transactions: txCountRes.rows[0]?.count ?? 0,
+        platform_settings: settingsCountRes.rows[0]?.count ?? 0,
+        products: productsCountRes.rows[0]?.count ?? 0,
+      },
+      savedSettings: settingsRes.rows.reduce((acc: any, row: any) => {
+        acc[row.key] = row.value;
+        return acc;
+      }, {}),
+      recentUsers: recentUsersRes.rows,
+      recentOrders: recentOrdersRes.rows,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Razorpay Underwriting & E-Commerce Compliance Discovery Endpoints
 app.get('/robots.txt', (req, res) => {
   res.type('text/plain').send(`User-agent: *\nAllow: /\nSitemap: https://nexaai-epzk.onrender.com/sitemap.xml\n`);
@@ -4615,18 +4662,10 @@ async function startServer() {
           console.log(`[Cloud SQL] Preserved & synced ${formatted.length} live persistent users from database.`);
         }
 
-        // 2. Orders: Cloud SQL is the persistent source of truth
+        // 2. Orders: Cloud SQL is the persistent source of truth (Strictly live orders, no demo seeding)
         const sqlOrders = await getAllDbOrders();
-        if (sqlOrders.length === 0) {
-          const diskOrders = loadServerOrders();
-          console.log(`[Cloud SQL] Seeding ${diskOrders.length} orders into Cloud SQL PostgreSQL...`);
-          for (const o of diskOrders) {
-            await upsertDbOrder(o);
-          }
-        } else {
-          saveServerOrders(sqlOrders);
-          console.log(`[Cloud SQL] Preserved & synced ${sqlOrders.length} live persistent orders from database.`);
-        }
+        saveServerOrders(sqlOrders);
+        console.log(`[Cloud SQL] Preserved & synced ${sqlOrders.length} live persistent orders from database.`);
 
         // 3. Promo Codes: Cloud SQL is the persistent source of truth
         const sqlPromos = await getAllDbPromoCodes();

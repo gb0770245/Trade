@@ -752,6 +752,31 @@ export const AdminPanel: React.FC = () => {
   const [copiedWebhookUrl, setCopiedWebhookUrl] = useState(false);
   const [copiedWebhookSecret, setCopiedWebhookSecret] = useState(false);
 
+  // SQL Inspector states
+  const [sqlDbInfo, setSqlDbInfo] = useState<any>(null);
+  const [isLoadingSqlDb, setIsLoadingSqlDb] = useState(false);
+
+  const checkSqlDbStatus = async () => {
+    setIsLoadingSqlDb(true);
+    try {
+      const res = await fetch('/api/admin/sql-inspector');
+      if (res.ok) {
+        const data = await res.json();
+        setSqlDbInfo(data);
+      }
+    } catch (e) {
+      console.warn('Could not inspect SQL DB:', e);
+    } finally {
+      setIsLoadingSqlDb(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'settings') {
+      checkSqlDbStatus();
+    }
+  }, [activeTab]);
+
   const handleTestWebhookPing = async () => {
     setIsTestingWebhook(true);
     setWebhookTestStatus(null);
@@ -2369,17 +2394,41 @@ export const AdminPanel: React.FC = () => {
                   </p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  loadAdminOrders();
-                  showToast('Live orders reloaded from SQL database!', 'success');
-                }}
-                className="px-3 py-1.5 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-emerald-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-all shrink-0"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Sync SQL</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    loadAdminOrders();
+                    showToast('Live orders reloaded from SQL database!', 'success');
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-emerald-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-all shrink-0"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Sync SQL</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (window.confirm('क्या आप सभी पुराने/डेमो ऑर्डर्स को डेटाबेस और सर्वर से पूरी तरह साफ़ करना चाहते हैं? इसके बाद केवल असली यूज़र्स द्वारा खरीदे गए असली ऑर्डर्स ही सेव रहेंगे।')) {
+                      try {
+                        const res = await fetch('/api/admin/orders/purge-all-orders', { method: 'POST' });
+                        if (res.ok) {
+                          await loadAdminOrders();
+                          showToast('सभी डेमो ऑर्डर्स डेटाबेस और सर्वर से हमेशा के लिए हटा दिए गए!', 'success');
+                        }
+                      } catch {
+                        showToast('डेमो ऑर्डर्स साफ़ करने में त्रुटि आई', 'error');
+                      }
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-rose-600/20 hover:bg-rose-600/40 border border-rose-500/30 text-rose-300 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-all shrink-0"
+                  title="Purge all demo orders"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Purge Demo Orders</span>
+                </button>
+              </div>
             </div>
 
             {/* Top Metrics Summary Cards */}
@@ -3337,6 +3386,109 @@ export const AdminPanel: React.FC = () => {
         {/* ========================================================= */}
         {activeTab === 'settings' && (
           <div className="space-y-6">
+            {/* PostgreSQL Cloud Database Live Status & Inspector */}
+            <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950/40 border border-indigo-700/40 shadow-xl space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 flex items-center justify-center font-bold shadow-md">
+                    <Database className="w-5 h-5 text-indigo-400" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-bold text-sm text-white">Render PostgreSQL Cloud Database</h3>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                        sqlDbInfo?.connected
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                          : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      }`}>
+                        {sqlDbInfo?.connected ? 'Live & Connected' : 'Local Backup / SQLite Fallback'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      Real-time database tables, saved records & persistent storage inspection
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={checkSqlDbStatus}
+                    disabled={isLoadingSqlDb}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 text-xs font-semibold transition cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingSqlDb ? 'animate-spin' : ''}`} />
+                    {isLoadingSqlDb ? 'Checking...' : 'Refresh Status'}
+                  </button>
+
+                  <a
+                    href="/api/admin/sql-inspector"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold transition"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Open Raw JSON
+                  </a>
+                </div>
+              </div>
+
+              {/* Table counts grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+                <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 text-center">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Users Table</div>
+                  <div className="text-lg font-black text-indigo-300 mt-0.5">
+                    {sqlDbInfo?.tableCounts?.users ?? adminUsers.length}
+                  </div>
+                  <div className="text-[9px] text-emerald-400 font-medium">Registered Members</div>
+                </div>
+
+                <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 text-center">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Orders Table</div>
+                  <div className="text-lg font-black text-emerald-400 mt-0.5">
+                    {sqlDbInfo?.tableCounts?.investment_orders ?? adminOrders.length}
+                  </div>
+                  <div className="text-[9px] text-slate-400 font-medium">Active Contracts</div>
+                </div>
+
+                <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 text-center">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Transactions</div>
+                  <div className="text-lg font-black text-amber-300 mt-0.5">
+                    {sqlDbInfo?.tableCounts?.transactions ?? adminTransactions.length}
+                  </div>
+                  <div className="text-[9px] text-slate-400 font-medium">Recharge / Withdraw</div>
+                </div>
+
+                <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 text-center">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Settings Table</div>
+                  <div className="text-lg font-black text-blue-300 mt-0.5">
+                    {sqlDbInfo?.tableCounts?.platform_settings ?? 1}
+                  </div>
+                  <div className="text-[9px] text-blue-400 font-medium">UPI / Config Saved</div>
+                </div>
+
+                <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 text-center col-span-2 sm:col-span-1">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Products</div>
+                  <div className="text-lg font-black text-purple-300 mt-0.5">
+                    {sqlDbInfo?.tableCounts?.products ?? products.length}
+                  </div>
+                  <div className="text-[9px] text-purple-400 font-medium">Plans & Store</div>
+                </div>
+              </div>
+
+              {sqlDbInfo?.connected && (
+                <div className="text-xs text-slate-400 bg-slate-950/40 p-2.5 rounded-lg border border-slate-800/80 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-emerald-400 font-medium">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    All data in these tables is permanent and will NEVER be lost on restart.
+                  </span>
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    PostgreSQL 18 • Render Singapore
+                  </span>
+                </div>
+              )}
+            </div>
+
             {/* Help Center Direct Redirect Link Control */}
             {renderHelpCenterManagerCard()}
 
