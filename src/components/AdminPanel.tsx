@@ -4082,7 +4082,7 @@ export const AdminPanel: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => {
-                      const domain = typeof window !== 'undefined' ? window.location.origin : 'https://nexaai-epzk.onrender.com';
+                      const domain = typeof window !== 'undefined' ? window.location.origin : 'https://nexatrad.site';
                       const details = `=== RAZORPAY MERCHANT COMPLIANCE DETAILS ===
 Business Category: Consumer Electronics & Computer Hardware (MCC 5732)
 Business Model: Direct-to-Consumer (D2C) E-Commerce Retail Store

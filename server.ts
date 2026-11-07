@@ -4492,19 +4492,24 @@ app.get(['/api/admin/sql-inspector', '/api/sql-status', '/api/db-status'], async
 
 // Razorpay Underwriting & E-Commerce Compliance Discovery Endpoints
 app.get('/robots.txt', (req, res) => {
-  res.type('text/plain').send(`User-agent: *\nAllow: /\nSitemap: https://nexaai-epzk.onrender.com/sitemap.xml\n`);
+  const host = req.get('host') || 'nexatrad.site';
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  res.type('text/plain').send(`User-agent: *\nAllow: /\nSitemap: ${protocol}://${host}/sitemap.xml\n`);
 });
 
 app.get('/sitemap.xml', (req, res) => {
+  const host = req.get('host') || 'nexatrad.site';
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  const baseUrl = `${protocol}://${host}`;
   res.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://nexaai-epzk.onrender.com/</loc><priority>1.0</priority></url>
-  <url><loc>https://nexaai-epzk.onrender.com/?view=store</loc><priority>0.9</priority></url>
-  <url><loc>https://nexaai-epzk.onrender.com/?policy=terms</loc><priority>0.8</priority></url>
-  <url><loc>https://nexaai-epzk.onrender.com/?policy=shipping</loc><priority>0.8</priority></url>
-  <url><loc>https://nexaai-epzk.onrender.com/?policy=refund</loc><priority>0.8</priority></url>
-  <url><loc>https://nexaai-epzk.onrender.com/?policy=privacy</loc><priority>0.8</priority></url>
-  <url><loc>https://nexaai-epzk.onrender.com/?policy=contact</loc><priority>0.8</priority></url>
+  <url><loc>${baseUrl}/</loc><priority>1.0</priority></url>
+  <url><loc>${baseUrl}/?view=store</loc><priority>0.9</priority></url>
+  <url><loc>${baseUrl}/?policy=terms</loc><priority>0.8</priority></url>
+  <url><loc>${baseUrl}/?policy=shipping</loc><priority>0.8</priority></url>
+  <url><loc>${baseUrl}/?policy=refund</loc><priority>0.8</priority></url>
+  <url><loc>${baseUrl}/?policy=privacy</loc><priority>0.8</priority></url>
+  <url><loc>${baseUrl}/?policy=contact</loc><priority>0.8</priority></url>
 </urlset>`);
 });
 
