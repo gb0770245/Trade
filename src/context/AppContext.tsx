@@ -1894,12 +1894,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: 'Insufficient withdrawal balance' };
       }
 
-      // Check anti-spam: if user submitted a withdrawal in the last 4 seconds, ignore duplicate
+      // Check if user already has a pending withdrawal request awaiting admin approval
+      const existingPending = transactions.find(
+        (t) => t.type === 'withdraw' && t.status === 'processing' && (t.userId === user.id || (user.phone && t.userId === user.phone))
+      );
+      if (existingPending) {
+        showToast('You already have a pending withdrawal under review. Please wait for admin approval.', 'error');
+        return { success: false, message: 'You already have a pending withdrawal request under review.' };
+      }
+
+      // Check anti-spam: if user submitted a withdrawal in the last 30 seconds, ignore duplicate
       const now = Date.now();
       const duplicateRecent = transactions.find(
-        (t) => t.type === 'withdraw' && t.userId === user.id && now - (t.createdAt || 0) < 4000
+        (t) => t.type === 'withdraw' && t.userId === user.id && now - (t.createdAt || 0) < 30000
       );
       if (duplicateRecent) {
+        showToast('Withdrawal request already received. Processing payout.', 'info');
         return { success: false, message: 'Withdrawal request already received. Processing...' };
       }
 
@@ -1929,7 +1939,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       const refNo = `WTH${Math.floor(10000000 + Math.random() * 90000000)}`;
       const newTx: Transaction = {
-        id: `tx-${Date.now()}`,
+        id: `tx-${now}`,
         userId: user.id,
         type: 'withdraw',
         amount,
@@ -1937,6 +1947,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         netAmount: netPayout,
         title: `Withdrawal: ${cleanBankDetails.accountHolder} (${cleanBankDetails.bankName})`,
         timestamp: new Date().toLocaleString(),
+        createdAt: now,
         status: 'processing',
         referenceNo: refNo,
         paymentMethod: `Bank IMPS: ${cleanBankDetails.accountNumber} • ${cleanBankDetails.ifscCode}`,
@@ -1952,7 +1963,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } finally {
       setTimeout(() => {
         isWithdrawalLockRef.current = false;
-      }, 2000);
+      }, 5000);
     }
   };
 

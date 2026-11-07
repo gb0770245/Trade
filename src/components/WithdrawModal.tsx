@@ -14,10 +14,16 @@ const POPULAR_BANKS = [
 ];
 
 export const WithdrawModal: React.FC = () => {
-  const { user, withdraw, closeModal, showToast, theme, platformSettings } = useApp();
+  const { user, withdraw, closeModal, showToast, theme, platformSettings, transactions } = useApp();
   const [amount, setAmount] = useState<string>('5.00');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = React.useRef(false);
+
+  // Check if user already has an active pending withdrawal
+  const pendingWithdrawal = transactions.find(
+    (t) => t.type === 'withdraw' && t.status === 'processing' && (t.userId === user?.id || (user?.phone && t.userId === user?.phone))
+  );
+  const hasPendingWithdrawal = Boolean(pendingWithdrawal);
 
   // Form states with fallback to existing user.bankDetails
   const [accountHolder, setAccountHolder] = useState(user?.bankDetails?.accountHolder || user?.nickname || '');
@@ -42,6 +48,11 @@ export const WithdrawModal: React.FC = () => {
   const handleWithdrawSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
+
+    if (hasPendingWithdrawal) {
+      showToast('आपकी एक निकासी अनुरोध पहले से प्रक्रियाधीन है। कृपया एडमिन द्वारा स्वीकृत होने तक प्रतीक्षा करें।', 'error');
+      return;
+    }
 
     if (isSubmittingRef.current || isSubmitting) {
       console.warn('Withdrawal submission already active. Ignoring double trigger.');
@@ -154,6 +165,19 @@ export const WithdrawModal: React.FC = () => {
               <div className="text-[11px] text-slate-400 mt-0.5">
                 {platformSettings?.withdrawalNotice ||
                   'Withdrawal service is currently undergoing scheduled audit. Please check back shortly.'}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Pending Withdrawal Notice Banner */}
+        {hasPendingWithdrawal && (
+          <div className="mt-3 p-3.5 rounded-2xl bg-amber-500/15 border border-amber-500/40 flex items-start gap-2.5 text-xs text-amber-200">
+            <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-bold text-amber-300">Previous Withdrawal Under Review (प्रक्रियाधीन है)</div>
+              <div className="text-[11px] text-slate-300 mt-0.5">
+                आपका ${Number(pendingWithdrawal?.amount || 0).toFixed(2)} का निकासी अनुरोध अभी एडमिन के पास जांच में है। एडमिन द्वारा इस भुगतान को स्वीकृत या अस्वीकृत करने के बाद ही आप नया निकासी अनुरोध लगा सकते हैं।
               </div>
             </div>
           </div>
@@ -355,13 +379,19 @@ export const WithdrawModal: React.FC = () => {
           {/* Submit Button */}
           <button
             type="submit"
-            disabled={isSubmitting || !isWithdrawAllowed}
-            className="w-full py-3.5 rounded-2xl font-bold text-white bg-gradient-to-r from-teal-600 via-emerald-600 to-teal-500 hover:from-teal-500 hover:to-emerald-500 active:scale-[0.99] transition-all flex items-center justify-center gap-2 shadow-xl shadow-teal-950/50 disabled:opacity-50 cursor-pointer"
+            disabled={isSubmitting || !isWithdrawAllowed || hasPendingWithdrawal}
+            className={`w-full py-3.5 rounded-2xl font-bold text-white transition-all flex items-center justify-center gap-2 shadow-xl ${
+              hasPendingWithdrawal
+                ? 'bg-slate-800 text-slate-400 border border-slate-700 cursor-not-allowed opacity-80'
+                : 'bg-gradient-to-r from-teal-600 via-emerald-600 to-teal-500 hover:from-teal-500 hover:to-emerald-500 active:scale-[0.99] shadow-teal-950/50 disabled:opacity-50 cursor-pointer'
+            }`}
           >
             {isSubmitting ? (
               <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
             ) : !isWithdrawAllowed ? (
               <span>Withdrawals Currently Paused by Admin</span>
+            ) : hasPendingWithdrawal ? (
+              <span>Previous Withdrawal Pending Approval (${Number(pendingWithdrawal?.amount || 0).toFixed(2)})</span>
             ) : (
               <>
                 <ArrowDownToLine className="w-4 h-4" />

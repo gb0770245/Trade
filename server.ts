@@ -33,6 +33,7 @@ import {
   upsertDbNotice,
   deleteDbNotice,
   purgeAllOrdersFromDb,
+  purgeAllTransactionsFromDb,
   resetAllUsersBalancesInDb,
   initPostgresSchema,
 } from './src/db/queries.ts';
@@ -3444,24 +3445,62 @@ function saveServerTransactions(txsList: any[]): void {
   }
 }
 
+// API Route: Purge all transactions permanently (Admin tool & fresh start)
+app.post(['/api/admin/transactions/purge-all', '/api/transactions/purge-all'], async (_req, res) => {
+  try {
+    await purgeAllTransactionsFromDb();
+    saveServerTransactions([]);
+    console.log('[Admin Transactions] All transaction history completely purged from PostgreSQL and disk.');
+    return res.json({ success: true, message: 'All transaction history purged permanently.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // API Route: Get all transactions (for Admin) from Cloud SQL & backup
 app.get(['/api/cloudsql/transactions', '/api/admin/transactions'], async (_req, res) => {
   try {
     const dbTxs = await getAllTransactionsFromDb();
     const backupTxs = loadServerTransactions();
 
-    // Merge and deduplicate by referenceNo or id
+    // Map by referenceNo or ID
     const map = new Map<string, any>();
     for (const tx of backupTxs) {
-      const key = String(tx.referenceNo || tx.id || ('tx-' + tx.createdAt));
+      if (!tx) continue;
+      const key = String(tx.referenceNo || tx.id || ('tx-' + (tx.createdAt || Date.now())));
       map.set(key, tx);
     }
     for (const tx of dbTxs) {
-      const key = String(tx.referenceNo || tx.id || ('tx-' + tx.createdAt));
+      if (!tx) continue;
+      const key = String(tx.referenceNo || tx.id || ('tx-' + (tx.createdAt || Date.now())));
       map.set(key, { ...map.get(key), ...tx });
     }
 
-    const merged = Array.from(map.values()).sort((a: any, b: any) => {
+    // Secondary strict deduplication for withdrawals: prevent admin from seeing duplicate entries for the same request
+    const withdrawMap = new Map<string, any>();
+    const otherTxs: any[] = [];
+
+    for (const tx of map.values()) {
+      if (tx.type === 'withdraw') {
+        const uId = String(tx.userId || '').trim();
+        const amt = Number(tx.amount || 0).toFixed(2);
+        const ref = String(tx.referenceNo || '').trim();
+        // 45-second bucket for same user + amount + status
+        const timeBucket = Math.floor((Number(tx.createdAt) || Date.now()) / 45000);
+        const dedupeKey = ref || `${uId}_${amt}_${tx.status || 'processing'}_${timeBucket}`;
+
+        if (withdrawMap.has(dedupeKey)) {
+          const prev = withdrawMap.get(dedupeKey);
+          withdrawMap.set(dedupeKey, { ...prev, ...tx });
+        } else {
+          withdrawMap.set(dedupeKey, tx);
+        }
+      } else {
+        otherTxs.push(tx);
+      }
+    }
+
+    const merged = [...otherTxs, ...withdrawMap.values()].sort((a: any, b: any) => {
       const timeA = Number(a.createdAt) || 0;
       const timeB = Number(b.createdAt) || 0;
       return timeB - timeA;
@@ -3485,11 +3524,13 @@ app.get('/api/cloudsql/transactions/:userId', async (req, res) => {
 
     const map = new Map<string, any>();
     for (const tx of backupTxs) {
-      const key = String(tx.referenceNo || tx.id || ('tx-' + tx.createdAt));
+      if (!tx) continue;
+      const key = String(tx.referenceNo || tx.id || ('tx-' + (tx.createdAt || Date.now())));
       map.set(key, tx);
     }
     for (const tx of dbTxs) {
-      const key = String(tx.referenceNo || tx.id || ('tx-' + tx.createdAt));
+      if (!tx) continue;
+      const key = String(tx.referenceNo || tx.id || ('tx-' + (tx.createdAt || Date.now())));
       map.set(key, { ...map.get(key), ...tx });
     }
 
@@ -3505,7 +3546,7 @@ app.get('/api/cloudsql/transactions/:userId', async (req, res) => {
   }
 });
 
-// API Route: Create transaction (saved to Cloud SQL + file backup)
+// API Route: Create transaction (saved to Cloud SQL + file backup with bulletproof anti-duplicate guards)
 app.post('/api/cloudsql/transactions', async (req, res) => {
   try {
     const tx = req.body;
@@ -3513,19 +3554,44 @@ app.post('/api/cloudsql/transactions', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing required transaction fields' });
     }
 
-    // Strict Anti-Duplicate Check for withdrawals
-    if (tx.type === 'withdraw' && tx.userId) {
+    const cleanUserId = String(tx.userId).trim();
+
+    // Strict Anti-Duplicate Check for withdrawals:
+    // 1. Prevent multiple pending withdrawals for the same user
+    // 2. Prevent rapid double-clicks (within 30 seconds)
+    if (tx.type === 'withdraw' && cleanUserId) {
       const backupTxs = loadServerTransactions();
-      const existingDuplicate = backupTxs.find(
+
+      // Check if user already has an active pending/processing withdrawal
+      const existingPending = backupTxs.find(
         (t) =>
           t.type === 'withdraw' &&
-          String(t.userId).trim() === String(tx.userId).trim() &&
-          ((tx.referenceNo && t.referenceNo === tx.referenceNo) ||
-            (Math.abs(Number(t.amount) - Number(tx.amount)) < 0.001 &&
-              Date.now() - (Number(t.createdAt) || 0) < 4000))
+          String(t.userId).trim() === cleanUserId &&
+          t.status === 'processing'
       );
-      if (existingDuplicate) {
-        return res.json({ success: true, transaction: existingDuplicate, message: 'Existing withdrawal returned' });
+      if (existingPending) {
+        // If it matches the same reference, return safely
+        if (tx.referenceNo && existingPending.referenceNo === tx.referenceNo) {
+          return res.json({ success: true, transaction: existingPending, message: 'Existing withdrawal returned' });
+        }
+        // Block second withdrawal while first is still pending
+        return res.status(400).json({
+          success: false,
+          error: 'A withdrawal request is already pending for your account. Please wait for administrator payout before requesting another.',
+        });
+      }
+
+      // Check for rapid identical submissions within 30 seconds
+      const existingRecent = backupTxs.find(
+        (t) =>
+          t.type === 'withdraw' &&
+          String(t.userId).trim() === cleanUserId &&
+          (t.referenceNo === tx.referenceNo ||
+            (Math.abs(Number(t.amount) - Number(tx.amount)) < 0.001 &&
+              Date.now() - (Number(t.createdAt) || 0) < 30000))
+      );
+      if (existingRecent) {
+        return res.json({ success: true, transaction: existingRecent, message: 'Existing withdrawal returned (anti-duplicate)' });
       }
     }
 
@@ -3539,7 +3605,7 @@ app.post('/api/cloudsql/transactions', async (req, res) => {
       ...tx,
       id: tx.id || (createdInDb ? String(createdInDb.id) : refKey),
       createdAt: tx.createdAt || Date.now(),
-      status: tx.status || 'completed',
+      status: tx.status || (tx.type === 'withdraw' ? 'processing' : 'completed'),
       referenceNo: tx.referenceNo || refKey,
     };
 
@@ -4653,6 +4719,16 @@ async function startServer() {
           purgeAllOrdersFromSql();
           try {
             fs.writeFileSync(ordersPurgeFile, new Date().toISOString(), 'utf-8');
+          } catch {}
+        }
+
+        const txsPurgeFile = path.resolve(process.cwd(), 'src/data/txs_purged_v1.done');
+        if (!fs.existsSync(txsPurgeFile)) {
+          console.log('[Cloud SQL] Applying one-time purge of all transaction history across PostgreSQL & disk...');
+          await purgeAllTransactionsFromDb();
+          saveServerTransactions([]);
+          try {
+            fs.writeFileSync(txsPurgeFile, new Date().toISOString(), 'utf-8');
           } catch {}
         }
 

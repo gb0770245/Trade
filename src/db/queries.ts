@@ -393,6 +393,17 @@ export async function purgeAllOrdersFromDb(): Promise<void> {
   }
 }
 
+// Purge all transactions from Cloud SQL PostgreSQL
+export async function purgeAllTransactionsFromDb(): Promise<void> {
+  if (!isSqlConfigured) return;
+  try {
+    await db.delete(transactions);
+    console.log('[PostgreSQL] Successfully purged all transactions from DB');
+  } catch (err) {
+    console.warn('Error purging transactions from DB:', err);
+  }
+}
+
 // Reset all users balances to 0 in Cloud SQL PostgreSQL
 export async function resetAllUsersBalancesInDb(): Promise<void> {
   if (!isSqlConfigured) return;

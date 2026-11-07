@@ -3078,6 +3078,30 @@ export const AdminPanel: React.FC = () => {
                   <RefreshCw className="w-3.5 h-3.5" />
                   <span>Refresh</span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (window.confirm('क्या आप सचमुच सभी ट्रांजैक्शन हिस्ट्री (Recharges, Withdrawals, Commissions) को हमेशा के लिए साफ़ (0) करना चाहते हैं?')) {
+                      try {
+                        const res = await fetch('/api/admin/transactions/purge-all', { method: 'POST' });
+                        if (res.ok) {
+                          await loadAdminTransactions();
+                          showToast('सभी ट्रांजैक्शन हिस्ट्री पूरी तरह साफ़ कर दी गई!', 'success');
+                        } else {
+                          showToast('ट्रांजैक्शन साफ़ करने में त्रुटि आई', 'error');
+                        }
+                      } catch {
+                        showToast('नेटवर्क त्रुटि: ट्रांजैक्शन साफ़ नहीं हो सके', 'error');
+                      }
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-rose-600/20 hover:bg-rose-600/40 border border-rose-500/30 text-rose-300 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-all shrink-0"
+                  title="Purge all transactions history permanently"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Purge History</span>
+                </button>
                 <select
                   value={txFilterStatus}
                   onChange={(e) => setTxFilterStatus(e.target.value as any)}
