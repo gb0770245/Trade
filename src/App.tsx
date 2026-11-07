@@ -35,9 +35,35 @@ const MainContent: React.FC = () => {
     activeModal,
     selectedProductForInvest,
     toast,
+    showToast,
     isAdminView,
     paymentFailedData,
   } = useApp();
+
+  // Listen for PayU gateway return query params (e.g. /?payment=success&txnid=... or payment=failed)
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const urlParams = new URLSearchParams(window.location.search);
+    const paymentStatus = urlParams.get('payment');
+    const txnid = urlParams.get('txnid');
+    const amount = urlParams.get('amount');
+    const reason = urlParams.get('reason');
+
+    if (paymentStatus === 'success') {
+      showToast(
+        `PayU payment verified successfully! (Txn: ${txnid || 'Completed'}${amount ? `, ₹${amount}` : ''})`,
+        'success'
+      );
+      // Clean query params from URL
+      window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (paymentStatus === 'failed') {
+      showToast(
+        `PayU transaction: ${reason || 'Payment was declined or cancelled.'}`,
+        'error'
+      );
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  }, [showToast]);
 
   const isAnyModalOpen = Boolean(activeModal || selectedProductForInvest || paymentFailedData);
 

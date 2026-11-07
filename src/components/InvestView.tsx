@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { InvestmentProduct } from '../types';
-import { triggerOfficialRazorpayPayment } from '../services/razorpayService';
+import { triggerOfficialPayUPayment } from '../services/payuService';
 
 export const InvestView: React.FC = () => {
   const {
@@ -46,7 +46,7 @@ export const InvestView: React.FC = () => {
     setSelectedProduct(product);
   };
 
-  const handleDirectRazorpayForProduct = async (product: InvestmentProduct) => {
+  const handleDirectPayUForProduct = async (product: InvestmentProduct) => {
     if (!user) {
       openModal('auth');
       return;
@@ -54,20 +54,22 @@ export const InvestView: React.FC = () => {
     setIsInvesting(true);
     try {
       const paymentInrAmount = Math.round(product.price * 100);
-      const res = await triggerOfficialRazorpayPayment({
-        keyId: platformSettings.razorpayKeyId,
-        keySecret: platformSettings.razorpayKeySecret,
+      const res = await triggerOfficialPayUPayment({
+        key: platformSettings.payuMerchantKey,
+        salt: platformSettings.payuMerchantSalt,
+        mode: platformSettings.payuMode,
         amount: paymentInrAmount,
         usdAmount: product.price,
-        preferredMethod: 'all',
-        merchantName: platformSettings.razorpayMerchantName?.trim() || 'Nexa AI',
-        merchantLogo: platformSettings.razorpayLogoUrl?.trim() || '/logo.png',
-        themeColor: platformSettings.razorpayThemeColor || '#0f766e',
+        merchantName: platformSettings.payuMerchantName?.trim() || 'Nexa AI',
+        themeColor: platformSettings.payuThemeColor || '#0f766e',
         userName: user.nickname || 'Member',
         userPhone: user.phone || '9999999999',
         userId: user.id,
+        purpose: 'product_purchase',
+        productId: product.id,
+        productName: product.retailName || product.name,
         onSuccess: async (paymentId: string) => {
-          showToast(`Razorpay payment verified! Activating ${product.name}...`, 'success');
+          showToast(`PayU payment verified! Activating ${product.name}...`, 'success');
           await investInProduct(product);
           setSelectedProduct(null);
           setIsInvesting(false);
@@ -80,7 +82,7 @@ export const InvestView: React.FC = () => {
             amountInr: paymentInrAmount,
             productName: product.name,
             onRetry: () => {
-              handleDirectRazorpayForProduct(product);
+              handleDirectPayUForProduct(product);
             },
           });
         },
@@ -92,7 +94,7 @@ export const InvestView: React.FC = () => {
             amountInr: paymentInrAmount,
             productName: product.name,
             onRetry: () => {
-              handleDirectRazorpayForProduct(product);
+              handleDirectPayUForProduct(product);
             },
           });
         },

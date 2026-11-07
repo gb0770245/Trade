@@ -456,7 +456,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     manualDepositInstructions: '1. Scan this Dynamic QR using PhonePe, Google Pay, Paytm or any UPI App.\n2. Pay the EXACT amount shown on screen.\n3. Enter the 12-digit UPI UTR / Reference number below and tap Submit.\n4. Admin will verify and credit your wallet within 1-5 minutes.',
     requireAdminRechargeApproval: true, // User request: strict admin verification before fund is added to wallet
     showUpiVpaDetails: false, // User request: hide UPI ID and intent buttons shown in screenshot
-    minRecharge: 25,
+    minRecharge: 0.01,
     minWithdrawal: 2,
     withdrawalFeePercent: 5, // Configurable admin fee % (default 5%)
     isWithdrawalEnabled: true,
@@ -502,8 +502,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     homeBanners: DEFAULT_HOME_BANNERS,
     bannerAutoPlaySpeedSeconds: 4,
 
-    // Razorpay Gateway Settings
-    isRazorpayEnabled: true,
+    // PayU India Payment Gateway Settings
+    isPayUEnabled: true,
+    payuMerchantKey: 'gtKFFx',
+    payuMerchantSalt: '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW',
+    payuMode: 'test',
+    payuMerchantName: 'Nexa AI',
+    payuLogoUrl: '/logo.png',
+    payuThemeColor: '#0f766e',
+
+    // Razorpay Gateway Settings (Legacy / Backward Compatibility)
+    isRazorpayEnabled: false,
     razorpayKeyId: 'rzp_live_TsxVeW7tusSgjp',
     razorpayKeySecret: 'SvNqYN6H09fU4mNSGqJeTG0V',
     razorpayWebhookSecret: 'nexa_ai_rzp_webhook_2026',
@@ -511,7 +520,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     razorpayLogoUrl: '/logo.png',
     razorpayThemeColor: '#0f766e',
 
-    // Razorpay E-Commerce Shopping & Compliance Settings
+    // E-Commerce Shopping & Compliance Settings
     isShoppingModeActive: true,
     storeName: 'Nexa AI Retail Store',
     companyLegalName: 'Nexa AI Technologies India Pvt Ltd',
@@ -545,6 +554,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (cached) {
           const parsed = JSON.parse(cached);
           if (parsed && typeof parsed === 'object') {
+            // Auto-heal outdated test salt if present in browser localStorage
+            if (parsed.payuMerchantSalt === 'eCwWELxi' || (parsed.payuMerchantKey === 'gtKFFx' && parsed.payuMerchantSalt !== '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW')) {
+              parsed.payuMerchantSalt = '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW';
+            }
             return { ...DEFAULT_PLATFORM_SETTINGS, ...parsed };
           }
         }
@@ -1725,9 +1738,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         message: platformSettings.rechargeNotice || 'Add Money service is currently undergoing scheduled maintenance.',
       };
     }
-    const effectiveMin = platformSettings.minRecharge && platformSettings.minRecharge >= 25 ? platformSettings.minRecharge : 25;
+    const effectiveMin =
+      typeof platformSettings.minRecharge === 'number' && !isNaN(platformSettings.minRecharge) && platformSettings.minRecharge > 0
+        ? platformSettings.minRecharge
+        : 0.01;
     if (amount < effectiveMin) {
-      return { success: false, message: `Minimum add money amount is $${effectiveMin.toFixed(2)}` };
+      return { success: false, message: `Minimum add money amount is $${effectiveMin < 1 ? effectiveMin.toFixed(2) : effectiveMin} (₹${Math.max(1, Math.round(effectiveMin * 100))})` };
     }
 
     // STRICT ADMIN VERIFICATION: If requireAdminRechargeApproval is enabled, do NOT auto-credit wallet!
@@ -1825,9 +1841,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'Please enter a valid 12-digit UPI UTR / Reference number.' };
     }
 
-    const effectiveMin = platformSettings.minRecharge && platformSettings.minRecharge >= 25 ? platformSettings.minRecharge : 25;
+    const effectiveMin =
+      typeof platformSettings.minRecharge === 'number' && !isNaN(platformSettings.minRecharge) && platformSettings.minRecharge > 0
+        ? platformSettings.minRecharge
+        : 0.01;
     if (amount < effectiveMin) {
-      return { success: false, message: `Minimum deposit amount is $${effectiveMin.toFixed(2)}` };
+      return { success: false, message: `Minimum deposit amount is $${effectiveMin < 1 ? effectiveMin.toFixed(2) : effectiveMin} (₹${Math.max(1, Math.round(effectiveMin * 100))})` };
     }
 
     const inrAmount = Math.round(amount * 100);

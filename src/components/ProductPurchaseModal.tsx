@@ -11,7 +11,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { triggerOfficialRazorpayPayment } from '../services/razorpayService';
+import { triggerOfficialPayUPayment } from '../services/payuService';
 
 export const ProductPurchaseModal: React.FC = () => {
   const {
@@ -49,8 +49,8 @@ export const ProductPurchaseModal: React.FC = () => {
     }
   };
 
-  // Direct Razorpay Payment Gateway (Supports logged-in users & guest shoppers)
-  const handleDirectRazorpay = async () => {
+  // Direct PayU Payment Gateway (Supports logged-in users & guest shoppers)
+  const handleDirectPayU = async () => {
     setIsInvesting(true);
     try {
       const guestPhone = user?.phone || (typeof window !== 'undefined' ? localStorage.getItem('hd_last_phone') || '7307112738' : '7307112738');
@@ -59,20 +59,22 @@ export const ProductPurchaseModal: React.FC = () => {
 
       // 1 USD = 100 INR in payment gateway
       const paymentInrAmount = Math.round(selectedProduct.price * 100);
-      const res = await triggerOfficialRazorpayPayment({
-        keyId: platformSettings.razorpayKeyId,
-        keySecret: platformSettings.razorpayKeySecret,
+      const res = await triggerOfficialPayUPayment({
+        key: platformSettings.payuMerchantKey,
+        salt: platformSettings.payuMerchantSalt,
+        mode: platformSettings.payuMode,
         amount: paymentInrAmount,
         usdAmount: selectedProduct.price,
-        preferredMethod: 'all',
         merchantName: platformSettings.storeName || 'Nexa AI Tech Store',
-        merchantLogo: platformSettings.razorpayLogoUrl?.trim() || '/logo.png',
-        themeColor: platformSettings.razorpayThemeColor || '#0f766e',
+        themeColor: platformSettings.payuThemeColor || '#0f766e',
         userName: guestName,
         userPhone: guestPhone,
         userId: guestId,
+        purpose: 'product_purchase',
+        productId: selectedProduct.id,
+        productName: selectedProduct.retailName || selectedProduct.name,
         onSuccess: async (paymentId: string) => {
-          showToast(`Razorpay payment verified for ${selectedProduct.retailName || selectedProduct.name}!`, 'success');
+          showToast(`PayU payment verified for ${selectedProduct.retailName || selectedProduct.name}!`, 'success');
           if (user) {
             await investInProduct(selectedProduct);
           }
@@ -87,7 +89,7 @@ export const ProductPurchaseModal: React.FC = () => {
             amountInr: paymentInrAmount,
             productName: selectedProduct.name,
             onRetry: () => {
-              handleDirectRazorpay();
+              handleDirectPayU();
             },
           });
         },
@@ -99,7 +101,7 @@ export const ProductPurchaseModal: React.FC = () => {
             amountInr: paymentInrAmount,
             productName: selectedProduct.name,
             onRetry: () => {
-              handleDirectRazorpay();
+              handleDirectPayU();
             },
           });
         },
@@ -243,15 +245,15 @@ export const ProductPurchaseModal: React.FC = () => {
             <div className="space-y-2">
               <button
                 type="button"
-                onClick={handleDirectRazorpay}
+                onClick={handleDirectPayU}
                 disabled={isInvesting}
-                className="w-full py-3.5 rounded-xl font-bold text-white bg-gradient-to-r from-blue-600 via-indigo-600 to-teal-600 hover:from-blue-700 hover:via-indigo-700 hover:to-teal-700 text-xs transition-all shadow-lg shadow-blue-600/20 active:scale-[0.99] flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full py-3.5 rounded-xl font-bold text-white bg-gradient-to-r from-teal-600 via-emerald-600 to-teal-700 hover:from-teal-700 hover:via-emerald-700 hover:to-teal-800 text-xs transition-all shadow-lg shadow-teal-600/20 active:scale-[0.99] flex items-center justify-center gap-2 cursor-pointer"
               >
                 <CreditCard className="w-4 h-4" />
                 <span>
                   {isInvesting
-                    ? 'Opening Razorpay...'
-                    : `Direct Buy with Razorpay ($${selectedProduct.price.toFixed(2)})`}
+                    ? 'Connecting to PayU...'
+                    : `Direct Buy with PayU ($${selectedProduct.price.toFixed(2)})`}
                 </span>
               </button>
 

@@ -781,21 +781,16 @@ export const AdminPanel: React.FC = () => {
     setIsTestingWebhook(true);
     setWebhookTestStatus(null);
     try {
-      const res = await fetch('/api/razorpay/webhook', {
+      const res = await fetch('/api/payu/webhook', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          event: 'payment.captured',
-          payload: {
-            payment: {
-              entity: {
-                id: `pay_test_${Date.now()}`,
-                amount: 50000,
-                contact: '+919876543210',
-                notes: { test: 'admin_ping' },
-              },
-            },
-          },
+          status: 'success',
+          txnid: `PAYU_TEST_${Date.now()}`,
+          amount: '500.00',
+          productinfo: 'Admin Webhook Test Ping',
+          firstname: 'AdminTester',
+          email: 'admin@nexa-ai.shop',
         }),
       });
       const data = await res.json();
@@ -3540,102 +3535,160 @@ export const AdminPanel: React.FC = () => {
             {/* Help Center Direct Redirect Link Control */}
             {renderHelpCenterManagerCard()}
 
-            {/* Razorpay Payment Gateway Integration */}
-            <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-blue-950/40 border border-blue-800/40 space-y-4">
+            {/* PayU India Official Payment Gateway Integration (payu.in) */}
+            <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-teal-950/40 border border-teal-800/40 space-y-4">
               <div className="flex items-center justify-between pb-3 border-b border-slate-800">
                 <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center font-black text-xs shadow-md">
-                    RZP
+                  <div className="w-8 h-8 rounded-lg bg-teal-600 text-white flex items-center justify-center font-black text-xs shadow-md">
+                    PayU
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
-                      <h3 className="font-bold text-sm text-white">Razorpay Official Payment Gateway</h3>
+                      <h3 className="font-bold text-sm text-white">PayU India Official Payment Gateway</h3>
                       <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                        localSettings.isRazorpayEnabled ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-slate-800 text-slate-400'
+                        localSettings.isPayUEnabled ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-slate-800 text-slate-400'
                       }`}>
-                        {localSettings.isRazorpayEnabled ? 'Active' : 'Disabled'}
+                        {localSettings.isPayUEnabled ? 'Active' : 'Disabled'}
                       </span>
-                      <span className="text-[10px] bg-blue-500/20 text-blue-400 border border-blue-500/30 font-mono px-2 py-0.5 rounded-full">
-                        {localSettings.razorpayKeyId?.startsWith('rzp_live') ? 'LIVE Production Mode' : 'Test / Sandbox Mode'}
+                      <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
+                        localSettings.payuMode === 'live'
+                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                          : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                      }`}>
+                        {localSettings.payuMode === 'live' ? 'LIVE Production Mode (secure.payu.in)' : 'Test / Sandbox Mode (test.payu.in)'}
                       </span>
                     </div>
                     <p className="text-xs text-slate-400">
-                      Auto-credit deposits via Cards, UPI (GPay, PhonePe, Paytm), NetBanking & Wallets
+                      Official PayU India Gateway: Instant Auto-credit deposits via UPI (PhonePe, GPay, Paytm), Cards, NetBanking & Wallets
                     </p>
                   </div>
                 </div>
 
                 <button
                   type="button"
-                  onClick={() => handleToggleSetting('isRazorpayEnabled', 'Razorpay Payment Gateway')}
+                  onClick={() => handleToggleSetting('isPayUEnabled', 'PayU Payment Gateway')}
                   className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                    localSettings.isRazorpayEnabled ? 'bg-blue-600' : 'bg-slate-700'
+                    localSettings.isPayUEnabled ? 'bg-teal-600' : 'bg-slate-700'
                   }`}
                   role="switch"
-                  aria-checked={Boolean(localSettings.isRazorpayEnabled)}
-                  title={localSettings.isRazorpayEnabled ? 'Click to Pause Razorpay' : 'Click to Enable Razorpay'}
+                  aria-checked={Boolean(localSettings.isPayUEnabled)}
+                  title={localSettings.isPayUEnabled ? 'Click to Pause PayU' : 'Click to Enable PayU'}
                 >
                   <span
                     aria-hidden="true"
                     className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                      localSettings.isRazorpayEnabled ? 'translate-x-5' : 'translate-x-0'
+                      localSettings.isPayUEnabled ? 'translate-x-5' : 'translate-x-0'
                     }`}
                   />
                 </button>
               </div>
 
+              {/* Mode Selection Toggle */}
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div>
+                  <span className="font-bold text-slate-200">Gateway Environment Mode:</span>
+                  <p className="text-[11px] text-slate-400">Switch between PayU Test Sandbox and Live Production payments</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setLocalSettings({ ...localSettings, payuMode: 'test' });
+                      await updatePlatformSettings({ payuMode: 'test' });
+                      showToast('Switched PayU to Test Sandbox Mode', 'success');
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                      localSettings.payuMode !== 'live'
+                        ? 'bg-amber-500 text-slate-950 shadow-md'
+                        : 'bg-slate-800 text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    🧪 Test Sandbox
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setLocalSettings({ ...localSettings, payuMode: 'live' });
+                      await updatePlatformSettings({ payuMode: 'live' });
+                      showToast('Switched PayU to LIVE Production Mode', 'success');
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                      localSettings.payuMode === 'live'
+                        ? 'bg-emerald-500 text-slate-950 shadow-md'
+                        : 'bg-slate-800 text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    🟢 LIVE Production
+                  </button>
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">
-                    Razorpay Key ID
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-semibold text-slate-300">
+                      PayU Merchant Key <span className="text-rose-400">*</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLocalSettings({ ...localSettings, payuMerchantKey: 'gtKFFx' });
+                        updatePlatformSettings({ payuMerchantKey: 'gtKFFx' });
+                        showToast('Reset to default PayU Test key', 'success');
+                      }}
+                      className="text-[10px] text-teal-400 hover:underline font-mono"
+                    >
+                      Use Test Key ('gtKFFx')
+                    </button>
+                  </div>
                   <input
                     type="text"
-                    value={localSettings.razorpayKeyId || ''}
-                    onChange={(e) => setLocalSettings({ ...localSettings, razorpayKeyId: e.target.value })}
-                    className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300 focus:outline-none focus:border-blue-500"
-                    placeholder="rzp_test_... or rzp_live_..."
+                    value={localSettings.payuMerchantKey || ''}
+                    onChange={(e) => setLocalSettings({ ...localSettings, payuMerchantKey: e.target.value })}
+                    onBlur={() => updatePlatformSettings({ payuMerchantKey: localSettings.payuMerchantKey?.trim() || 'gtKFFx' })}
+                    className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300 focus:outline-none focus:border-teal-500"
+                    placeholder="Enter PayU Merchant Key"
                   />
-                  <p className="text-[10px] text-slate-500 mt-1">Found in Razorpay Dashboard → Settings → API Keys</p>
+                  <p className="text-[10px] text-slate-500 mt-1">Found in PayU Dashboard → Settings → API Credentials (Merchant Key)</p>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">
-                    Razorpay Key Secret (Optional / Webhooks)
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-semibold text-slate-300">
+                      PayU Merchant Salt <span className="text-rose-400">*</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLocalSettings({ ...localSettings, payuMerchantSalt: '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW' });
+                        updatePlatformSettings({ payuMerchantSalt: '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW' });
+                        showToast('Reset to default PayU Test salt', 'success');
+                      }}
+                      className="text-[10px] text-teal-400 hover:underline font-mono"
+                    >
+                      Use Test Salt ('4R38Ivwi...')
+                    </button>
+                  </div>
                   <input
                     type="password"
-                    value={localSettings.razorpayKeySecret || ''}
-                    onChange={(e) => setLocalSettings({ ...localSettings, razorpayKeySecret: e.target.value })}
-                    className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-slate-300 focus:outline-none focus:border-blue-500"
-                    placeholder="Enter Key Secret"
+                    value={localSettings.payuMerchantSalt || ''}
+                    onChange={(e) => setLocalSettings({ ...localSettings, payuMerchantSalt: e.target.value })}
+                    onBlur={() => updatePlatformSettings({ payuMerchantSalt: localSettings.payuMerchantSalt?.trim() || '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW' })}
+                    className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-emerald-300 focus:outline-none focus:border-teal-500"
+                    placeholder="Enter PayU Merchant Salt"
                   />
-                  <p className="text-[10px] text-slate-500 mt-1">Found in Razorpay Dashboard → Settings → API Keys</p>
+                  <p className="text-[10px] text-slate-500 mt-1">Used for cryptographic SHA-512 payment hash computation & response verification</p>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">
-                    Razorpay Webhook Secret (Matches Dashboard Webhook)
-                  </label>
-                  <input
-                    type="text"
-                    value={localSettings.razorpayWebhookSecret || 'nexa_ai_rzp_webhook_2026'}
-                    onChange={(e) => setLocalSettings({ ...localSettings, razorpayWebhookSecret: e.target.value })}
-                    className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-emerald-300 focus:outline-none focus:border-emerald-500"
-                    placeholder="e.g. nexa_ai_rzp_webhook_2026"
-                  />
-                  <p className="text-[10px] text-slate-500 mt-1">Passphrase entered in Razorpay Webhook Setup dialog</p>
-                </div>
-
-                {/* Razorpay Merchant Name & Logo Branding */}
+                {/* PayU Merchant Name & Branding */}
                 <div className="md:col-span-2 p-4 rounded-xl bg-slate-950/70 border border-teal-500/30 space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <h4 className="text-xs font-bold text-teal-400 flex items-center gap-1.5">
-                        <span>🏷️</span> Razorpay Checkout Brand Identity (Name & Logo)
+                        <span>🏷️</span> PayU Checkout Brand Identity (Name & Logo)
                       </h4>
                       <p className="text-[11px] text-slate-400 mt-0.5">
-                        Controls the header name and logo displayed on the official Razorpay payment screen
+                        Controls brand name and logo displayed on PayU checkout and payment invoices
                       </p>
                     </div>
                     <button
@@ -3643,80 +3696,53 @@ export const AdminPanel: React.FC = () => {
                       onClick={async () => {
                         const updated = {
                           ...localSettings,
-                          razorpayMerchantName: 'Nexa AI',
-                          razorpayLogoUrl: '/logo.png',
+                          payuMerchantName: 'Nexa AI',
+                          payuLogoUrl: '/logo.png',
                           storeName: 'Nexa AI Retail Store',
                           companyLegalName: 'Nexa AI Technologies India Pvt Ltd',
                         };
                         setLocalSettings(updated);
                         await updatePlatformSettings({
-                          razorpayMerchantName: 'Nexa AI',
-                          razorpayLogoUrl: '/logo.png',
+                          payuMerchantName: 'Nexa AI',
+                          payuLogoUrl: '/logo.png',
                           storeName: 'Nexa AI Retail Store',
                           companyLegalName: 'Nexa AI Technologies India Pvt Ltd',
                         });
-                        showToast('Applied Nexa AI branding to Razorpay & saved!', 'success');
+                        showToast('Applied Nexa AI branding to PayU & saved!', 'success');
                       }}
                       className="px-3 py-1.5 rounded-lg bg-teal-500/20 hover:bg-teal-500/30 border border-teal-500/40 text-teal-300 text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm"
                     >
-                      <span>✨</span> Apply 100% Nexa AI Brand Preset
+                      <span>✨</span> Apply Nexa AI Brand Preset
                     </button>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
                     <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-xs font-semibold text-slate-300">
-                          Merchant Brand Name in Razorpay
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setLocalSettings({ ...localSettings, razorpayMerchantName: 'Nexa AI' });
-                            updatePlatformSettings({ razorpayMerchantName: 'Nexa AI' });
-                            showToast('Set name to Nexa AI and saved!', 'success');
-                          }}
-                          className="text-[10px] text-teal-400 hover:underline font-mono"
-                        >
-                          Reset: 'Nexa AI'
-                        </button>
-                      </div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">
+                        Merchant Brand Name in PayU
+                      </label>
                       <input
                         type="text"
-                        value={localSettings.razorpayMerchantName ?? 'Nexa AI'}
-                        onChange={(e) => setLocalSettings({ ...localSettings, razorpayMerchantName: e.target.value })}
+                        value={localSettings.payuMerchantName ?? 'Nexa AI'}
+                        onChange={(e) => setLocalSettings({ ...localSettings, payuMerchantName: e.target.value })}
                         onBlur={async () => {
-                          const val = localSettings.razorpayMerchantName?.trim() || 'Nexa AI';
-                          await updatePlatformSettings({ razorpayMerchantName: val });
-                          showToast('Razorpay merchant name saved to cloud!', 'success');
+                          const val = localSettings.payuMerchantName?.trim() || 'Nexa AI';
+                          await updatePlatformSettings({ payuMerchantName: val });
+                          showToast('PayU merchant name saved to cloud!', 'success');
                         }}
                         className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-semibold text-white focus:outline-none focus:border-teal-500"
                         placeholder="Nexa AI"
                       />
-                      <p className="text-[10px] text-slate-500 mt-1">Appears at top of Razorpay popup header (Replaces 'HD Energy')</p>
                     </div>
 
                     <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-xs font-semibold text-slate-300">
-                          Merchant Logo URL in Razorpay
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setLocalSettings({ ...localSettings, razorpayLogoUrl: '/logo.png' });
-                            updatePlatformSettings({ razorpayLogoUrl: '/logo.png' });
-                            showToast('Set logo to Nexa AI logo and saved!', 'success');
-                          }}
-                          className="text-[10px] text-teal-400 hover:underline font-mono"
-                        >
-                          Use Nexa AI Logo
-                        </button>
-                      </div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">
+                        Merchant Logo URL in PayU
+                      </label>
                       <div className="flex items-center gap-2">
                         <div className="w-9 h-9 rounded-lg bg-slate-900 border border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
                           <img
-                            src={localSettings.razorpayLogoUrl || '/logo.png'}
+                            src={localSettings.payuLogoUrl || '/logo.png'}
                             alt="Logo Preview"
                             className="w-full h-full object-cover"
                             onError={(e) => {
@@ -3726,113 +3752,39 @@ export const AdminPanel: React.FC = () => {
                         </div>
                         <input
                           type="text"
-                          value={localSettings.razorpayLogoUrl ?? '/logo.png'}
-                          onChange={(e) => setLocalSettings({ ...localSettings, razorpayLogoUrl: e.target.value })}
+                          value={localSettings.payuLogoUrl ?? '/logo.png'}
+                          onChange={(e) => setLocalSettings({ ...localSettings, payuLogoUrl: e.target.value })}
                           onBlur={async () => {
-                            const val = localSettings.razorpayLogoUrl?.trim() || '/logo.png';
-                            await updatePlatformSettings({ razorpayLogoUrl: val });
-                            showToast('Razorpay logo URL saved to cloud!', 'success');
+                            const val = localSettings.payuLogoUrl?.trim() || '/logo.png';
+                            await updatePlatformSettings({ payuLogoUrl: val });
+                            showToast('PayU logo URL saved!', 'success');
                           }}
                           className="flex-1 px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-white focus:outline-none focus:border-teal-500"
                           placeholder="/logo.png or https://..."
                         />
                       </div>
-                      <p className="text-[10px] text-slate-500 mt-1">Logo shown inside the Razorpay Checkout popup header</p>
                     </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">
-                      Checkout Theme Accent Color
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="color"
-                        value={localSettings.razorpayThemeColor || '#0f766e'}
-                        onChange={(e) => setLocalSettings({ ...localSettings, razorpayThemeColor: e.target.value })}
-                        onBlur={() => updatePlatformSettings({ razorpayThemeColor: localSettings.razorpayThemeColor || '#0f766e' })}
-                        className="w-9 h-9 rounded-lg bg-transparent cursor-pointer border border-slate-700"
-                      />
-                      <input
-                        type="text"
-                        value={localSettings.razorpayThemeColor || '#0f766e'}
-                        onChange={(e) => setLocalSettings({ ...localSettings, razorpayThemeColor: e.target.value })}
-                        onBlur={() => updatePlatformSettings({ razorpayThemeColor: localSettings.razorpayThemeColor || '#0f766e' })}
-                        className="flex-1 px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-white focus:outline-none focus:border-teal-500"
-                        placeholder="#0f766e"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Live Header Preview */}
-                  <div className="pt-2 border-t border-slate-800/80">
-                    <p className="text-[11px] font-semibold text-slate-300 mb-2 flex items-center gap-1.5">
-                      <span>👁️</span> Live Razorpay Modal Header Preview (What your users will see):
-                    </p>
-                    <div
-                      style={{ backgroundColor: localSettings.razorpayThemeColor || '#0f766e' }}
-                      className="rounded-xl p-3 flex items-center justify-between text-white shadow-lg transition-colors"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="w-7 h-7 rounded-lg bg-black/20 flex items-center justify-center text-sm font-bold">
-                          ←
-                        </div>
-                        <div className="w-8 h-8 rounded-lg bg-white/10 ring-1 ring-white/30 overflow-hidden flex items-center justify-center p-0.5">
-                          <img
-                            src={localSettings.razorpayLogoUrl || '/logo.png'}
-                            alt="Brand Logo"
-                            className="w-full h-full object-cover rounded-md"
-                            onError={(e) => {
-                              (e.currentTarget as HTMLImageElement).src = '/logo.png';
-                            }}
-                          />
-                        </div>
-                        <div>
-                          <div className="text-sm font-extrabold tracking-wide flex items-center gap-1.5">
-                            <span>{localSettings.razorpayMerchantName || 'Nexa AI'}</span>
-                            <span className="text-[9px] bg-emerald-400 text-slate-900 px-1 py-0.2 rounded font-black tracking-tight">VERIFIED</span>
-                          </div>
-                          <div className="text-[10px] text-white/80">Payment Options • Secured by Razorpay</div>
-                        </div>
-                      </div>
-                      <div className="w-7 h-7 rounded-full bg-white/20 flex items-center justify-center text-xs">
-                        👤
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Razorpay Dashboard Account Sync Guide */}
-                  <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs space-y-1.5">
-                    <div className="font-bold flex items-center gap-1.5 text-amber-300">
-                      <span>💡</span> Razorpay UPI QR par "HD Energy" ko "Nexa AI" kaise karein?
-                    </div>
-                    <p className="text-[11px] text-amber-200/90 leading-relaxed">
-                      Modal popup header me ab <strong>Nexa AI</strong> name aur logo automatically show hoga. Agar UPI QR scan karne par PhonePe/Paytm me bank name "HD Energy" aa raha hai, toh wo Razorpay Account me KYC ke time registered Business Name hota hai.
-                    </p>
-                    <p className="text-[11px] text-amber-200/90 leading-relaxed">
-                      Isko change karne ke liye: <strong>Razorpay Dashboard → Settings → Account Settings & Profile</strong> me jakar <strong>Business Name</strong> ko <span className="font-mono font-bold bg-amber-400/20 px-1 rounded text-white">Nexa AI</span> save karein.
-                    </p>
                   </div>
                 </div>
               </div>
 
-              {/* Dedicated Razorpay Webhook Connection Guide matching User Screenshot */}
-              <div className="mt-4 p-4 rounded-xl bg-slate-950/80 border border-blue-500/30 space-y-3">
+              {/* PayU Hosted URLs & Webhook Connection Guide */}
+              <div className="mt-4 p-4 rounded-xl bg-slate-950/80 border border-teal-500/30 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-800">
                   <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-blue-400 animate-pulse" />
+                    <span className="w-2.5 h-2.5 rounded-full bg-teal-400 animate-pulse" />
                     <h4 className="text-xs font-bold text-white uppercase tracking-wider">
-                      Razorpay Webhook Setup Guide (Copy & Paste Details)
+                      PayU Webhook & Callback Endpoints (SURL / FURL)
                     </h4>
                   </div>
                   <button
                     type="button"
                     onClick={handleTestWebhookPing}
                     disabled={isTestingWebhook}
-                    className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold flex items-center gap-1 transition-colors disabled:opacity-50"
+                    className="px-2.5 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-[11px] font-bold flex items-center gap-1 transition-colors disabled:opacity-50"
                   >
                     <RefreshCw className={`w-3 h-3 ${isTestingWebhook ? 'animate-spin' : ''}`} />
-                    <span>{isTestingWebhook ? 'Testing...' : 'Test Webhook Ping'}</span>
+                    <span>{isTestingWebhook ? 'Testing...' : 'Test PayU Webhook Ping'}</span>
                   </button>
                 </div>
 
@@ -3854,24 +3806,24 @@ export const AdminPanel: React.FC = () => {
                 )}
 
                 <div className="space-y-2.5 text-xs">
-                  {/* Webhook URL */}
+                  {/* SURL & FURL (Return URL) */}
                   <div>
                     <label className="block text-[11px] font-bold text-slate-300 mb-1">
-                      1. Webhook URL <span className="text-rose-400">*</span> (Paste into Razorpay "Webhook URL *")
+                      1. PayU Response / Callback URL (SURL & FURL)
                     </label>
                     <div className="flex items-center gap-2">
                       <div className="flex-1 p-2 rounded-lg bg-slate-900 border border-slate-700 font-mono text-[11px] text-cyan-300 select-all truncate">
                         {typeof window !== 'undefined'
-                          ? `${window.location.origin}/api/razorpay/webhook`
-                          : 'https://your-domain.com/api/razorpay/webhook'}
+                          ? `${window.location.origin}/api/payu/response`
+                          : 'https://your-domain.com/api/payu/response'}
                       </div>
                       <button
                         type="button"
                         onClick={() => {
                           const url =
                             typeof window !== 'undefined'
-                              ? `${window.location.origin}/api/razorpay/webhook`
-                              : 'https://your-domain.com/api/razorpay/webhook';
+                              ? `${window.location.origin}/api/payu/response`
+                              : 'https://your-domain.com/api/payu/response';
                           navigator.clipboard.writeText(url);
                           setCopiedWebhookUrl(true);
                           setTimeout(() => setCopiedWebhookUrl(false), 2000);
@@ -3893,21 +3845,25 @@ export const AdminPanel: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Secret */}
+                  {/* Webhook Server URL */}
                   <div>
                     <label className="block text-[11px] font-bold text-slate-300 mb-1">
-                      2. Secret (Paste into Razorpay "Secret" box)
+                      2. PayU Webhook / Notification URL (Paste into PayU Dashboard Webhook URL)
                     </label>
                     <div className="flex items-center gap-2">
                       <div className="flex-1 p-2 rounded-lg bg-slate-900 border border-slate-700 font-mono text-[11px] text-emerald-300 select-all truncate">
-                        {localSettings.razorpayWebhookSecret || 'nexa_ai_rzp_webhook_2026'}
+                        {typeof window !== 'undefined'
+                          ? `${window.location.origin}/api/payu/webhook`
+                          : 'https://your-domain.com/api/payu/webhook'}
                       </div>
                       <button
                         type="button"
                         onClick={() => {
-                          navigator.clipboard.writeText(
-                            localSettings.razorpayWebhookSecret || 'nexa_ai_rzp_webhook_2026'
-                          );
+                          const url =
+                            typeof window !== 'undefined'
+                              ? `${window.location.origin}/api/payu/webhook`
+                              : 'https://your-domain.com/api/payu/webhook';
+                          navigator.clipboard.writeText(url);
                           setCopiedWebhookSecret(true);
                           setTimeout(() => setCopiedWebhookSecret(false), 2000);
                         }}
@@ -3921,41 +3877,10 @@ export const AdminPanel: React.FC = () => {
                         ) : (
                           <>
                             <Copy className="w-3.5 h-3.5" />
-                            <span>Copy Secret</span>
+                            <span>Copy Webhook URL</span>
                           </>
                         )}
                       </button>
-                    </div>
-                  </div>
-
-                  {/* Alert Email */}
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-300 mb-1">
-                      3. Alert Email (Enter your email for webhook notifications)
-                    </label>
-                    <div className="p-2 rounded-lg bg-slate-900 border border-slate-700 font-mono text-[11px] text-slate-300">
-                      gb077024@gmail.com
-                    </div>
-                  </div>
-
-                  {/* Active Events */}
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-300 mb-1.5">
-                      4. Active Events <span className="text-rose-400">*</span> (Search and check these 3 events in Razorpay dialog)
-                    </label>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                      <div className="p-2 rounded-lg bg-slate-900/90 border border-emerald-500/30 flex items-center gap-2 text-[11px] text-emerald-300">
-                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                        <span className="font-mono font-bold">payment.captured</span>
-                      </div>
-                      <div className="p-2 rounded-lg bg-slate-900/90 border border-emerald-500/30 flex items-center gap-2 text-[11px] text-emerald-300">
-                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                        <span className="font-mono font-bold">order.paid</span>
-                      </div>
-                      <div className="p-2 rounded-lg bg-slate-900/90 border border-amber-500/30 flex items-center gap-2 text-[11px] text-amber-300">
-                        <CheckCircle2 className="w-4 h-4 text-amber-400 shrink-0" />
-                        <span className="font-mono font-bold">payment.failed</span>
-                      </div>
                     </div>
                   </div>
                 </div>
@@ -4531,27 +4456,90 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">
-                    Minimum Deposit / Add Money Limit ($)
-                  </label>
-                  <input
-                    type="number"
-                    value={localSettings.minRecharge}
-                    onChange={(e) => setLocalSettings({ ...localSettings, minRecharge: Number(e.target.value) })}
-                    className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
-                  />
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-semibold text-slate-300">
+                      Minimum Deposit / Add Money Limit ($)
+                    </label>
+                    <span className="text-[10px] text-emerald-400 font-mono font-bold">
+                      Current: ${typeof localSettings.minRecharge === 'number' ? localSettings.minRecharge : 0.01} (₹{Math.max(1, Math.round((Number(localSettings.minRecharge) || 0.01) * 100))})
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">$</span>
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      value={localSettings.minRecharge !== undefined ? localSettings.minRecharge : 0.01}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setLocalSettings({ ...localSettings, minRecharge: isNaN(val) ? 0.01 : val });
+                      }}
+                      onBlur={() => {
+                        const val = Math.max(0.01, parseFloat(String(localSettings.minRecharge)) || 0.01);
+                        setLocalSettings({ ...localSettings, minRecharge: val });
+                        updatePlatformSettings({ minRecharge: val });
+                        showToast(`Minimum deposit limit saved: $${val}`, 'success');
+                      }}
+                      className="w-full pl-7 pr-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono font-bold text-emerald-400 focus:outline-none focus:border-emerald-500"
+                      placeholder="e.g. 0.01"
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                    <span className="text-[10px] text-slate-400">Presets:</span>
+                    {[0.01, 0.1, 0.5, 1, 5, 10, 25, 50].map((amt) => (
+                      <button
+                        key={amt}
+                        type="button"
+                        onClick={async () => {
+                          setLocalSettings({ ...localSettings, minRecharge: amt });
+                          await updatePlatformSettings({ minRecharge: amt });
+                          showToast(`Minimum Add Money limit set to $${amt} (₹${Math.round(amt * 100)})`, 'success');
+                        }}
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold transition-colors cursor-pointer ${
+                          localSettings.minRecharge === amt
+                            ? 'bg-emerald-500 text-slate-950 font-black'
+                            : 'bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700'
+                        }`}
+                      >
+                        ${amt}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Set to <strong>$0.01</strong> (₹1) for micro-testing or any custom amount. Users cannot deposit less than this threshold.
+                  </p>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">
-                    Minimum Cashout / Withdrawal Limit ($)
-                  </label>
-                  <input
-                    type="number"
-                    value={localSettings.minWithdrawal}
-                    onChange={(e) => setLocalSettings({ ...localSettings, minWithdrawal: Number(e.target.value) })}
-                    className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
-                  />
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-semibold text-slate-300">
+                      Minimum Cashout / Withdrawal Limit ($)
+                    </label>
+                    <span className="text-[10px] text-emerald-400 font-mono font-bold">
+                      Current: ${localSettings.minWithdrawal || 2}
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">$</span>
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      value={localSettings.minWithdrawal}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setLocalSettings({ ...localSettings, minWithdrawal: isNaN(val) ? 2 : val });
+                      }}
+                      onBlur={() => {
+                        const val = Math.max(0.01, parseFloat(String(localSettings.minWithdrawal)) || 2);
+                        setLocalSettings({ ...localSettings, minWithdrawal: val });
+                        updatePlatformSettings({ minWithdrawal: val });
+                      }}
+                      className="w-full pl-7 pr-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono font-bold text-emerald-400 focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                  <p className="text-[10px] text-slate-500 mt-1">Minimum wallet balance required for user withdrawal requests</p>
                 </div>
 
                 <div>
@@ -4574,6 +4562,11 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
                           withdrawalFeePercent: Math.max(0, parseFloat(e.target.value) || 0),
                         })
                       }
+                      onBlur={() => {
+                        updatePlatformSettings({
+                          withdrawalFeePercent: localSettings.withdrawalFeePercent !== undefined ? localSettings.withdrawalFeePercent : 5,
+                        });
+                      }}
                       className="w-full pl-3.5 pr-8 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono font-bold text-amber-300 focus:outline-none focus:border-amber-500"
                       placeholder="e.g. 5"
                     />
@@ -4585,7 +4578,11 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
                       <button
                         key={fee}
                         type="button"
-                        onClick={() => setLocalSettings({ ...localSettings, withdrawalFeePercent: fee })}
+                        onClick={async () => {
+                          setLocalSettings({ ...localSettings, withdrawalFeePercent: fee });
+                          await updatePlatformSettings({ withdrawalFeePercent: fee });
+                          showToast(`Withdrawal fee set to ${fee}%`, 'success');
+                        }}
                         className={`px-2 py-0.5 rounded text-[10px] font-bold transition-colors cursor-pointer ${
                           (localSettings.withdrawalFeePercent !== undefined ? localSettings.withdrawalFeePercent : 5) === fee
                             ? 'bg-amber-500 text-slate-950 font-black'
@@ -4600,6 +4597,40 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
                     Direct admin access to set withdrawal charge. Deducted automatically on every cashout.
                   </p>
                 </div>
+              </div>
+
+              {/* Dedicated Save Button for Financial Limits */}
+              <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between">
+                <span className="text-[11px] text-slate-400">
+                  Settings are auto-saved on change, or click button to save manually:
+                </span>
+                <button
+                  type="button"
+                  disabled={isSavingSettings}
+                  onClick={async () => {
+                    setIsSavingSettings(true);
+                    try {
+                      const cleanMinRecharge = Math.max(0.01, parseFloat(String(localSettings.minRecharge)) || 0.01);
+                      const cleanMinWithdrawal = Math.max(0.01, parseFloat(String(localSettings.minWithdrawal)) || 2);
+                      const cleanFee = Math.max(0, parseFloat(String(localSettings.withdrawalFeePercent)) || 0);
+                      const payload = {
+                        ...localSettings,
+                        minRecharge: cleanMinRecharge,
+                        minWithdrawal: cleanMinWithdrawal,
+                        withdrawalFeePercent: cleanFee,
+                      };
+                      setLocalSettings(payload);
+                      await updatePlatformSettings(payload);
+                      showToast('Financial Limits & PIN saved successfully!', 'success');
+                    } finally {
+                      setIsSavingSettings(false);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors flex items-center gap-1.5 shadow-md shadow-emerald-600/30 cursor-pointer"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>{isSavingSettings ? 'Saving...' : 'Save Financial Limits'}</span>
+                </button>
               </div>
             </div>
 

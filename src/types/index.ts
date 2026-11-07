@@ -102,16 +102,25 @@ export interface PlatformSettings {
   // Configurable Wheel Prizes
   spinPrizes?: SpinPrizeConfig[];
 
-  // Razorpay Gateway Settings
-  isRazorpayEnabled: boolean;
-  razorpayKeyId: string;
+  // PayU India Payment Gateway Settings
+  isPayUEnabled: boolean;
+  payuMerchantKey: string;
+  payuMerchantSalt?: string;
+  payuMode?: 'test' | 'live';
+  payuMerchantName?: string;
+  payuLogoUrl?: string;
+  payuThemeColor?: string;
+
+  // Razorpay Gateway Settings (Legacy / Backward Compatibility)
+  isRazorpayEnabled?: boolean;
+  razorpayKeyId?: string;
   razorpayKeySecret?: string;
   razorpayWebhookSecret?: string;
   razorpayMerchantName?: string;
   razorpayLogoUrl?: string;
   razorpayThemeColor?: string;
 
-  // Razorpay E-Commerce Shopping & Compliance Settings
+  // E-Commerce Shopping & Compliance Settings
   isShoppingModeActive: boolean;
   storeName: string;
   companyLegalName: string;

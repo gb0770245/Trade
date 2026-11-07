@@ -29,7 +29,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { InvestmentProduct } from '../types';
-import { triggerOfficialRazorpayPayment } from '../services/razorpayService';
+import { triggerOfficialPayUPayment } from '../services/payuService';
 
 interface CheckoutFormState {
   fullName: string;
@@ -111,7 +111,7 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
     setActiveCheckoutProduct(product);
   };
 
-  const handleProceedRazorpayCheckout = async () => {
+  const handleProceedPayUCheckout = async () => {
     if (!activeCheckoutProduct) return;
 
     if (!checkoutForm.fullName.trim() || !checkoutForm.phone.trim()) {
@@ -130,18 +130,21 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
     const orderNumber = `NX-ORD-${Math.floor(100000 + Math.random() * 900000)}`;
 
     try {
-      const res = await triggerOfficialRazorpayPayment({
-        keyId: platformSettings.razorpayKeyId,
-        keySecret: platformSettings.razorpayKeySecret,
+      const res = await triggerOfficialPayUPayment({
+        key: platformSettings.payuMerchantKey,
+        salt: platformSettings.payuMerchantSalt,
+        mode: platformSettings.payuMode,
         amount: inrAmount,
         usdAmount: activeCheckoutProduct.price,
-        preferredMethod: 'all',
         merchantName: store,
-        merchantLogo: platformSettings.razorpayLogoUrl?.trim() || '/logo.png',
-        themeColor: platformSettings.razorpayThemeColor || '#0f766e',
+        themeColor: platformSettings.payuThemeColor || '#0f766e',
         userName: checkoutForm.fullName.trim(),
         userPhone: cleanPhone,
+        userEmail: checkoutForm.email?.trim(),
         userId: user?.id || `guest_${cleanPhone.slice(-6)}`,
+        purpose: 'product_purchase',
+        productId: activeCheckoutProduct.id,
+        productName: activeCheckoutProduct.retailName || activeCheckoutProduct.name,
         onSuccess: async (paymentId: string) => {
           setIsProcessingPayment(false);
           showToast(`Payment successful! Order ${orderNumber} is confirmed.`, 'success');
@@ -182,7 +185,7 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
             amountInr: inrAmount,
             productName: activeCheckoutProduct.retailName || activeCheckoutProduct.name,
             onRetry: () => {
-              handleProceedRazorpayCheckout();
+              handleProceedPayUCheckout();
             },
           });
         },
@@ -332,7 +335,7 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
 
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed max-w-xl">
               Power your embedded smart projects and IoT automation with industrial-grade AI accelerators.
-              Backed by verified Razorpay 256-bit secure checkout, pan-India doorstep delivery, and 3-year replacement warranties.
+              Backed by verified PayU 256-bit secure checkout, pan-India doorstep delivery, and 3-year replacement warranties.
             </p>
 
             <div className="pt-2 flex flex-wrap items-center gap-4 text-xs font-semibold text-slate-700 dark:text-slate-300">
@@ -410,7 +413,7 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
               Hardware Catalog & Compute Devices
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              Select any unit to inspect technical specifications or proceed directly to Razorpay checkout.
+              Select any unit to inspect technical specifications or proceed directly to PayU checkout.
             </p>
           </div>
 
@@ -588,7 +591,7 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
                 <ShieldCheck className="w-5 h-5" />
               </div>
               <h4 className="text-xs font-bold text-slate-900 dark:text-white">
-                RBI Compliant Razorpay
+                RBI Compliant PayU India
               </h4>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
                 256-bit encrypted card, UPI & NetBanking processing
@@ -741,7 +744,7 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
             <div className="flex items-center gap-3">
               <span className="flex items-center gap-1 text-slate-400">
                 <Lock className="w-3 h-3 text-emerald-400" />
-                Razorpay Verified 256-Bit SSL Checkout
+                PayU Verified 256-Bit SSL Checkout
               </span>
               <span>·</span>
               <button
@@ -924,11 +927,11 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
                 </div>
               </div>
 
-              {/* Razorpay Trust Notice */}
-              <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-[11px] text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 shrink-0 text-emerald-600" />
+              {/* PayU Trust Notice */}
+              <div className="p-3 rounded-xl bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800 text-[11px] text-teal-800 dark:text-teal-300 flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 shrink-0 text-teal-600" />
                 <span>
-                  Payments are processed securely via Razorpay's RBI-authorized gateway. Supports UPI, Cards & NetBanking.
+                  Payments are processed securely via PayU India's RBI-authorized gateway. Supports UPI, Cards & NetBanking.
                 </span>
               </div>
             </div>
@@ -945,15 +948,15 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
 
               <button
                 type="button"
-                onClick={handleProceedRazorpayCheckout}
+                onClick={handleProceedPayUCheckout}
                 disabled={isProcessingPayment}
                 className="px-6 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-800 disabled:opacity-50 text-white text-xs font-black shadow-lg hover:shadow-xl transition-all flex items-center gap-2"
               >
                 <CreditCard className="w-4 h-4" />
                 <span>
                   {isProcessingPayment
-                    ? 'Connecting to Gateway...'
-                    : `Pay ₹${Math.round(activeCheckoutProduct.price * 100).toLocaleString()} with Razorpay`}
+                    ? 'Connecting to PayU...'
+                    : `Pay ₹${Math.round(activeCheckoutProduct.price * 100).toLocaleString()} with PayU`}
                 </span>
               </button>
             </div>
@@ -1037,7 +1040,7 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
             </h3>
 
             <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              Thank you for shopping with {store}. Your order has been placed successfully through Razorpay.
+              Thank you for shopping with {store}. Your order has been placed successfully through PayU.
             </p>
 
             <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-xs space-y-2 text-left font-mono">

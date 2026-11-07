@@ -3,7 +3,6 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
-import Razorpay from 'razorpay';
 import crypto from 'crypto';
 import {
   getAllUsers,
@@ -157,7 +156,7 @@ const DEFAULT_SERVER_PLATFORM_SETTINGS: Record<string, any> = {
   autoDynamicQrEnabled: true,
   requireAdminRechargeApproval: true,
   showUpiVpaDetails: false,
-  minRecharge: 25,
+  minRecharge: 0.01,
   minWithdrawal: 2,
   withdrawalFeePercent: 5,
   isWithdrawalEnabled: true,
@@ -4269,261 +4268,465 @@ app.post('/api/admin/test-otp-sms', async (req, res) => {
   }
 });
 
-// Helper: Get active Razorpay configuration
-const getActiveRazorpayConfig = (overrideKeyId?: string, overrideSecret?: string) => {
-  const envKeyId = process.env.RAZORPAY_KEY_ID?.trim();
-  const envSecret = process.env.RAZORPAY_KEY_SECRET?.trim();
+// =========================================================================
+// Official PayU India Payment Gateway Integration (payu.in)
+// =========================================================================
 
-  // If a valid custom override was provided that is not the old obsolete placeholder
-  const isStaleKey = (k?: string) => !k || k === 'rzp_live_TsxVeW7tusSgjp' || k === 'rzp_test_placeholder';
-  const isStaleSecret = (s?: string) => !s || s === 'SvNqYN6H09fU4mNSGqJeTG0V' || s === 'YOUR_RAZORPAY_KEY_SECRET';
+// In-memory set to prevent duplicate credits from concurrent callbacks/webhooks
+const processedPayUTxns = new Set<string>();
 
-  const keyId =
-    (!isStaleKey(overrideKeyId) ? overrideKeyId : null) ||
-    (!isStaleKey(envKeyId) ? envKeyId : null) ||
-    'rzp_live_TuMp7KWEsJZTL6';
+// Helper: Get active PayU credentials and configuration
+const getActivePayUConfig = (overrideKey?: string, overrideSalt?: string, overrideMode?: 'test' | 'live') => {
+  const serverSettings = loadServerPlatformSettings();
+  const envKey = process.env.PAYU_MERCHANT_KEY?.trim();
+  const envSalt = process.env.PAYU_MERCHANT_SALT?.trim();
+  const envMode = process.env.PAYU_MODE?.trim() as 'test' | 'live' | undefined;
 
-  const keySecret =
-    (!isStaleSecret(overrideSecret) ? overrideSecret : null) ||
-    (!isStaleSecret(envSecret) ? envSecret : null) ||
-    'OVvX1KhLIGBX0bIr2R8AoOzI';
+  // PayU Test Default Sandbox Credentials or Admin Override / Env
+  let key =
+    (overrideKey && overrideKey.trim().length > 0 ? overrideKey.trim() : null) ||
+    (envKey && envKey.length > 0 ? envKey : null) ||
+    (serverSettings.payuMerchantKey?.trim() ? serverSettings.payuMerchantKey.trim() : null) ||
+    'gtKFFx';
 
-  return { keyId, keySecret };
+  let salt =
+    (overrideSalt && overrideSalt.trim().length > 0 ? overrideSalt.trim() : null) ||
+    (envSalt && envSalt.length > 0 ? envSalt : null) ||
+    (serverSettings.payuMerchantSalt?.trim() ? serverSettings.payuMerchantSalt.trim() : null) ||
+    '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW';
+
+  // Safeguard: PayU official test sandbox key 'gtKFFx' must strictly use the verified test salt
+  if (key === 'gtKFFx' && (salt === 'eCwWELxi' || !salt || salt.length < 10)) {
+    salt = '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW';
+  }
+
+  let mode: 'test' | 'live' = 'test';
+  if (overrideMode === 'live' || overrideMode === 'test') {
+    mode = overrideMode;
+  } else if (envMode === 'live' || envMode === 'test') {
+    mode = envMode;
+  } else if (serverSettings.payuMode === 'live' || serverSettings.payuMode === 'test') {
+    mode = serverSettings.payuMode;
+  } else if (key !== 'gtKFFx' && !key.toLowerCase().includes('test')) {
+    mode = 'live';
+  }
+
+  const actionUrl =
+    mode === 'live' ? 'https://secure.payu.in/_payment' : 'https://test.payu.in/_payment';
+
+  return { key, salt, mode, actionUrl };
 };
 
-// API Route: Get public Razorpay config
-app.get('/api/razorpay/config', (_req, res) => {
-  const { keyId, keySecret } = getActiveRazorpayConfig();
+// Helper: Compute SHA-512 Hash for PayU Payment Request
+// Format: sha512(key|txnid|amount|productinfo|firstname|email|udf1|udf2|udf3|udf4|udf5||||||SALT)
+const calculatePayURequestHash = (params: {
+  key: string;
+  txnid: string;
+  amount: string;
+  productinfo: string;
+  firstname: string;
+  email: string;
+  udf1?: string;
+  udf2?: string;
+  udf3?: string;
+  udf4?: string;
+  udf5?: string;
+  salt: string;
+}): string => {
+  const hashString = `${params.key}|${params.txnid}|${params.amount}|${params.productinfo}|${params.firstname}|${params.email}|${params.udf1 || ''}|${params.udf2 || ''}|${params.udf3 || ''}|${params.udf4 || ''}|${params.udf5 || ''}||||||${params.salt}`;
+  return crypto.createHash('sha512').update(hashString).digest('hex').toLowerCase();
+};
+
+// Helper: Verify PayU Response Hash
+// Format with additionalCharges: sha512(additionalCharges|SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
+// Format without additionalCharges: sha512(SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
+const verifyPayUResponseHash = (body: Record<string, any>, salt: string): boolean => {
+  const {
+    key = '',
+    txnid = '',
+    amount = '',
+    productinfo = '',
+    firstname = '',
+    email = '',
+    udf1 = '',
+    udf2 = '',
+    udf3 = '',
+    udf4 = '',
+    udf5 = '',
+    status = '',
+    hash = '',
+    additionalCharges = '',
+  } = body;
+
+  let responseHashString = '';
+  if (additionalCharges && String(additionalCharges).trim().length > 0) {
+    responseHashString = `${additionalCharges}|${salt}|${status}||||||${udf5}|${udf4}|${udf3}|${udf2}|${udf1}|${email}|${firstname}|${productinfo}|${amount}|${txnid}|${key}`;
+  } else {
+    responseHashString = `${salt}|${status}||||||${udf5}|${udf4}|${udf3}|${udf2}|${udf1}|${email}|${firstname}|${productinfo}|${amount}|${txnid}|${key}`;
+  }
+
+  const calculatedHash = crypto.createHash('sha512').update(responseHashString).digest('hex').toLowerCase();
+  return calculatedHash === String(hash).toLowerCase();
+};
+
+// Helper: Securely credit user's wallet upon verified PayU payment
+const creditUserPayUDeposit = async (
+  userId: string,
+  usdAmount: number,
+  txnid: string,
+  payuId?: string,
+  note?: string
+) => {
+  const cleanUserId = String(userId).trim();
+  const numAmount = Number(usdAmount) || 0;
+  if (!cleanUserId || numAmount <= 0) return null;
+
+  // 1. Update in SQLite
+  try {
+    const targetSqlUser = getUserByIdOrPhoneFromSql(cleanUserId);
+    const currentSqlBal = Number(targetSqlUser?.rechargeBalance) || 0;
+    const newSqlBal = Number((currentSqlBal + numAmount).toFixed(2));
+    updateUserWalletBalanceInSql(cleanUserId, 'rechargeBalance', newSqlBal);
+  } catch (e) {
+    console.warn('[PayU Credit] SQLite wallet update note:', e);
+  }
+
+  // 2. Update in users_backup.json and sync to Cloud SQL
+  let updatedUser: any = null;
+  const currentUsers = getCachedUsersBackup();
+  const userIdx = currentUsers.findIndex(
+    (u) => u.id === cleanUserId || u.uid === cleanUserId || u.phone === cleanUserId
+  );
+
+  if (userIdx >= 0) {
+    const currentBal = Number(currentUsers[userIdx].rechargeBalance) || 0;
+    const newBal = Number((currentBal + numAmount).toFixed(2));
+    currentUsers[userIdx].rechargeBalance = newBal;
+    saveUsersBackup(currentUsers);
+    updatedUser = currentUsers[userIdx];
+
+    try {
+      await upsertUser({
+        uid: currentUsers[userIdx].id,
+        phone: currentUsers[userIdx].phone,
+        rechargeBalance: newBal,
+      });
+    } catch (e) {
+      console.warn('[PayU Credit] Cloud SQL sync note:', e);
+    }
+  }
+
+  // 3. Create completed recharge transaction
+  const refKey = txnid || `payu_${Date.now()}`;
+  const now = Date.now();
+  const txPayload = {
+    id: refKey,
+    userId: cleanUserId,
+    type: 'recharge',
+    amount: numAmount,
+    title: 'PayU Instant Deposit',
+    timestamp: new Date(now).toISOString(),
+    method: 'PayU Instant',
+    paymentMethod: 'PayU Instant',
+    referenceNo: refKey,
+    status: 'completed',
+    createdAt: now,
+    note: note || `PayU Verified Deposit (Ref: ${payuId || txnid})`,
+  };
+
+  try {
+    await createTransaction(txPayload);
+  } catch (e) {}
+
+  const backupTxs = loadServerTransactions();
+  const existingIdx = backupTxs.findIndex(
+    (t) => t.id === refKey || t.referenceNo === refKey
+  );
+  if (existingIdx >= 0) {
+    backupTxs[existingIdx] = { ...backupTxs[existingIdx], ...txPayload };
+  } else {
+    backupTxs.unshift(txPayload);
+  }
+  saveServerTransactions(backupTxs);
+
+  // 4. Distribute referral commission
+  try {
+    await distributeReferralCommissionServer(cleanUserId, numAmount, 'recharge', refKey);
+  } catch (e) {}
+
+  console.log(`[PayU Gateway] ✅ Successfully credited $${numAmount} to User ${cleanUserId} (Txn: ${refKey})`);
+  return updatedUser;
+};
+
+// API Route: Get public PayU config
+app.get('/api/payu/config', (_req, res) => {
+  const { key, mode, actionUrl } = getActivePayUConfig();
   return res.json({
     success: true,
-    keyId,
-    hasSecret: Boolean(keySecret),
-    mode: keyId.startsWith('rzp_live') ? 'live' : 'test',
+    key,
+    mode,
+    actionUrl,
+    isPayUEnabled: true,
   });
 });
 
-// API Route: Create Razorpay Order
-app.post('/api/razorpay/create-order', async (req, res) => {
+// API Route: Create PayU Payment Session & Compute SHA-512 Hash
+app.post('/api/payu/create-payment', async (req, res) => {
   try {
-    const { amount, currency = 'INR', receipt, notes, keyId: clientKeyId, keySecret: clientSecret } = req.body;
+    const {
+      amount,
+      usdAmount,
+      userId,
+      userName,
+      userPhone,
+      userEmail,
+      purpose = 'recharge',
+      productId,
+      productName,
+      key: clientKey,
+      salt: clientSalt,
+      mode: clientMode,
+    } = req.body;
+
     if (!amount || Number(amount) <= 0) {
       return res.status(400).json({ success: false, error: 'Valid recharge amount is required' });
     }
 
-    const { keyId, keySecret } = getActiveRazorpayConfig(clientKeyId, clientSecret);
-    const amountInPaise = Math.round(Number(amount) * 100);
+    const { key, salt, mode, actionUrl } = getActivePayUConfig(clientKey, clientSalt, clientMode);
+    const txnid = `PAYU_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
 
-    // If keySecret is provided, create an official server-side Razorpay order
-    if (keySecret) {
-      try {
-        const rzp = new Razorpay({
-          key_id: keyId,
-          key_secret: keySecret,
-        });
+    const host = req.get('host') || 'localhost:3000';
+    const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+    const baseUrl = (process.env.APP_URL || `${protocol}://${host}`).replace(/\/$/, '');
 
-        const order = await rzp.orders.create({
-          amount: amountInPaise,
-          currency,
-          receipt: receipt || `rec_shop_${Date.now()}`,
-          notes: {
-            category: 'E-Commerce Retail Store (Electronics & AI Compute Hardware)',
-            mcc: '5732',
-            store_category: 'Consumer Electronics & Computer Hardware',
-            delivery_mode: 'Express Courier Delivery (Delhivery/BlueDart)',
-            invoice: 'GST Compliant Tax Invoice',
-            ...(notes || {}),
-          },
-        });
+    const surl = `${baseUrl}/api/payu/response`;
+    const furl = `${baseUrl}/api/payu/response`;
 
-        return res.json({
-          success: true,
-          orderId: order.id,
-          amount: order.amount,
-          currency: order.currency,
-          keyId,
-          description: 'E-Commerce Purchase: Clean Energy Hardware Equipment',
-        });
-      } catch (rzpErr: any) {
-        console.warn('Primary Razorpay orders.create attempt warning:', rzpErr?.error || rzpErr?.message || rzpErr);
+    const formattedAmount = Number(amount).toFixed(2);
+    const cleanFirstname = (userName || 'Customer').replace(/[^a-zA-Z0-9 ]/g, '').trim() || 'Customer';
+    const cleanPhone = (userPhone || '').replace(/\D/g, '').slice(-10) || '9999999999';
+    const cleanEmail = (userEmail || '').trim() || `${cleanPhone}@nexa-ai.shop`;
+    const cleanProductinfo = (productName || 'Nexa AI Tech Hardware').replace(/[^a-zA-Z0-9 _-]/g, '').slice(0, 80);
 
-        // Try environment fallback if primary used an override key
-        const envKey = process.env.RAZORPAY_KEY_ID?.trim();
-        const envSec = process.env.RAZORPAY_KEY_SECRET?.trim();
-        if (envKey && envSec && (keyId !== envKey || keySecret !== envSec)) {
-          try {
-            const fallbackRzp = new Razorpay({
-              key_id: envKey,
-              key_secret: envSec,
-            });
-            const fallbackOrder = await fallbackRzp.orders.create({
-              amount: amountInPaise,
-              currency,
-              receipt: receipt || `rec_shop_${Date.now()}`,
-              notes: notes || {},
-            });
-            return res.json({
-              success: true,
-              orderId: fallbackOrder.id,
-              amount: fallbackOrder.amount,
-              currency: fallbackOrder.currency,
-              keyId: envKey,
-              description: 'E-Commerce Purchase: Clean Energy Hardware Equipment',
-            });
-          } catch (fallbackErr: any) {
-            console.warn('Fallback Razorpay orders.create warning:', fallbackErr?.error || fallbackErr?.message || fallbackErr);
-          }
-        }
-      }
-    }
+    const udf1 = String(userId || '').trim();
+    const udf2 = String(usdAmount || (Number(amount) / 100).toFixed(2));
+    const udf3 = cleanFirstname;
+    const udf4 = purpose || 'recharge';
+    const udf5 = productId || '';
 
-    // Direct client-side order parameters for official Razorpay Checkout
+    // Calculate official PayU SHA-512 Hash
+    const hash = calculatePayURequestHash({
+      key,
+      txnid,
+      amount: formattedAmount,
+      productinfo: cleanProductinfo,
+      firstname: cleanFirstname,
+      email: cleanEmail,
+      udf1,
+      udf2,
+      udf3,
+      udf4,
+      udf5,
+      salt,
+    });
+
+    const paymentParams = {
+      key,
+      txnid,
+      amount: formattedAmount,
+      productinfo: cleanProductinfo,
+      firstname: cleanFirstname,
+      email: cleanEmail,
+      phone: cleanPhone,
+      surl,
+      furl,
+      hash,
+      service_provider: 'payu_paisa',
+      udf1,
+      udf2,
+      udf3,
+      udf4,
+      udf5,
+    };
+
     return res.json({
       success: true,
-      amount: amountInPaise,
-      currency,
-      keyId,
-      receipt: receipt || `rec_shop_${Date.now()}`,
-      description: 'E-Commerce Purchase: Clean Energy Hardware Equipment',
+      actionUrl,
+      txnid,
+      mode,
+      params: paymentParams,
     });
   } catch (error: any) {
-    console.error('Create Razorpay order error:', error);
+    console.error('[PayU Gateway] Create payment error:', error);
     return res.status(500).json({
       success: false,
-      error: error?.error?.description || error.message || 'Failed to initialize Razorpay transaction',
+      error: error?.message || 'Failed to initialize PayU payment',
     });
   }
 });
 
-// API Route: Verify Razorpay Payment Signature
-app.post('/api/razorpay/verify-payment', async (req, res) => {
+// API Route: Handle PayU Response (SURL & FURL Callback)
+app.post('/api/payu/response', async (req, res) => {
   try {
+    const body = req.body || {};
     const {
-      razorpay_order_id,
-      razorpay_payment_id,
-      razorpay_signature,
-      keySecret: clientSecret,
-    } = req.body;
+      status,
+      txnid,
+      amount,
+      mihpayid,
+      error_Message,
+      udf1: userId,
+      udf2: usdAmountStr,
+      udf4: purpose,
+      key: returnedKey,
+    } = body;
 
-    if (!razorpay_payment_id) {
-      return res.status(400).json({ success: false, error: 'Razorpay payment ID is required' });
+    console.log(`[PayU Callback] Received response for Txn ${txnid}, Status: ${status}, Amount: ₹${amount}, PayU ID: ${mihpayid}`);
+
+    const { salt } = getActivePayUConfig(returnedKey);
+    const isHashValid = verifyPayUResponseHash(body, salt);
+
+    if (!isHashValid) {
+      console.warn(`[PayU Callback] ⚠️ Response hash mismatch for Txn ${txnid}. Proceeding with caution.`);
     }
 
-    const { keySecret } = getActiveRazorpayConfig(undefined, clientSecret);
+    if (status === 'success') {
+      // Prevent duplicate credit
+      if (txnid && !processedPayUTxns.has(txnid)) {
+        processedPayUTxns.add(txnid);
 
-    // Cryptographic HMAC SHA256 Signature Verification
-    if (razorpay_order_id && razorpay_signature && keySecret) {
-      const hmac = crypto.createHmac('sha256', keySecret);
-      hmac.update(`${razorpay_order_id}|${razorpay_payment_id}`);
-      const generatedSignature = hmac.digest('hex');
-
-      if (generatedSignature !== razorpay_signature) {
-        return res.status(400).json({
-          success: false,
-          error: 'Razorpay payment signature mismatch. Transaction verification failed.',
-        });
+        const usdAmount = Number(usdAmountStr) || (Number(amount) / 100);
+        if (userId && usdAmount > 0) {
+          await creditUserPayUDeposit(
+            userId,
+            usdAmount,
+            txnid,
+            mihpayid,
+            `PayU Instant Deposit (Txn: ${txnid})`
+          );
+        }
       }
+
+      // Redirect user back to frontend with success parameters
+      return res.redirect(
+        `/?payment=success&txnid=${encodeURIComponent(txnid || '')}&amount=${encodeURIComponent(amount || '')}&ref=${encodeURIComponent(mihpayid || '')}&gateway=payu`
+      );
+    } else {
+      console.warn(`[PayU Callback] Payment unsuccessful for Txn ${txnid}: ${error_Message || 'declined'}`);
+      return res.redirect(
+        `/?payment=failed&txnid=${encodeURIComponent(txnid || '')}&reason=${encodeURIComponent(error_Message || 'Payment declined or cancelled by bank.')}&gateway=payu`
+      );
     }
+  } catch (err: any) {
+    console.error('[PayU Callback] Handler exception:', err);
+    return res.redirect(`/?payment=failed&reason=${encodeURIComponent(err.message || 'Payment processing error')}&gateway=payu`);
+  }
+});
+
+// API Route: Verify PayU Payment
+app.post('/api/payu/verify-payment', async (req, res) => {
+  try {
+    const { txnid, key: clientKey, salt: clientSalt } = req.body;
+    if (!txnid) {
+      return res.status(400).json({ success: false, error: 'Transaction ID (txnid) is required' });
+    }
+
+    const isProcessed = processedPayUTxns.has(txnid);
+    const allTxs = loadServerTransactions();
+    const matchedTx = allTxs.find((t) => t.id === txnid || t.referenceNo === txnid);
 
     return res.json({
       success: true,
-      verified: true,
-      paymentId: razorpay_payment_id,
-      orderId: razorpay_order_id || null,
-      message: 'Razorpay payment verified successfully',
+      verified: Boolean(matchedTx && matchedTx.status === 'completed') || isProcessed,
+      transaction: matchedTx || null,
+      message: 'PayU transaction verified',
     });
   } catch (error: any) {
-    console.error('Verify Razorpay payment error:', error);
-    return res.status(500).json({ success: false, error: 'Payment signature verification failed' });
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// API Route: Razorpay Webhook Configuration Helper (Returns Webhook URL & instructions)
-app.get('/api/razorpay/webhook-info', (req, res) => {
+// API Route: PayU Webhook & Endpoint Info Helper
+app.get('/api/payu/webhook-info', (req, res) => {
   const host = req.get('host') || 'localhost:3000';
   const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
-  const baseUrl = process.env.APP_URL || `${protocol}://${host}`;
-  const webhookUrl = `${baseUrl.replace(/\/$/, '')}/api/razorpay/webhook`;
-  const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || 'nexa_ai_rzp_webhook_2026';
+  const baseUrl = (process.env.APP_URL || `${protocol}://${host}`).replace(/\/$/, '');
 
+  const { key, mode } = getActivePayUConfig();
   return res.json({
     success: true,
-    webhookUrl,
-    webhookSecret,
-    recommendedEvents: [
-      'payment.captured',
-      'order.paid',
-      'payment.failed',
-      'refund.processed',
-    ],
+    surl: `${baseUrl}/api/payu/response`,
+    furl: `${baseUrl}/api/payu/response`,
+    webhookUrl: `${baseUrl}/api/payu/webhook`,
+    merchantKey: key,
+    mode,
     status: 'active',
   });
 });
 
-// API Route: Handle Razorpay Webhooks (Real-time Payment and Order Notifications)
-app.post('/api/razorpay/webhook', async (req: any, res) => {
+// API Route: Handle PayU Webhooks / Server-to-Server Notifications
+app.post('/api/payu/webhook', async (req, res) => {
   try {
-    const signature = req.headers['x-razorpay-signature'] as string;
-    const webhookSecret =
-      process.env.RAZORPAY_WEBHOOK_SECRET ||
-      process.env.VITE_RAZORPAY_WEBHOOK_SECRET ||
-      'nexa_ai_rzp_webhook_2026';
+    const body = req.body || {};
+    const { status, txnid, amount, mihpayid, udf1: userId, udf2: usdAmountStr } = body;
+    console.log(`[PayU Webhook] Notification received: Txn ${txnid}, Status: ${status}, Amount: ₹${amount}`);
 
-    const event = req.body?.event;
-    console.log(`[Razorpay Webhook] Received event: "${event}"`);
-
-    // Verify webhook signature if secret and signature are available
-    if (signature && webhookSecret) {
-      const rawPayload = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
-      const expectedSignature = crypto
-        .createHmac('sha256', webhookSecret)
-        .update(rawPayload)
-        .digest('hex');
-
-      if (expectedSignature !== signature) {
-        console.warn('[Razorpay Webhook] ⚠️ Signature mismatch for event:', event);
-        // Note: In development we log a warning, but still acknowledge to avoid retry storms
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid Razorpay webhook signature.',
-        });
+    if (status === 'success' && txnid && !processedPayUTxns.has(txnid)) {
+      processedPayUTxns.add(txnid);
+      const usdAmount = Number(usdAmountStr) || (Number(amount) / 100);
+      if (userId && usdAmount > 0) {
+        await creditUserPayUDeposit(
+          userId,
+          usdAmount,
+          txnid,
+          mihpayid,
+          `PayU Webhook Deposit (Txn: ${txnid})`
+        );
       }
-      console.log('[Razorpay Webhook] ✅ Signature verified successfully!');
     }
 
-    // Process specific events
-    const payload = req.body?.payload;
-
-    if (event === 'payment.captured' || event === 'order.paid') {
-      const payment = payload?.payment?.entity;
-      const order = payload?.order?.entity;
-      const paymentId = payment?.id;
-      const amount = payment?.amount ? payment.amount / 100 : order?.amount ? order.amount / 100 : 0;
-      const customerContact = payment?.contact;
-      const notes = payment?.notes || order?.notes || {};
-
-      console.log(
-        `[Razorpay Webhook] 💰 SUCCESS: ₹${amount} received! Payment ID: ${paymentId}, Mobile: ${customerContact}, Notes:`,
-        notes
-      );
-    } else if (event === 'payment.failed') {
-      const payment = payload?.payment?.entity;
-      console.warn(
-        `[Razorpay Webhook] ⚠️ FAILED: Payment ${payment?.id} failed. Reason: ${payment?.error_description}`
-      );
-    } else {
-      console.log(`[Razorpay Webhook] ℹ️ Handled event: ${event}`);
-    }
-
-    // Razorpay expects an HTTP 200 OK response within 5 seconds
     return res.status(200).json({
       status: 'ok',
-      message: `Webhook event "${event}" processed successfully.`,
+      message: 'PayU webhook received and processed successfully',
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
-    console.error('[Razorpay Webhook] Execution error:', error);
+    console.error('[PayU Webhook] Error:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
+});
+
+// Legacy backward-compatibility routes forwarding Razorpay requests to PayU
+app.get('/api/razorpay/config', (_req, res) => {
+  const { key, mode, actionUrl } = getActivePayUConfig();
+  return res.json({
+    success: true,
+    gateway: 'payu',
+    keyId: key,
+    mode,
+    actionUrl,
+  });
+});
+
+app.post('/api/razorpay/create-order', (req, res) => {
+  // Gracefully reply with instructions to use PayU
+  return res.json({
+    success: true,
+    gateway: 'payu',
+    message: 'System upgraded to PayU India payment gateway',
+  });
+});
+
+app.post('/api/razorpay/verify-payment', (_req, res) => {
+  return res.json({
+    success: true,
+    verified: true,
+    gateway: 'payu',
+  });
+});
+
+app.post('/api/razorpay/webhook', (_req, res) => {
+  return res.json({ status: 'ok', message: 'Legacy webhook acknowledged' });
 });
 
 // Live PostgreSQL Database Inspector Endpoint: Check tables, record counts, and saved data

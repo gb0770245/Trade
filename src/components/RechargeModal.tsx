@@ -22,7 +22,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { triggerOfficialRazorpayPayment } from '../services/razorpayService';
+import { triggerOfficialPayUPayment } from '../services/payuService';
 
 export const RechargeModal: React.FC = () => {
   const {
@@ -37,20 +37,23 @@ export const RechargeModal: React.FC = () => {
   } = useApp();
 
   const minDeposit =
-    platformSettings?.minRecharge && platformSettings.minRecharge >= 25
+    typeof platformSettings?.minRecharge === 'number' && !isNaN(platformSettings.minRecharge) && platformSettings.minRecharge > 0
       ? platformSettings.minRecharge
-      : 25;
+      : 0.01;
   const isRechargeAllowed = platformSettings?.isRechargeEnabled !== false;
-  const isRazorpayAllowed = platformSettings?.isRazorpayEnabled !== false;
+  const isPayUAllowed = platformSettings?.isPayUEnabled !== false;
   const isManualUpiAllowed = platformSettings?.isManualUpiEnabled !== false;
 
-  // Active Gateway Tab: 'manual_upi' or 'razorpay'
-  const [activeGateway, setActiveGateway] = useState<'manual_upi' | 'razorpay'>(
-    isManualUpiAllowed ? 'manual_upi' : 'razorpay'
+  // Active Gateway Tab: 'manual_upi' or 'payu'
+  const [activeGateway, setActiveGateway] = useState<'manual_upi' | 'payu'>(
+    isManualUpiAllowed ? 'manual_upi' : 'payu'
   );
 
-  const PRESETS = [25, 50, 100, 200, 500, 1000];
-  const [selectedAmount, setSelectedAmount] = useState<number>(25);
+  const PRESETS =
+    minDeposit < 25
+      ? [minDeposit, 1, 5, 10, 25, 50, 100].filter((v, idx, arr) => arr.indexOf(v) === idx && v >= minDeposit)
+      : [25, 50, 100, 200, 500, 1000];
+  const [selectedAmount, setSelectedAmount] = useState<number>(() => (minDeposit < 25 ? minDeposit : 25));
   const [customAmount, setCustomAmount] = useState<string>('');
 
   // Razorpay method selector
@@ -70,8 +73,8 @@ export const RechargeModal: React.FC = () => {
 
   // Active USD amount entered by the user
   const activeAmount = customAmount ? parseFloat(customAmount) || 0 : selectedAmount;
-  // 1 USD converts to 100 INR in payment mode
-  const paymentInrAmount = Math.round(activeAmount * 100);
+  // 1 USD converts to 100 INR in payment mode (minimum 1 INR for micro-deposits)
+  const paymentInrAmount = Math.max(1, Math.round(activeAmount * 100));
 
   // Admin Configured UPI ID & Name
   const adminUpiId = (platformSettings?.merchantUpiId || 'nexaai.pay@icici').trim();
@@ -115,7 +118,7 @@ export const RechargeModal: React.FC = () => {
       return;
     }
     if (activeAmount < minDeposit) {
-      showToast(`Minimum deposit is $${minDeposit.toFixed(2)} (₹${(minDeposit * 100).toLocaleString()})`, 'error');
+      showToast(`Minimum deposit is $${minDeposit < 1 ? minDeposit.toFixed(2) : minDeposit} (₹${Math.max(1, Math.round(minDeposit * 100)).toLocaleString()})`, 'error');
       return;
     }
     const cleanUtr = utrNumber.replace(/\D/g, '').trim();
@@ -144,49 +147,43 @@ export const RechargeModal: React.FC = () => {
     }
   };
 
-  // Trigger Official Razorpay Payment Gateway directly
-  const handleRazorpayPayment = async () => {
+  // Trigger Official PayU India Payment Gateway directly
+  const handlePayUPayment = async () => {
     if (!isRechargeAllowed) {
       showToast('Add Money is currently paused by platform administrator.', 'error');
       return;
     }
-    if (!isRazorpayAllowed) {
-      showToast('Razorpay payment gateway is currently disabled by administrator.', 'error');
+    if (!isPayUAllowed) {
+      showToast('PayU payment gateway is currently disabled by administrator.', 'error');
       return;
     }
     if (activeAmount < minDeposit) {
-      showToast(`Minimum deposit is $${minDeposit.toFixed(2)}`, 'error');
+      showToast(`Minimum deposit is $${minDeposit < 1 ? minDeposit.toFixed(2) : minDeposit} (₹${Math.max(1, Math.round(minDeposit * 100)).toLocaleString()})`, 'error');
       return;
     }
     setIsProcessing(true);
 
     try {
-      const keyId =
-        platformSettings?.razorpayKeyId && platformSettings.razorpayKeyId !== 'rzp_live_TsxVeW7tusSgjp'
-          ? platformSettings.razorpayKeyId
-          : undefined;
-      const keySecret =
-        platformSettings?.razorpayKeySecret && platformSettings.razorpayKeySecret !== 'SvNqYN6H09fU4mNSGqJeTG0V'
-          ? platformSettings.razorpayKeySecret
-          : undefined;
-      const merchantName = platformSettings?.razorpayMerchantName?.trim() || 'Nexa AI';
-      const merchantLogo = platformSettings?.razorpayLogoUrl?.trim() || '/logo.png';
+      const merchantKey = platformSettings?.payuMerchantKey?.trim();
+      const merchantSalt = platformSettings?.payuMerchantSalt?.trim();
+      const merchantMode = platformSettings?.payuMode || 'test';
+      const merchantName = platformSettings?.payuMerchantName?.trim() || 'Nexa AI';
 
-      const result = await triggerOfficialRazorpayPayment({
-        keyId,
-        keySecret,
+      const result = await triggerOfficialPayUPayment({
+        key: merchantKey,
+        salt: merchantSalt,
+        mode: merchantMode,
         amount: paymentInrAmount,
         usdAmount: activeAmount,
         merchantName,
-        merchantLogo,
-        themeColor: platformSettings?.razorpayThemeColor || '#0f766e',
+        themeColor: platformSettings?.payuThemeColor || '#0f766e',
         userName: user?.nickname || 'Investor',
         userPhone: user?.phone || '9999999999',
         userId: user?.id || '833863',
-        preferredMethod: selectedMethod,
+        purpose: 'recharge',
         onSuccess: async (paymentId: string) => {
-          showToast(`Razorpay payment verified! $${activeAmount.toFixed(2)} added to your wallet (Ref: ${paymentId})`, 'success');
-          await recharge(activeAmount, 'Razorpay Instant', paymentId);
+          showToast(`PayU payment verified! $${activeAmount.toFixed(2)} added to your wallet (Ref: ${paymentId})`, 'success');
+          await recharge(activeAmount, 'PayU Instant', paymentId);
           setIsProcessing(false);
           closeModal();
         },
@@ -197,7 +194,7 @@ export const RechargeModal: React.FC = () => {
             amountUsd: activeAmount,
             amountInr: paymentInrAmount,
             onRetry: () => {
-              handleRazorpayPayment();
+              handlePayUPayment();
             },
           });
         },
@@ -208,7 +205,7 @@ export const RechargeModal: React.FC = () => {
             amountUsd: activeAmount,
             amountInr: paymentInrAmount,
             onRetry: () => {
-              handleRazorpayPayment();
+              handlePayUPayment();
             },
           });
         },
@@ -219,9 +216,9 @@ export const RechargeModal: React.FC = () => {
         showToast(result.message, 'error');
       }
     } catch (err: any) {
-      console.error('Razorpay trigger exception:', err);
+      console.error('PayU trigger exception:', err);
       setIsProcessing(false);
-      showToast(`Error opening Razorpay: ${err.message}`, 'error');
+      showToast(`Error opening PayU: ${err.message}`, 'error');
     }
   };
 
@@ -358,15 +355,18 @@ export const RechargeModal: React.FC = () => {
 
               <button
                 type="button"
-                onClick={() => setActiveGateway('razorpay')}
+                onClick={() => setActiveGateway('payu')}
                 className={`py-2 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                  activeGateway === 'razorpay'
-                    ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30'
+                  activeGateway === 'payu'
+                    ? 'bg-teal-600 text-white shadow-md shadow-teal-600/30'
                     : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                 }`}
               >
                 <CreditCard className="w-4 h-4" />
-                <span>Online Gateway</span>
+                <span>PayU Gateway</span>
+                <span className="text-[9px] bg-emerald-400 text-slate-950 px-1.5 py-0.2 rounded-full font-black">
+                  INSTANT
+                </span>
               </button>
             </div>
 
@@ -394,7 +394,7 @@ export const RechargeModal: React.FC = () => {
                           : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200/60 dark:border-slate-700 hover:border-emerald-500'
                       }`}
                     >
-                      ${amt.toLocaleString()}
+                      ${amt < 1 ? amt.toString() : amt.toLocaleString()}
                     </button>
                   );
                 })}
@@ -407,11 +407,11 @@ export const RechargeModal: React.FC = () => {
                 <span className="text-sm font-bold text-slate-400 mr-2">$</span>
                 <input
                   type="number"
-                  min="1"
-                  step="any"
+                  min={minDeposit}
+                  step="0.01"
                   value={customAmount}
                   onChange={(e) => setCustomAmount(e.target.value)}
-                  placeholder={`Or enter custom amount (Min $${minDeposit})`}
+                  placeholder={`Or enter custom amount (Min $${minDeposit < 1 ? minDeposit.toFixed(2) : minDeposit})`}
                   className="w-full text-xs font-semibold outline-none bg-transparent text-slate-900 dark:text-slate-100"
                 />
               </div>
@@ -624,160 +624,84 @@ export const RechargeModal: React.FC = () => {
             )}
 
             {/* ============================================================== */}
-            {/* GATEWAY 2: RAZORPAY ONLINE GATEWAY */}
+            {/* GATEWAY 2: PAYU INDIA ONLINE GATEWAY */}
             {/* ============================================================== */}
-            {activeGateway === 'razorpay' && (
+            {activeGateway === 'payu' && (
               <div className="space-y-4">
-                {/* Payment Method Selector */}
-                <div>
+                {/* Payment Highlights & Badges */}
+                <div className="p-3.5 rounded-2xl bg-teal-500/10 border border-teal-500/30 text-teal-800 dark:text-teal-200">
                   <div className="flex items-center justify-between mb-2">
-                    <label className="text-xs font-semibold text-slate-500 dark:text-slate-400">
-                      Payment Option (भुगतान का विकल्प चुनें)
-                    </label>
-                    <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1">
-                      <ShieldCheck className="w-3.5 h-3.5" />
-                      All Options Unlocked
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg bg-teal-600 text-white flex items-center justify-center font-black text-xs shadow-md">
+                        PayU
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                          <span>PayU India Official Checkout</span>
+                          <span className="text-[9px] bg-emerald-500 text-white px-1.5 py-0.2 rounded font-extrabold">VERIFIED</span>
+                        </h4>
+                        <p className="text-[10px] text-teal-700 dark:text-teal-300">
+                          100% Secure • Instant Auto-Credit to Wallet
+                        </p>
+                      </div>
+                    </div>
+                    <span className="text-xs font-extrabold text-teal-600 dark:text-teal-400 font-mono">
+                      ₹{paymentInrAmount.toLocaleString()} INR
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2 mb-2">
-                    <button
-                      type="button"
-                      onClick={() => setSelectedMethod('all')}
-                      className={`p-2.5 rounded-xl border text-left transition-all flex items-start gap-2.5 col-span-2 cursor-pointer ${
-                        selectedMethod === 'all'
-                          ? 'border-blue-500 bg-blue-50/70 dark:bg-blue-950/40 ring-1 ring-blue-500'
-                          : 'border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/40 hover:border-slate-300'
-                      }`}
-                    >
-                      <div className="p-1.5 rounded-lg bg-blue-600 text-white shrink-0 mt-0.5">
-                        <Layers className="w-4 h-4" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
-                            Show All Options (सभी विकल्प देखें)
-                          </span>
-                          {selectedMethod === 'all' && (
-                            <CheckCircle2 className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
-                          )}
-                        </div>
-                        <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
-                          UPI, Google Pay, PhonePe, Paytm, Cards & NetBanking direct screen par
-                        </p>
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setSelectedMethod('upi')}
-                      className={`p-2 rounded-xl border text-left transition-all flex items-center gap-2 cursor-pointer ${
-                        selectedMethod === 'upi'
-                          ? 'border-blue-500 bg-blue-50/70 dark:bg-blue-950/40 ring-1 ring-blue-500'
-                          : 'border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/40 hover:border-slate-300'
-                      }`}
-                    >
-                      <div className="p-1.5 rounded-lg bg-emerald-600 text-white shrink-0">
-                        <Smartphone className="w-3.5 h-3.5" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <span className="text-[11px] font-bold text-slate-900 dark:text-slate-100 block truncate">
-                          UPI Apps
-                        </span>
-                        <span className="text-[9px] text-slate-400 block truncate">
-                          PhonePe, GPay, Paytm
-                        </span>
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setSelectedMethod('card')}
-                      className={`p-2 rounded-xl border text-left transition-all flex items-center gap-2 cursor-pointer ${
-                        selectedMethod === 'card'
-                          ? 'border-blue-500 bg-blue-50/70 dark:bg-blue-950/40 ring-1 ring-blue-500'
-                          : 'border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/40 hover:border-slate-300'
-                      }`}
-                    >
-                      <div className="p-1.5 rounded-lg bg-indigo-600 text-white shrink-0">
-                        <CreditCard className="w-3.5 h-3.5" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <span className="text-[11px] font-bold text-slate-900 dark:text-slate-100 block truncate">
-                          Cards
-                        </span>
-                        <span className="text-[9px] text-slate-400 block truncate">
-                          Debit / Credit Cards
-                        </span>
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setSelectedMethod('netbanking')}
-                      className={`p-2 rounded-xl border text-left transition-all flex items-center gap-2 cursor-pointer ${
-                        selectedMethod === 'netbanking'
-                          ? 'border-blue-500 bg-blue-50/70 dark:bg-blue-950/40 ring-1 ring-blue-500'
-                          : 'border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/40 hover:border-slate-300'
-                      }`}
-                    >
-                      <div className="p-1.5 rounded-lg bg-blue-600 text-white shrink-0">
-                        <Building2 className="w-3.5 h-3.5" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <span className="text-[11px] font-bold text-slate-900 dark:text-slate-100 block truncate">
-                          Net Banking
-                        </span>
-                        <span className="text-[9px] text-slate-400 block truncate">
-                          All Indian Banks
-                        </span>
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setSelectedMethod('wallet')}
-                      className={`p-2 rounded-xl border text-left transition-all flex items-center gap-2 cursor-pointer ${
-                        selectedMethod === 'wallet'
-                          ? 'border-blue-500 bg-blue-50/70 dark:bg-blue-950/40 ring-1 ring-blue-500'
-                          : 'border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/40 hover:border-slate-300'
-                      }`}
-                    >
-                      <div className="p-1.5 rounded-lg bg-amber-600 text-white shrink-0">
-                        <Wallet className="w-3.5 h-3.5" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <span className="text-[11px] font-bold text-slate-900 dark:text-slate-100 block truncate">
-                          Wallets
-                        </span>
-                        <span className="text-[9px] text-slate-400 block truncate">
-                          Paytm, Mobikwik
-                        </span>
-                      </div>
-                    </button>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-teal-500/20 text-[10px]">
+                    <div className="flex items-center gap-1.5 text-slate-700 dark:text-slate-300">
+                      <Smartphone className="w-3.5 h-3.5 text-teal-600" />
+                      <span>PhonePe / GPay</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-slate-700 dark:text-slate-300">
+                      <CreditCard className="w-3.5 h-3.5 text-teal-600" />
+                      <span>Debit/Credit Card</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-slate-700 dark:text-slate-300">
+                      <Building2 className="w-3.5 h-3.5 text-teal-600" />
+                      <span>50+ NetBanking</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-slate-700 dark:text-slate-300">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>256-bit Encrypted</span>
+                    </div>
                   </div>
                 </div>
 
-                {/* Razorpay Action CTA Button */}
+                {/* Amount Confirmation Banner */}
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-center justify-between text-xs">
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400">Deposit Amount:</span>
+                    <span className="font-extrabold text-slate-900 dark:text-white ml-1.5">${activeAmount.toFixed(2)} USD</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-slate-500 dark:text-slate-400">Total in INR:</span>
+                    <span className="font-extrabold text-teal-600 dark:text-teal-400 ml-1.5 font-mono">₹{paymentInrAmount.toLocaleString()}</span>
+                  </div>
+                </div>
+
+                {/* PayU Action CTA Button */}
                 <button
                   type="button"
-                  onClick={handleRazorpayPayment}
-                  disabled={isProcessing || !isRechargeAllowed || !isRazorpayAllowed || activeAmount < minDeposit}
-                  className="w-full py-3.5 rounded-xl font-bold text-white bg-gradient-to-r from-blue-600 via-indigo-600 to-teal-600 hover:from-blue-700 hover:via-indigo-700 hover:to-teal-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-600/30 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                  onClick={handlePayUPayment}
+                  disabled={isProcessing || !isRechargeAllowed || !isPayUAllowed || activeAmount < minDeposit}
+                  className="w-full py-3.5 rounded-xl font-bold text-white bg-gradient-to-r from-teal-600 via-emerald-600 to-teal-700 hover:from-teal-700 hover:via-emerald-700 hover:to-teal-800 transition-all flex items-center justify-center gap-2 shadow-lg shadow-teal-600/30 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                 >
                   {isProcessing ? (
                     <>
                       <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      <span>Opening Razorpay Checkout...</span>
+                      <span>Connecting to PayU India...</span>
                     </>
                   ) : !isRechargeAllowed ? (
                     <span>Add Money Paused by Admin</span>
-                  ) : !isRazorpayAllowed ? (
+                  ) : !isPayUAllowed ? (
                     <span>Gateway Unavailable</span>
                   ) : (
                     <>
                       <Sparkles className="w-4 h-4 text-amber-300" />
-                      <span>Pay ₹{paymentInrAmount.toLocaleString()} INR via Razorpay (Add ${activeAmount.toFixed(2)})</span>
+                      <span>Pay ₹{paymentInrAmount.toLocaleString()} INR via PayU (Add ${activeAmount.toFixed(2)})</span>
                       <ArrowRight className="w-4 h-4" />
                     </>
                   )}
