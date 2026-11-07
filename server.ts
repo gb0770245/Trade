@@ -4701,37 +4701,6 @@ async function startServer() {
       try {
         await initPostgresSchema();
 
-        // One-time execution: Purge all demo/old orders and zero all user balances permanently
-        const balancesResetFile = path.resolve(process.cwd(), 'src/data/balances_zeroed_v1.done');
-        if (!fs.existsSync(balancesResetFile)) {
-          console.log('[Cloud SQL] Applying one-time user balance zeroing across PostgreSQL & SQLite...');
-          await resetAllUsersBalancesInDb();
-          resetAllUsersBalancesInSql();
-          try {
-            fs.writeFileSync(balancesResetFile, new Date().toISOString(), 'utf-8');
-          } catch {}
-        }
-
-        const ordersPurgeFile = path.resolve(process.cwd(), 'src/data/orders_purged_v1.done');
-        if (!fs.existsSync(ordersPurgeFile)) {
-          console.log('[Cloud SQL] Applying one-time purge of all demo orders across PostgreSQL & SQLite...');
-          await purgeAllOrdersFromDb();
-          purgeAllOrdersFromSql();
-          try {
-            fs.writeFileSync(ordersPurgeFile, new Date().toISOString(), 'utf-8');
-          } catch {}
-        }
-
-        const txsPurgeFile = path.resolve(process.cwd(), 'src/data/txs_purged_v1.done');
-        if (!fs.existsSync(txsPurgeFile)) {
-          console.log('[Cloud SQL] Applying one-time purge of all transaction history across PostgreSQL & disk...');
-          await purgeAllTransactionsFromDb();
-          saveServerTransactions([]);
-          try {
-            fs.writeFileSync(txsPurgeFile, new Date().toISOString(), 'utf-8');
-          } catch {}
-        }
-
         // 1. Users: Cloud SQL is the persistent source of truth
         let sqlUsers = await getAllUsers();
         if (sqlUsers.length === 0) {
