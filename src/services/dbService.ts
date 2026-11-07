@@ -12,6 +12,21 @@ import {
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { User, Transaction, InvestmentOrder, PlatformSettings, InvestmentProduct, NoticeItem, CustomPromoCode, TeamMember, ReferrerInfo } from '../types';
 
+export const isProductionHost = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname.toLowerCase();
+  return (
+    host === 'nexatrad.site' ||
+    host === 'www.nexatrad.site' ||
+    host.endsWith('onrender.com') ||
+    (!host.includes('localhost') &&
+      !host.includes('127.0.0.1') &&
+      !host.includes('asia-east1.run.app') &&
+      !host.includes('aistudio') &&
+      !host.includes('webcontainer'))
+  );
+};
+
 export const getTransactionTime = (tx: Transaction): number => {
   if (typeof tx.createdAt === 'number' && !isNaN(tx.createdAt) && tx.createdAt > 0) {
     return tx.createdAt;
@@ -281,14 +296,16 @@ export const dbService = {
       console.warn('API user save warning:', apiErr);
     }
 
-    // 2. Firestore cloud sync
-    try {
-      await setDoc(doc(db, 'users', completeUser.id), {
-        ...completeUser,
-        updatedAt: new Date().toISOString(),
-      }, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
+    // 2. Firestore cloud sync (isolated to dev sandbox, never pollute or leak with production)
+    if (!isProductionHost()) {
+      try {
+        await setDoc(doc(db, 'users', completeUser.id), {
+          ...completeUser,
+          updatedAt: new Date().toISOString(),
+        }, { merge: true });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
     }
   },
 
@@ -306,13 +323,15 @@ export const dbService = {
       console.warn('Backend bank-details save warning:', err);
     }
 
-    try {
-      await setDoc(doc(db, 'users', userId), {
-        bankDetails,
-        updatedAt: new Date().toISOString(),
-      }, { merge: true });
-    } catch (fsErr) {
-      handleFirestoreError(fsErr, OperationType.WRITE, `users/${userId}`);
+    if (!isProductionHost()) {
+      try {
+        await setDoc(doc(db, 'users', userId), {
+          bankDetails,
+          updatedAt: new Date().toISOString(),
+        }, { merge: true });
+      } catch (fsErr) {
+        handleFirestoreError(fsErr, OperationType.WRITE, `users/${userId}`);
+      }
     }
   },
 
@@ -342,7 +361,12 @@ export const dbService = {
       (u) => u.id === cleanId || u.phone === cleanId || (cleanPhone.length === 10 && String(u.phone || '').replace(/\D/g, '').slice(-10) === cleanPhone)
     );
 
-    // 3. Also check Firestore to ensure latest state and merge
+    // In production, return SQL match directly without touching dev Firestore
+    if (isProductionHost()) {
+      return backupMatch || null;
+    }
+
+    // 3. Also check Firestore to ensure latest state and merge (Dev sandbox only)
     const path = `users/${backupMatch?.id || cleanId}`;
     try {
       const snap = await getDoc(doc(db, 'users', backupMatch?.id || cleanId));
@@ -362,6 +386,25 @@ export const dbService = {
 
   // Real-time listener for user state
   subscribeToUser(userId: string, onUpdate: (user: User) => void): () => void {
+    if (isProductionHost()) {
+      let active = true;
+      const poll = async () => {
+        if (!active || !userId) return;
+        try {
+          const u = await this.getUser(userId);
+          if (u && active) {
+            onUpdate(u);
+          }
+        } catch {}
+      };
+      poll();
+      const interval = setInterval(poll, 10000);
+      return () => {
+        active = false;
+        clearInterval(interval);
+      };
+    }
+
     const path = `users/${userId}`;
     const unsubscribe = onSnapshot(
       doc(db, 'users', userId),
@@ -405,23 +448,25 @@ export const dbService = {
 
     backupUsers.forEach(addOrMerge);
 
-    try {
-      const querySnapshot = await getDocs(collection(db, 'users'));
-      querySnapshot.forEach((d) => {
-        const data = d.data() as User;
-        const uId = String(data.id || d.id || '').trim();
-        const uPhone = data.phone ? String(data.phone).replace(/\D/g, '').slice(-10) : '';
+    if (!isProductionHost()) {
+      try {
+        const querySnapshot = await getDocs(collection(db, 'users'));
+        querySnapshot.forEach((d) => {
+          const data = d.data() as User;
+          const uId = String(data.id || d.id || '').trim();
+          const uPhone = data.phone ? String(data.phone).replace(/\D/g, '').slice(-10) : '';
 
-        // If this document belongs to a deleted user, PURGE IT FROM FIRESTORE!
-        if (deletedBlacklist.has(uId) || (uPhone && deletedBlacklist.has(uPhone))) {
-          deleteDoc(d.ref).catch(() => {});
-          return;
-        }
+          // If this document belongs to a deleted user, PURGE IT FROM FIRESTORE!
+          if (deletedBlacklist.has(uId) || (uPhone && deletedBlacklist.has(uPhone))) {
+            deleteDoc(d.ref).catch(() => {});
+            return;
+          }
 
-        addOrMerge(data);
-      });
-    } catch (error) {
-      console.warn('Firestore read throttled/quota-exceeded, using persistent backup:', error);
+          addOrMerge(data);
+        });
+      } catch (error) {
+        console.warn('Firestore read throttled/quota-exceeded, using persistent backup:', error);
+      }
     }
 
     const combined = Array.from(byId.values()).filter((u) => {
@@ -559,6 +604,25 @@ export const dbService = {
 
   // Real-time listener for all users (for Admin Panel)
   subscribeToAllUsers(onUpdate: (users: User[]) => void): () => void {
+    if (isProductionHost()) {
+      let active = true;
+      const poll = async () => {
+        if (!active) return;
+        try {
+          const list = await this.getAllUsers();
+          if (list && list.length > 0 && active) {
+            onUpdate(list);
+          }
+        } catch {}
+      };
+      poll();
+      const interval = setInterval(poll, 12000);
+      return () => {
+        active = false;
+        clearInterval(interval);
+      };
+    }
+
     const path = 'users';
     try {
       const q = collection(db, 'users');
@@ -737,12 +801,14 @@ export const dbService = {
       console.warn('Backend Cloud SQL tx save warning:', e);
     }
 
-    // 2. Sync to Firestore
-    const path = `transactions/${tx.id}`;
-    try {
-      await setDoc(doc(db, 'transactions', tx.id), payload, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
+    // 2. Sync to Firestore (Dev sandbox only)
+    if (!isProductionHost()) {
+      const path = `transactions/${tx.id}`;
+      try {
+        await setDoc(doc(db, 'transactions', tx.id), payload, { merge: true });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
     }
   },
 
@@ -764,7 +830,11 @@ export const dbService = {
       console.warn('Could not fetch user transactions from backend:', err);
     }
 
-    // 2. Fetch from Firestore
+    if (isProductionHost()) {
+      return apiList.sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
+    }
+
+    // 2. Fetch from Firestore (Dev sandbox)
     const path = 'transactions';
     let firestoreList: Transaction[] = [];
     try {
@@ -812,6 +882,25 @@ export const dbService = {
 
   // Real-time listener for user's transactions
   subscribeToUserTransactions(userId: string, onUpdate: (txs: Transaction[]) => void): () => void {
+    if (isProductionHost()) {
+      let active = true;
+      const poll = async () => {
+        if (!active || !userId) return;
+        try {
+          const list = await this.getTransactions(userId);
+          if (list && active) {
+            onUpdate(list);
+          }
+        } catch {}
+      };
+      poll();
+      const interval = setInterval(poll, 10000);
+      return () => {
+        active = false;
+        clearInterval(interval);
+      };
+    }
+
     const path = 'transactions';
     try {
       const q = query(collection(db, 'transactions'), where('userId', '==', userId));
@@ -866,7 +955,11 @@ export const dbService = {
       console.warn('Could not fetch all transactions from backend:', err);
     }
 
-    // 2. Fetch from Firestore
+    if (isProductionHost()) {
+      return apiList.sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
+    }
+
+    // 2. Fetch from Firestore (Dev sandbox only)
     const path = 'transactions';
     let firestoreList: Transaction[] = [];
     try {
@@ -913,6 +1006,25 @@ export const dbService = {
 
   // Real-time listener for all admin transactions
   subscribeToAllTransactions(onUpdate: (txs: Transaction[]) => void): () => void {
+    if (isProductionHost()) {
+      let active = true;
+      const poll = async () => {
+        if (!active) return;
+        try {
+          const list = await this.getAllTransactions();
+          if (list && active) {
+            onUpdate(list);
+          }
+        } catch {}
+      };
+      poll();
+      const interval = setInterval(poll, 12000);
+      return () => {
+        active = false;
+        clearInterval(interval);
+      };
+    }
+
     const path = 'transactions';
     try {
       const q = collection(db, 'transactions');
@@ -968,15 +1080,17 @@ export const dbService = {
       console.warn('Backend update transaction status warning:', err);
     }
 
-    // 2. Update in Firestore
-    const path = `transactions/${txId}`;
-    try {
-      await setDoc(doc(db, 'transactions', txId), {
-        ...data,
-        updatedAt: new Date().toISOString(),
-      }, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
+    // 2. Update in Firestore (Dev sandbox only)
+    if (!isProductionHost()) {
+      const path = `transactions/${txId}`;
+      try {
+        await setDoc(doc(db, 'transactions', txId), {
+          ...data,
+          updatedAt: new Date().toISOString(),
+        }, { merge: true });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
     }
   },
 
@@ -991,11 +1105,13 @@ export const dbService = {
       console.warn('Backend delete transaction warning:', e);
     }
 
-    const path = `transactions/${cleanId}`;
-    try {
-      await deleteDoc(doc(db, 'transactions', cleanId));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, path);
+    if (!isProductionHost()) {
+      const path = `transactions/${cleanId}`;
+      try {
+        await deleteDoc(doc(db, 'transactions', cleanId));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, path);
+      }
     }
   },
 
@@ -1086,12 +1202,14 @@ export const dbService = {
       console.warn('Backend order sync warning:', e);
     }
 
-    // 2. Sync to Firestore
-    const path = `orders/${order.id}`;
-    try {
-      await setDoc(doc(db, 'orders', order.id), payload, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
+    // 2. Sync to Firestore (Dev sandbox only)
+    if (!isProductionHost()) {
+      const path = `orders/${order.id}`;
+      try {
+        await setDoc(doc(db, 'orders', order.id), payload, { merge: true });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
     }
   },
 
@@ -1134,7 +1252,16 @@ export const dbService = {
       console.warn('Backend SQL user orders fetch warning:', e);
     }
 
-    // 2. Fetch from Firestore (by userId and also by phone)
+    // In production, return SQL orders directly without touching dev Firestore
+    if (isProductionHost()) {
+      return Array.from(map.values()).sort((a, b) => {
+        const timeA = a.purchaseTimestamp || (a.purchaseDate ? new Date(a.purchaseDate).getTime() : 0);
+        const timeB = b.purchaseTimestamp || (b.purchaseDate ? new Date(b.purchaseDate).getTime() : 0);
+        return timeB - timeA;
+      });
+    }
+
+    // 2. Fetch from Firestore (Dev sandbox only)
     const path = 'orders';
     try {
       const q = query(collection(db, 'orders'), where('userId', '==', cleanId));
@@ -1149,7 +1276,6 @@ export const dbService = {
         if (o && o.id) {
           if (!map.has(String(o.id))) {
             map.set(String(o.id), o);
-            this.saveOrder(o, cleanId).catch(() => {});
           }
         }
       });
@@ -1167,7 +1293,6 @@ export const dbService = {
           if (o && o.id) {
             if (!map.has(String(o.id))) {
               map.set(String(o.id), o);
-              this.saveOrder(o, cleanId).catch(() => {});
             }
           }
         });
@@ -1210,7 +1335,17 @@ export const dbService = {
     // Initial immediate fetch
     fetchAndMerge();
 
-    // Firestore real-time listener
+    if (isProductionHost()) {
+      const pollInterval = setInterval(() => {
+        if (isSubscribed) fetchAndMerge();
+      }, 10000);
+      return () => {
+        isSubscribed = false;
+        clearInterval(pollInterval);
+      };
+    }
+
+    // Firestore real-time listener (Dev sandbox only)
     const path = 'orders';
     let unsubFirestore: (() => void) | null = null;
     try {
@@ -1268,7 +1403,15 @@ export const dbService = {
       console.warn('Backend SQL all orders fetch warning:', e);
     }
 
-    // 2. Fallback & Cloud sync: Firestore
+    if (isProductionHost()) {
+      return Array.from(map.values()).sort((a, b) => {
+        const timeA = a.purchaseTimestamp || (a.purchaseDate ? new Date(a.purchaseDate).getTime() : 0);
+        const timeB = b.purchaseTimestamp || (b.purchaseDate ? new Date(b.purchaseDate).getTime() : 0);
+        return timeB - timeA;
+      });
+    }
+
+    // 2. Fallback & Cloud sync: Firestore (Dev sandbox only)
     const path = 'orders';
     try {
       const querySnapshot = await getDocs(collection(db, 'orders'));
@@ -1308,11 +1451,13 @@ export const dbService = {
       }
     } catch {}
 
-    const path = `orders/${orderId}`;
-    try {
-      await setDoc(doc(db, 'orders', orderId), updates, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
+    if (!isProductionHost()) {
+      const path = `orders/${orderId}`;
+      try {
+        await setDoc(doc(db, 'orders', orderId), updates, { merge: true });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
     }
   },
 
@@ -1326,11 +1471,13 @@ export const dbService = {
       }
     } catch {}
 
-    const path = `orders/${cleanId}`;
-    try {
-      await deleteDoc(doc(db, 'orders', cleanId));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, path);
+    if (!isProductionHost()) {
+      const path = `orders/${cleanId}`;
+      try {
+        await deleteDoc(doc(db, 'orders', cleanId));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, path);
+      }
     }
   },
 
@@ -1372,9 +1519,29 @@ export const dbService = {
 
   async getPlatformSettings(): Promise<PlatformSettings | null> {
     const now = Date.now();
-    if (this._cachedSettings && (now - this._cachedSettings.timestamp < 30000)) {
+    if (this._cachedSettings && (now - this._cachedSettings.timestamp < 15000)) {
       return this._cachedSettings.data;
     }
+    // 1. Fetch from server backend API (PostgreSQL / SQLite)
+    try {
+      if (typeof window !== 'undefined') {
+        const res = await fetch('/api/platform-settings');
+        if (res.ok) {
+          const json = await res.json();
+          if (json?.settings && typeof json.settings === 'object') {
+            this._cachedSettings = { data: json.settings, timestamp: now };
+            return json.settings;
+          }
+        }
+      }
+    } catch {}
+
+    // In production, return cached without touching dev Firestore
+    if (isProductionHost()) {
+      return this._cachedSettings?.data || null;
+    }
+
+    // 2. Fallback to Firestore (Dev sandbox only)
     const path = 'settings/platform';
     try {
       const snap = await getDoc(doc(db, 'settings', 'platform'));
@@ -1392,24 +1559,55 @@ export const dbService = {
 
   async savePlatformSettings(settings: PlatformSettings): Promise<void> {
     this._cachedSettings = { data: settings, timestamp: Date.now() };
-    const path = 'settings/platform';
-    try {
-      const cleanSettings = JSON.parse(JSON.stringify(settings));
-      await setDoc(
-        doc(db, 'settings', 'platform'),
-        {
-          ...cleanSettings,
-          updatedAt: new Date().toISOString(),
-        },
-        { merge: true }
-      );
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
+    if (typeof window !== 'undefined') {
+      try {
+        await fetch('/api/platform-settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(settings),
+        });
+      } catch {}
+    }
+
+    if (!isProductionHost()) {
+      const path = 'settings/platform';
+      try {
+        const cleanSettings = JSON.parse(JSON.stringify(settings));
+        await setDoc(
+          doc(db, 'settings', 'platform'),
+          {
+            ...cleanSettings,
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true }
+        );
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
     }
   },
 
   // Real-time listener for platform settings
   subscribeToPlatformSettings(onUpdate: (settings: PlatformSettings) => void): () => void {
+    if (isProductionHost()) {
+      let active = true;
+      const poll = async () => {
+        if (!active) return;
+        try {
+          const s = await this.getPlatformSettings();
+          if (s && active) {
+            onUpdate(s);
+          }
+        } catch {}
+      };
+      poll();
+      const interval = setInterval(poll, 15000);
+      return () => {
+        active = false;
+        clearInterval(interval);
+      };
+    }
+
     const path = 'settings/platform';
     const unsubscribe = onSnapshot(
       doc(db, 'settings', 'platform'),
@@ -1451,6 +1649,25 @@ export const dbService = {
 
   // Products CRUD
   subscribeToProducts(onUpdate: (products: InvestmentProduct[]) => void): () => void {
+    if (isProductionHost()) {
+      let active = true;
+      const poll = async () => {
+        if (!active) return;
+        try {
+          const prods = await this.getAllProducts();
+          if (prods && prods.length > 0 && active) {
+            onUpdate(prods);
+          }
+        } catch {}
+      };
+      poll();
+      const interval = setInterval(poll, 15000);
+      return () => {
+        active = false;
+        clearInterval(interval);
+      };
+    }
+
     const path = 'products';
     const deletedBlacklist = this.getDeletedProductBlacklist();
     const obsoleteIds = new Set([
@@ -1580,6 +1797,10 @@ export const dbService = {
       }
     } catch {}
 
+    if (isProductionHost() && sqlList.length > 0) {
+      return sqlList.sort((a, b) => a.price - b.price);
+    }
+
     const path = 'products';
     try {
       const querySnapshot = await getDocs(collection(db, 'products'));
@@ -1689,12 +1910,14 @@ export const dbService = {
       console.warn('SQL save product warning:', e);
     }
 
-    // 2. Sync to Firestore
-    const path = `products/${enrichedProduct.id}`;
-    try {
-      await setDoc(doc(db, 'products', enrichedProduct.id), enrichedProduct, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
+    // 2. Sync to Firestore (Dev sandbox only)
+    if (!isProductionHost()) {
+      const path = `products/${enrichedProduct.id}`;
+      try {
+        await setDoc(doc(db, 'products', enrichedProduct.id), enrichedProduct, { merge: true });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
     }
   },
 
@@ -1727,12 +1950,14 @@ export const dbService = {
       console.warn('Server delete product warning:', e);
     }
 
-    // 4. Delete from Firestore
-    const path = `products/${cleanId}`;
-    try {
-      await deleteDoc(doc(db, 'products', cleanId));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, path);
+    // 4. Delete from Firestore (Dev sandbox only)
+    if (!isProductionHost()) {
+      const path = `products/${cleanId}`;
+      try {
+        await deleteDoc(doc(db, 'products', cleanId));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, path);
+      }
     }
   },
 
@@ -1750,6 +1975,10 @@ export const dbService = {
         }
       }
     } catch {}
+
+    if (isProductionHost() && cloudSqlList.length > 0) {
+      return cloudSqlList;
+    }
 
     const path = 'notices';
     try {
@@ -1784,12 +2013,14 @@ export const dbService = {
       console.warn('Cloud SQL save notice warning:', e);
     }
 
-    // 2. Sync to Firestore
-    const path = `notices/${notice.id}`;
-    try {
-      await setDoc(doc(db, 'notices', notice.id), notice, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
+    // 2. Sync to Firestore (Dev sandbox only)
+    if (!isProductionHost()) {
+      const path = `notices/${notice.id}`;
+      try {
+        await setDoc(doc(db, 'notices', notice.id), notice, { merge: true });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
     }
   },
 
@@ -1803,12 +2034,14 @@ export const dbService = {
       console.warn('Cloud SQL delete notice warning:', e);
     }
 
-    // 2. Delete from Firestore
-    const path = `notices/${noticeId}`;
-    try {
-      await deleteDoc(doc(db, 'notices', noticeId));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, path);
+    // 2. Delete from Firestore (Dev sandbox only)
+    if (!isProductionHost()) {
+      const path = `notices/${noticeId}`;
+      try {
+        await deleteDoc(doc(db, 'notices', noticeId));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, path);
+      }
     }
   },
 
@@ -1863,7 +2096,11 @@ export const dbService = {
       }
     } catch {}
 
-    // 2. Query Firestore
+    if (isProductionHost() && serverFetched) {
+      return serverList;
+    }
+
+    // 2. Query Firestore (Dev sandbox only)
     const path = 'promoCodes';
     try {
       const querySnapshot = await getDocs(collection(db, 'promoCodes'));
@@ -1971,12 +2208,14 @@ export const dbService = {
       } catch {}
     }
 
-    // 3. Sync to Cloud Firestore
-    const path = `promoCodes/${promo.id}`;
-    try {
-      await setDoc(doc(db, 'promoCodes', promo.id), promo, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
+    // 3. Sync to Cloud Firestore (Dev sandbox only)
+    if (!isProductionHost()) {
+      const path = `promoCodes/${promo.id}`;
+      try {
+        await setDoc(doc(db, 'promoCodes', promo.id), promo, { merge: true });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
     }
   },
 
@@ -2016,27 +2255,48 @@ export const dbService = {
       } catch {}
     }
 
-    // 4. Delete from Firestore by doc ID
-    try {
-      await deleteDoc(doc(db, 'promoCodes', cleanId));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `promoCodes/${cleanId}`);
-    }
-
-    // Also delete by code query from Firestore if code is provided
-    if (cleanCode) {
+    // 4. Delete from Firestore by doc ID (Dev sandbox only)
+    if (!isProductionHost()) {
       try {
-        const q = query(collection(db, 'promoCodes'), where('code', '==', cleanCode));
-        const snapshot = await getDocs(q);
-        for (const d of snapshot.docs) {
-          deleteDoc(d.ref).catch(() => {});
-        }
-      } catch {}
+        await deleteDoc(doc(db, 'promoCodes', cleanId));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `promoCodes/${cleanId}`);
+      }
+
+      // Also delete by code query from Firestore if code is provided
+      if (cleanCode) {
+        try {
+          const q = query(collection(db, 'promoCodes'), where('code', '==', cleanCode));
+          const snapshot = await getDocs(q);
+          for (const d of snapshot.docs) {
+            deleteDoc(d.ref).catch(() => {});
+          }
+        } catch {}
+      }
     }
   },
 
   // Real-time listener for promo codes
   subscribeToPromoCodes(onUpdate: (promos: CustomPromoCode[]) => void): () => void {
+    if (isProductionHost()) {
+      let active = true;
+      const poll = async () => {
+        if (!active) return;
+        try {
+          const list = await this.getAllPromoCodes();
+          if (list && active) {
+            onUpdate(list);
+          }
+        } catch {}
+      };
+      poll();
+      const interval = setInterval(poll, 20000);
+      return () => {
+        active = false;
+        clearInterval(interval);
+      };
+    }
+
     const path = 'promoCodes';
     const unsubscribe = onSnapshot(
       collection(db, 'promoCodes'),
