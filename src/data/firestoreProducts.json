@@ -7,7 +7,7 @@
     "vipRequirement": 0,
     "price": 25,
     "dailyEarnings": 1.25,
-    "dailyPercent": 5,
+    "dailyPercent": 1,
     "cycleDays": 45,
     "totalRevenue": 56.25,
     "soldCount": 428,
