@@ -33,6 +33,7 @@ import {
   upsertDbNotice,
   deleteDbNotice,
   purgeAllOrdersFromDb,
+  resetAllUsersBalancesInDb,
   initPostgresSchema,
 } from './src/db/queries.ts';
 import {
@@ -62,6 +63,7 @@ import {
   creditUserCommissionInSql,
   updateUserReferralsInSql,
   updateUserWalletBalanceInSql,
+  resetAllUsersBalancesInSql,
 } from './src/db/sqliteUsers.ts';
 import { isSqlConfigured, createPool } from './src/db/index.ts';
 
@@ -3036,6 +3038,32 @@ app.post(['/api/admin/orders/purge-all-orders', '/api/orders/purge-all'], async 
   }
 });
 
+// Reset all users balances to 0 permanently (Zero balances across SQLite, PostgreSQL, and disk backup)
+app.post(['/api/admin/users/reset-all-balances', '/api/users/reset-all-balances'], async (req, res) => {
+  try {
+    resetAllUsersBalancesInSql();
+    await resetAllUsersBalancesInDb();
+
+    // Also zero all users in users_backup.json
+    try {
+      const diskUsers = getCachedUsersBackup();
+      diskUsers.forEach((u: any) => {
+        u.rechargeBalance = 0;
+        u.withdrawalBalance = 0;
+        u.productRevenue = 0;
+        u.totalInvested = 0;
+        u.totalCommissionEarned = 0;
+      });
+      saveUsersBackup(diskUsers);
+    } catch {}
+
+    console.log('[Admin Users] All user balances completely reset to 0 in SQLite, PostgreSQL, and disk.');
+    return res.json({ success: true, message: 'All user balances have been reset to 0 in all databases.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // DELETE single transaction from Cloud SQL
 app.delete('/api/transactions/:id', async (req, res) => {
   try {
@@ -4607,8 +4635,29 @@ async function startServer() {
       try {
         await initPostgresSchema();
 
+        // One-time execution: Purge all demo/old orders and zero all user balances permanently
+        const balancesResetFile = path.resolve(process.cwd(), 'src/data/balances_zeroed_v1.done');
+        if (!fs.existsSync(balancesResetFile)) {
+          console.log('[Cloud SQL] Applying one-time user balance zeroing across PostgreSQL & SQLite...');
+          await resetAllUsersBalancesInDb();
+          resetAllUsersBalancesInSql();
+          try {
+            fs.writeFileSync(balancesResetFile, new Date().toISOString(), 'utf-8');
+          } catch {}
+        }
+
+        const ordersPurgeFile = path.resolve(process.cwd(), 'src/data/orders_purged_v1.done');
+        if (!fs.existsSync(ordersPurgeFile)) {
+          console.log('[Cloud SQL] Applying one-time purge of all demo orders across PostgreSQL & SQLite...');
+          await purgeAllOrdersFromDb();
+          purgeAllOrdersFromSql();
+          try {
+            fs.writeFileSync(ordersPurgeFile, new Date().toISOString(), 'utf-8');
+          } catch {}
+        }
+
         // 1. Users: Cloud SQL is the persistent source of truth
-        const sqlUsers = await getAllUsers();
+        let sqlUsers = await getAllUsers();
         if (sqlUsers.length === 0) {
           const diskUsers = getCachedUsersBackup();
           console.log(`[Cloud SQL] Seeding ${diskUsers.length} users into Cloud SQL PostgreSQL...`);
@@ -4680,8 +4729,19 @@ async function startServer() {
 
         // 2. Orders: Cloud SQL is the persistent source of truth (Strictly live orders, no demo seeding)
         const sqlOrders = await getAllDbOrders();
-        saveServerOrders(sqlOrders);
-        console.log(`[Cloud SQL] Preserved & synced ${sqlOrders.length} live persistent orders from database.`);
+        const deletedOrderIds = loadDeletedOrders();
+        const validOrders: any[] = [];
+        for (const ord of sqlOrders) {
+          const cleanId = String(ord.id).trim().toLowerCase();
+          if (deletedOrderIds.has(cleanId) || cleanId.startsWith('ord-test') || ord.productName?.includes('Demo')) {
+            await deleteOrderFromDb(String(ord.id));
+            deleteOrderFromSql(String(ord.id));
+          } else {
+            validOrders.push(ord);
+          }
+        }
+        saveServerOrders(validOrders);
+        console.log(`[Cloud SQL] Preserved & synced ${validOrders.length} live persistent orders from database.`);
 
         // 3. Promo Codes: Cloud SQL is the persistent source of truth
         const sqlPromos = await getAllDbPromoCodes();

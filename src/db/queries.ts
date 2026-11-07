@@ -393,6 +393,23 @@ export async function purgeAllOrdersFromDb(): Promise<void> {
   }
 }
 
+// Reset all users balances to 0 in Cloud SQL PostgreSQL
+export async function resetAllUsersBalancesInDb(): Promise<void> {
+  if (!isSqlConfigured) return;
+  try {
+    await db.update(users).set({
+      rechargeBalance: 0,
+      withdrawalBalance: 0,
+      productRevenue: 0,
+      totalInvested: 0,
+      totalCommissionEarned: 0,
+    });
+    console.log('[PostgreSQL] Successfully reset all user balances to 0');
+  } catch (err) {
+    console.warn('Error resetting user balances in DB:', err);
+  }
+}
+
 // Fetch all investment orders from Cloud SQL
 export async function getAllDbOrders() {
   if (!isSqlConfigured) return [];

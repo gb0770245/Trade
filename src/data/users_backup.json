@@ -9,11 +9,11 @@
     "invitedBy": "KLFEF",
     "inviterName": "Sumit",
     "inviterId": "644029",
-    "rechargeBalance": 175,
-    "withdrawalBalance": 13,
-    "productRevenue": 13,
+    "rechargeBalance": 0,
+    "withdrawalBalance": 0,
+    "productRevenue": 0,
     "vipLevel": 0,
-    "totalInvested": 175,
+    "totalInvested": 0,
     "checkInStreak": 0,
     "lastCheckInDate": null,
     "spinChances": 4,
@@ -24,7 +24,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:58:03.386Z",
-    "updatedAt": "2026-11-06T08:00:18.995Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "283754",
@@ -51,7 +51,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T13:41:33.192Z",
-    "updatedAt": "2026-11-06T08:00:18.995Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "104473",
@@ -78,7 +78,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T17:37:51.313Z",
-    "updatedAt": "2026-11-06T08:00:18.995Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "618717",
@@ -94,7 +94,7 @@
     "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
-    "totalInvested": 25,
+    "totalInvested": 0,
     "checkInStreak": 0,
     "lastCheckInDate": null,
     "spinChances": 1,
@@ -105,7 +105,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:40:27.922Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "684973",
@@ -121,7 +121,7 @@
     "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
-    "totalInvested": 175,
+    "totalInvested": 0,
     "checkInStreak": 0,
     "lastCheckInDate": null,
     "spinChances": 2,
@@ -132,7 +132,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:38:02.713Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "959918",
@@ -148,7 +148,7 @@
     "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 1,
-    "totalInvested": 325,
+    "totalInvested": 0,
     "checkInStreak": 0,
     "lastCheckInDate": null,
     "spinChances": 2,
@@ -159,7 +159,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:31:25.611Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "787126",
@@ -175,7 +175,7 @@
     "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
-    "totalInvested": 250,
+    "totalInvested": 0,
     "checkInStreak": 0,
     "lastCheckInDate": null,
     "spinChances": 1,
@@ -186,7 +186,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:15:56.676Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "142988",
@@ -202,7 +202,7 @@
     "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
-    "totalInvested": 25,
+    "totalInvested": 0,
     "checkInStreak": 0,
     "lastCheckInDate": null,
     "spinChances": 1,
@@ -213,7 +213,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:20:53.407Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "109378",
@@ -229,7 +229,7 @@
     "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
-    "totalInvested": 50,
+    "totalInvested": 0,
     "checkInStreak": 0,
     "lastCheckInDate": null,
     "spinChances": 1,
@@ -240,7 +240,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:09:36.547Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "300775",
@@ -267,7 +267,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:01:42.630Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "962228",
@@ -280,7 +280,7 @@
     "inviterName": "Anshusahu",
     "inviterId": "406332",
     "rechargeBalance": 0,
-    "withdrawalBalance": 0.01,
+    "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
     "totalInvested": 0,
@@ -294,7 +294,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T05:14:28.059Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "928544",
@@ -306,11 +306,11 @@
     "invitedBy": "4AB86",
     "inviterName": "gaurav",
     "inviterId": "833863",
-    "rechargeBalance": 93,
-    "withdrawalBalance": 95,
+    "rechargeBalance": 0,
+    "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
-    "totalInvested": 107,
+    "totalInvested": 0,
     "checkInStreak": 0,
     "lastCheckInDate": null,
     "spinChances": 3,
@@ -327,7 +327,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T20:45:33.180Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "876089",
@@ -340,7 +340,7 @@
     "inviterName": "Anshusahu",
     "inviterId": "406332",
     "rechargeBalance": 0,
-    "withdrawalBalance": 0.01,
+    "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
     "totalInvested": 0,
@@ -354,7 +354,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T01:29:31.604Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.350Z"
   },
   {
     "id": "833656",
@@ -367,7 +367,7 @@
     "inviterName": "gaurav",
     "inviterId": "833863",
     "rechargeBalance": 0,
-    "withdrawalBalance": 0.01,
+    "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
     "totalInvested": 0,
@@ -381,7 +381,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T02:30:01.775Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.351Z"
   },
   {
     "id": "617291",
@@ -414,7 +414,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-02T07:23:13.773Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.351Z"
   },
   {
     "id": "569973",
@@ -427,7 +427,7 @@
     "inviterName": "Anshusahu",
     "inviterId": "406332",
     "rechargeBalance": 0,
-    "withdrawalBalance": 0.01,
+    "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
     "totalInvested": 0,
@@ -447,7 +447,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-02T09:00:48.444Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z",
+    "updatedAt": "2026-11-07T05:55:09.351Z",
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
     ]
@@ -463,21 +463,21 @@
     "inviterName": "Sumit",
     "inviterId": "644029",
     "rechargeBalance": 0,
-    "withdrawalBalance": 3.64,
-    "productRevenue": 1.89,
+    "withdrawalBalance": 0,
+    "productRevenue": 0,
     "vipLevel": 0,
-    "totalInvested": 25,
+    "totalInvested": 0,
     "checkInStreak": 1,
     "lastCheckInDate": "2026-11-02",
     "spinChances": 2,
     "status": "active",
     "role": "user",
     "totalReferrals": 1,
-    "totalCommissionEarned": 5.9,
+    "totalCommissionEarned": 0,
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T01:18:24.844Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z",
+    "updatedAt": "2026-11-07T05:55:09.351Z",
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
     ]
@@ -493,7 +493,7 @@
     "inviterName": "Ravi Sahu",
     "inviterId": "325697",
     "rechargeBalance": 0,
-    "withdrawalBalance": 16.56,
+    "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
     "totalInvested": 0,
@@ -503,7 +503,7 @@
     "status": "active",
     "role": "user",
     "totalReferrals": 7,
-    "totalCommissionEarned": 484.47,
+    "totalCommissionEarned": 0,
     "bankDetails": {
       "accountHolder": "KANTI",
       "bankName": "Punjab National Bank",
@@ -513,7 +513,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T13:23:22.426Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z",
+    "updatedAt": "2026-11-07T05:55:09.351Z",
     "redeemedCodes": [
       "BSSBJJIEVJOVGYWBSK",
       "SYBYGEJEBUYIRIIR"
@@ -530,7 +530,7 @@
     "inviterName": "Prince",
     "inviterId": "560113",
     "rechargeBalance": 0,
-    "withdrawalBalance": 0.02,
+    "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
     "totalInvested": 0,
@@ -540,11 +540,11 @@
     "status": "active",
     "role": "user",
     "totalReferrals": 2,
-    "totalCommissionEarned": 17.44,
+    "totalCommissionEarned": 0,
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T01:22:00.237Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z",
+    "updatedAt": "2026-11-07T05:55:09.351Z",
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
     ]
@@ -560,10 +560,10 @@
     "inviterName": "Anshusahu",
     "inviterId": "406332",
     "rechargeBalance": 0,
-    "withdrawalBalance": 0.01,
-    "productRevenue": 5.4,
+    "withdrawalBalance": 0,
+    "productRevenue": 0,
     "vipLevel": 0,
-    "totalInvested": 50,
+    "totalInvested": 0,
     "checkInStreak": 1,
     "lastCheckInDate": "2026-11-02",
     "spinChances": 2,
@@ -580,7 +580,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-02T01:28:16.884Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z",
+    "updatedAt": "2026-11-07T05:55:09.351Z",
     "dailySpinsUsedToday": 1,
     "lastSpinDate": "2026-11-02",
     "redeemedCodes": [
@@ -597,18 +597,18 @@
     "invitedBy": "4AB86",
     "inviterName": "gaurav",
     "inviterId": "833863",
-    "rechargeBalance": 625,
-    "withdrawalBalance": 560.84,
-    "productRevenue": 400,
+    "rechargeBalance": 0,
+    "withdrawalBalance": 0,
+    "productRevenue": 0,
     "vipLevel": 1,
-    "totalInvested": 755,
+    "totalInvested": 0,
     "checkInStreak": 4,
     "lastCheckInDate": "2026-11-02",
     "spinChances": 1,
     "status": "active",
     "role": "admin",
     "totalReferrals": 5,
-    "totalCommissionEarned": 3532.91,
+    "totalCommissionEarned": 0,
     "bankDetails": {
       "accountHolder": "gaurav",
       "bankName": "State Bank of India",
@@ -618,7 +618,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-10-31T03:08:35.291Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.351Z"
   },
   {
     "id": "453665",
@@ -630,11 +630,11 @@
     "invitedBy": "4AB86",
     "inviterName": "gaurav",
     "inviterId": "833863",
-    "rechargeBalance": 1998.95,
-    "withdrawalBalance": 207.5,
-    "productRevenue": 2162.5,
+    "rechargeBalance": 0,
+    "withdrawalBalance": 0,
+    "productRevenue": 0,
     "vipLevel": 4,
-    "totalInvested": 18314,
+    "totalInvested": 0,
     "checkInStreak": 1,
     "lastCheckInDate": "2026-11-01",
     "spinChances": 16,
@@ -651,7 +651,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T00:22:37.632Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.351Z"
   },
   {
     "id": "752520",
@@ -664,7 +664,7 @@
     "inviterName": "Yogendra kushwaha",
     "inviterId": "812624",
     "rechargeBalance": 0,
-    "withdrawalBalance": 0.01,
+    "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
     "totalInvested": 0,
@@ -678,7 +678,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T00:22:37.753Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.351Z"
   },
   {
     "id": "812624",
@@ -691,7 +691,7 @@
     "inviterName": "gaurav",
     "inviterId": "833863",
     "rechargeBalance": 0,
-    "withdrawalBalance": 178.92,
+    "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
     "totalInvested": 0,
@@ -701,11 +701,11 @@
     "status": "active",
     "role": "user",
     "totalReferrals": 3,
-    "totalCommissionEarned": 391.89,
+    "totalCommissionEarned": 0,
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T00:22:37.863Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.351Z"
   },
   {
     "id": "950580",
@@ -717,7 +717,7 @@
     "invitedBy": "4AB86",
     "inviterName": "gaurav",
     "inviterId": "833863",
-    "rechargeBalance": 100,
+    "rechargeBalance": 0,
     "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
@@ -732,7 +732,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T02:54:15.104Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z"
+    "updatedAt": "2026-11-07T05:55:09.351Z"
   },
   {
     "id": "644029",
@@ -745,21 +745,21 @@
     "inviterName": "Mohit kumar",
     "inviterId": "317631",
     "rechargeBalance": 0,
-    "withdrawalBalance": 570.06,
-    "productRevenue": 2.52,
+    "withdrawalBalance": 0,
+    "productRevenue": 0,
     "vipLevel": 0,
-    "totalInvested": 200,
+    "totalInvested": 0,
     "checkInStreak": 1,
     "lastCheckInDate": "2026-11-01",
     "spinChances": 1,
     "status": "active",
     "role": "user",
     "totalReferrals": 9,
-    "totalCommissionEarned": 1172.94,
+    "totalCommissionEarned": 0,
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T07:02:05.540Z",
-    "updatedAt": "2026-11-06T08:00:19.002Z",
+    "updatedAt": "2026-11-07T05:55:09.351Z",
     "redeemedCodes": [
       "BSSBJJIEVJOVGYWBSK"
     ]
@@ -775,7 +775,7 @@
     "inviterName": "Yogendra kushwaha",
     "inviterId": "812624",
     "rechargeBalance": 0,
-    "withdrawalBalance": 5.91,
+    "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 0,
     "totalInvested": 0,
@@ -785,7 +785,7 @@
     "status": "active",
     "role": "user",
     "totalReferrals": 1,
-    "totalCommissionEarned": 4.9,
+    "totalCommissionEarned": 0,
     "bankDetails": {
       "accountHolder": "Amit Kumar",
       "bankName": "HDFC Bank",
@@ -795,6 +795,6 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T07:33:04.366Z",
-    "updatedAt": "2026-11-06T08:00:19.003Z"
+    "updatedAt": "2026-11-07T05:55:09.351Z"
   }
 ]

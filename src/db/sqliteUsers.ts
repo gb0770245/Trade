@@ -691,3 +691,18 @@ export function updateUserReferralsInSql(
     WHERE id = ? OR (phone = ? AND length(?) = 10)
   `).run(count, raw, cleanPhone, cleanPhone);
 }
+
+// Reset all users' balances to 0 in SQLite
+export function resetAllUsersBalancesInSql(): void {
+  const db = getSqliteDb();
+  initSqliteUsersTable();
+  db.prepare(`
+    UPDATE platform_users
+    SET recharge_balance = 0,
+        withdrawal_balance = 0,
+        product_revenue = 0,
+        total_invested = 0,
+        total_commission_earned = 0,
+        updated_at = datetime('now')
+  `).run();
+}

@@ -2112,6 +2112,30 @@ export const AdminPanel: React.FC = () => {
 
                 <button
                   type="button"
+                  onClick={async () => {
+                    if (window.confirm('क्या आप सचमुच सभी यूज़र्स का बैलेंस (Recharge Balance, Withdrawal Balance, Revenue, Commission) 0 करना चाहते हैं? यह डेटाबेस और सर्वर दोनों में $0 हो जाएगा।')) {
+                      try {
+                        const res = await fetch('/api/admin/users/reset-all-balances', { method: 'POST' });
+                        if (res.ok) {
+                          await loadAdminUsers();
+                          showToast('सभी यूज़र्स का बैलेंस सफलतापूर्वक $0 कर दिया गया!', 'success');
+                        } else {
+                          showToast('बैलेंस रीसेट करने में त्रुटि आई', 'error');
+                        }
+                      } catch {
+                        showToast('नेटवर्क त्रुटि: बैलेंस रीसेट नहीं हो सका', 'error');
+                      }
+                    }
+                  }}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-600/20 hover:bg-rose-600/40 border border-rose-500/40 text-xs font-bold text-rose-300 transition-all shadow-sm cursor-pointer"
+                  title="Reset all users balances to 0 in SQL and memory (सभी यूज़र्स का बैलेंस 0 करें)"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Reset Balances ($0)</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => {
                     setTargetRelinkUserId('');
                     setSelectedUplineUserId('');
