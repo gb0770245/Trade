@@ -77,7 +77,9 @@ export function getOrderClaimStatus(order: InvestmentOrder, now: number = Date.n
     };
   }
 
-  if (order.status === 'completed' || order.daysElapsed >= order.cycleDays) {
+  const cycleDays = Number(order.cycleDays) || 1;
+  const daysElapsed = Number(order.daysElapsed) || 0;
+  if (order.status === 'completed' || daysElapsed >= cycleDays) {
     return {
       canClaim: false,
       isCompleted: true,
@@ -87,12 +89,29 @@ export function getOrderClaimStatus(order: InvestmentOrder, now: number = Date.n
     };
   }
 
-  let nextClaimTime = order.nextClaimTimestamp;
+  // STRICT 24-HOUR COOLDOWN ENFORCEMENT:
+  // If order was claimed within the last 24 hours, cooldown is strictly active from lastClaimTimestamp
+  const lastClaim = Number(order.lastClaimTimestamp) || 0;
+  if (lastClaim > 0 && (now - lastClaim) < CYCLE_24_HOURS_MS) {
+    const cooldownEnd = lastClaim + CYCLE_24_HOURS_MS;
+    const remainingMs = Math.max(0, cooldownEnd - now);
+    if (remainingMs > 0) {
+      return {
+        canClaim: false,
+        isCompleted: false,
+        remainingMs,
+        nextClaimTime: cooldownEnd,
+        formattedCountdown: formatCountdown(remainingMs),
+      };
+    }
+  }
+
+  let nextClaimTime = Number(order.nextClaimTimestamp) || 0;
   if (!nextClaimTime) {
-    if (order.lastClaimTimestamp) {
-      nextClaimTime = order.lastClaimTimestamp + CYCLE_24_HOURS_MS;
+    if (lastClaim > 0) {
+      nextClaimTime = lastClaim + CYCLE_24_HOURS_MS;
     } else if (order.purchaseTimestamp) {
-      nextClaimTime = order.purchaseTimestamp + CYCLE_24_HOURS_MS;
+      nextClaimTime = Number(order.purchaseTimestamp) + CYCLE_24_HOURS_MS;
     } else if (order.lastClaimDate) {
       const parsed = new Date(order.lastClaimDate).getTime();
       nextClaimTime = !isNaN(parsed) ? parsed + CYCLE_24_HOURS_MS : (now - 1000);

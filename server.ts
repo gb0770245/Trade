@@ -1457,18 +1457,30 @@ app.post('/api/user/claim-dividend', async (req, res) => {
     const nextClaimTime = now + 24 * 60 * 60 * 1000;
 
     for (const ord of activeContracts) {
+      const cycleDays = Number(ord.cycleDays) || 1;
+      const daysElapsed = Number(ord.daysElapsed) || 0;
+      if (ord.status === 'completed' || daysElapsed >= cycleDays) {
+        continue;
+      }
+
       const lastClaim = ord.lastClaimTimestamp
         ? Number(ord.lastClaimTimestamp)
         : (ord.purchaseTimestamp ? Number(ord.purchaseTimestamp) : 0);
-      const isDue = (now - lastClaim) >= (23.5 * 3600 * 1000) || !ord.lastClaimTimestamp || customEarnings !== undefined;
+
+      // STRICT 24-HOUR COOLDOWN CHECK:
+      // An order is due ONLY if:
+      // 1. Admin passed explicit customEarnings, OR
+      // 2. nextClaimTimestamp is reached AND (never claimed or at least 23.5h elapsed since last claim)
+      const nextClaim = Number(ord.nextClaimTimestamp) || (lastClaim + 24 * 3600 * 1000);
+      const isDue = customEarnings !== undefined || (now >= nextClaim && (lastClaim === 0 || (now - lastClaim) >= (23.5 * 3600 * 1000)));
 
       if (isDue) {
         eligibleOrders.push(ord);
         const dividend = customEarnings !== undefined ? Number(customEarnings) : Number(ord.dailyEarnings || 0);
         totalClaim += dividend;
 
-        const newElapsed = (Number(ord.daysElapsed) || 0) + 1;
-        const isFinished = newElapsed >= (Number(ord.cycleDays) || 1);
+        const newElapsed = daysElapsed + 1;
+        const isFinished = newElapsed >= cycleDays;
         const updatedOrd = {
           ...ord,
           daysElapsed: newElapsed,
@@ -1477,8 +1489,24 @@ app.post('/api/user/claim-dividend', async (req, res) => {
           lastClaimTimestamp: now,
           nextClaimTimestamp: nextClaimTime,
           status: isFinished ? 'completed' : 'active',
+          updatedAt: new Date(now).toISOString(),
         };
+
+        // 1. Permanently update SQLite
         upsertOrderInSql(updatedOrd);
+
+        // 2. Permanently update Disk Orders (orders_backup.json)
+        const diskOrders = loadServerOrders();
+        const dIdx = diskOrders.findIndex((d) => String(d.id) === String(updatedOrd.id));
+        if (dIdx >= 0) {
+          diskOrders[dIdx] = { ...diskOrders[dIdx], ...updatedOrd };
+        } else {
+          diskOrders.unshift(updatedOrd);
+        }
+        saveServerOrders(diskOrders);
+
+        // 3. Sync Cloud SQL PostgreSQL
+        upsertDbOrder(updatedOrd).catch(() => {});
       }
     }
 
@@ -3049,6 +3077,35 @@ function saveServerOrders(ordersList: any[]): void {
   }
 }
 
+// Safe merge of two order instances, preserving completed status, highest daysElapsed, and newest claim timestamps
+function mergeOrderSafe(existing: any, incoming: any): any {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+
+  const isExistingDone = existing.status === 'completed' || (Number(existing.daysElapsed) || 0) >= (Number(existing.cycleDays) || 0);
+  const isIncomingDone = incoming.status === 'completed' || (Number(incoming.daysElapsed) || 0) >= (Number(incoming.cycleDays) || 0);
+  const finalStatus = isExistingDone || isIncomingDone ? 'completed' : (incoming.status || existing.status);
+
+  const existingClaim = Number(existing.lastClaimTimestamp) || 0;
+  const incomingClaim = Number(incoming.lastClaimTimestamp) || 0;
+  const useIncoming = incomingClaim >= existingClaim;
+
+  const lastClaimTimestamp = Math.max(existingClaim, incomingClaim) || null;
+  const daysElapsed = Math.max(Number(existing.daysElapsed) || 0, Number(incoming.daysElapsed) || 0);
+  const totalAccrued = Math.max(Number(existing.totalAccrued) || 0, Number(incoming.totalAccrued) || 0);
+  const nextClaimTimestamp = useIncoming ? (incoming.nextClaimTimestamp || existing.nextClaimTimestamp) : (existing.nextClaimTimestamp || incoming.nextClaimTimestamp);
+
+  return {
+    ...existing,
+    ...incoming,
+    status: finalStatus,
+    daysElapsed,
+    totalAccrued,
+    lastClaimTimestamp,
+    nextClaimTimestamp,
+  };
+}
+
 // Enrich order with user phone, nickname, and fallback details
 function enrichOrderWithUserData(order: any, allUsers: any[]): any {
   if (!order) return order;
@@ -3086,7 +3143,8 @@ app.get(['/api/orders', '/api/admin/orders'], async (_req, res) => {
     // Add SQLite/disk orders first
     diskAndSqlOrders.forEach((o) => {
       if (o && o.id && !deletedSet.has(String(o.id).trim().toLowerCase())) {
-        orderMap.set(String(o.id), enrichOrderWithUserData(o, allUsers));
+        const enriched = enrichOrderWithUserData(o, allUsers);
+        orderMap.set(String(o.id), enriched);
       }
     });
     // Merge cloud SQL orders
@@ -3095,7 +3153,7 @@ app.get(['/api/orders', '/api/admin/orders'], async (_req, res) => {
         const strId = String(so.id);
         if (deletedSet.has(strId.toLowerCase())) return;
         const existing = orderMap.get(strId);
-        const merged = { ...(existing || {}), ...so };
+        const merged = mergeOrderSafe(existing, so);
         orderMap.set(strId, enrichOrderWithUserData(merged, allUsers));
         // Persist to local SQLite SQL as well
         try { upsertOrderInSql(merged); } catch {}
@@ -3178,12 +3236,14 @@ app.get('/api/orders/user/:userId', async (req, res) => {
       cloudSqlUserOrders = await getDbOrdersByUser(cleanId, matchedUser?.phone);
     } catch {}
 
-    // Merge and deduplicate all found orders
+    // Merge and deduplicate all found orders safely
     const orderMap = new Map<string, any>();
     for (const o of [...sqlUserOrders, ...diskUserOrders, ...cloudSqlUserOrders]) {
       if (o && o.id) {
         const enriched = enrichOrderWithUserData(o, allUsers);
-        orderMap.set(String(o.id), enriched);
+        const strId = String(o.id);
+        const existing = orderMap.get(strId);
+        orderMap.set(strId, existing ? mergeOrderSafe(existing, enriched) : enriched);
       }
     }
 
@@ -3247,10 +3307,11 @@ app.post(['/api/orders', '/api/admin/orders'], async (req, res) => {
       console.warn('Error syncing order to Cloud SQL:', e?.message || e);
     }
 
-    // 4. Atomically deduct product price from the buyer's recharge_balance on server (SQLite + Backup)
+    // 4. Atomically deduct product price from the buyer's recharge_balance on server ONLY on brand new purchase
+    const isNewPurchase = existingIndex === -1;
     const orderPrice = Number(enriched.price) || 0;
     const buyerIdentifier = enriched.userId || enriched.userPhone;
-    if (orderPrice > 0 && buyerIdentifier) {
+    if (isNewPurchase && orderPrice > 0 && buyerIdentifier) {
       try {
         const cleanBuyer = String(buyerIdentifier).trim();
         const buyerSql = getUserByIdOrPhoneFromSql(cleanBuyer);
@@ -3284,8 +3345,8 @@ app.post(['/api/orders', '/api/admin/orders'], async (req, res) => {
       }
     }
 
-    // 5. Concurrently distribute multi-tier referral commissions to upliners
-    if (orderPrice > 0 && (enriched.userId || enriched.userPhone)) {
+    // 5. Concurrently distribute multi-tier referral commissions to upliners on brand new purchase
+    if (isNewPurchase && orderPrice > 0 && (enriched.userId || enriched.userPhone)) {
       distributeReferralCommissionServer(
         enriched.userId || enriched.userPhone,
         orderPrice,
@@ -3757,12 +3818,20 @@ app.post('/api/orders/:id/action', async (req, res) => {
       message = `Dividend of $${dividendAmount} successfully paid to user wallet!`;
     } else if (action === 'reset_timer') {
       currentOrder.nextClaimTimestamp = now - 1000;
+      currentOrder.lastClaimTimestamp = now - (24 * 60 * 60 * 1000) - 1000;
       message = `24h cooldown timer reset. User can now claim dividend immediately.`;
     }
 
     const updated = enrichOrderWithUserData({ ...currentOrder, updatedAt: new Date().toISOString() }, allUsers);
     diskOrders[idx] = updated;
     saveServerOrders(diskOrders);
+
+    // Permanently commit updated order status & timestamps to SQLite SQL database
+    try {
+      upsertOrderInSql(updated);
+    } catch (sqlErr) {
+      console.warn('SQLite order action update warning:', sqlErr);
+    }
 
     try {
       await upsertDbOrder(updated);

@@ -585,6 +585,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const isPoppingStateRef = useRef<boolean>(false);
   const lastExitPressRef = useRef<number>(0);
   const isWithdrawalLockRef = useRef<boolean>(false);
+  const isClaimingDividendRef = useRef<boolean>(false);
   const userRef = useRef<User | null>(user);
   const lastUserActionTimestampRef = useRef<number>(0);
 
@@ -2359,161 +2360,176 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, claimedAmount: 0 };
     }
 
-    // 1. Authoritative Server Claim: Atomic SQLite balance update, order settlement & instant senior commissions
+    if (isClaimingDividendRef.current) {
+      return { success: false, claimedAmount: 0 };
+    }
+    isClaimingDividendRef.current = true;
+
     try {
-      const res = await fetch('/api/user/claim-dividend', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: user.id,
-          targetOrderId,
-        }),
-      });
-      const data = await res.json();
-      if (data.success && data.user) {
-        const freshUser: User = {
-          ...user,
-          ...data.user,
-          withdrawalBalance: Number(data.user.withdrawalBalance ?? (user.withdrawalBalance + (data.claimedAmount || 0))),
-          productRevenue: Number(data.user.productRevenue ?? (user.productRevenue + (data.claimedAmount || 0))),
-        };
-        userRef.current = freshUser;
-        setUser(freshUser);
-        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(freshUser));
-
-        if (Array.isArray(data.orders)) {
-          setOrders(data.orders);
-          localStorage.setItem(STORAGE_KEY_ORDERS, JSON.stringify(data.orders));
-        }
-        if (data.transaction) {
-          setTransactions((prev) => prependTxUnique(prev, data.transaction));
-          setAdminTransactions((prev) => prependTxUnique(prev, data.transaction));
-        }
-
-        confetti({
-          particleCount: 110,
-          spread: 80,
-          origin: { y: 0.6 },
+      // 1. Authoritative Server Claim: Atomic SQLite balance update, order settlement & instant senior commissions
+      try {
+        const res = await fetch('/api/user/claim-dividend', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: user.id,
+            targetOrderId,
+          }),
         });
+        const data = await res.json();
+        if (data.success && data.user) {
+          const freshUser: User = {
+            ...user,
+            ...data.user,
+            withdrawalBalance: Number(data.user.withdrawalBalance ?? (user.withdrawalBalance + (data.claimedAmount || 0))),
+            productRevenue: Number(data.user.productRevenue ?? (user.productRevenue + (data.claimedAmount || 0))),
+          };
+          userRef.current = freshUser;
+          setUser(freshUser);
+          localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(freshUser));
 
-        const claimedVal = Number(data.claimedAmount || 0);
-        showToast(
-          `Instant Claim! +$${claimedVal.toFixed(2)} added directly to your withdrawable wallet, and commissions sent to your seniors!`,
-          'success'
-        );
-        return { success: true, claimedAmount: claimedVal };
-      } else if (!data.success && data.error) {
-        showToast(data.error, 'info');
+          if (Array.isArray(data.orders)) {
+            setOrders(data.orders);
+            localStorage.setItem(STORAGE_KEY_ORDERS, JSON.stringify(data.orders));
+            // Sync to Firestore in background so real-time listeners don't revert to stale values
+            for (const ord of data.orders) {
+              dbService.saveOrder(ord, user.id).catch(() => {});
+            }
+          }
+          if (data.transaction) {
+            setTransactions((prev) => prependTxUnique(prev, data.transaction));
+            setAdminTransactions((prev) => prependTxUnique(prev, data.transaction));
+          }
+
+          confetti({
+            particleCount: 110,
+            spread: 80,
+            origin: { y: 0.6 },
+          });
+
+          const claimedVal = Number(data.claimedAmount || 0);
+          showToast(
+            `Instant Claim! +$${claimedVal.toFixed(2)} added directly to your withdrawable wallet, and commissions sent to your seniors!`,
+            'success'
+          );
+          return { success: true, claimedAmount: claimedVal };
+        } else if (!data.success && data.error) {
+          showToast(data.error, 'info');
+          return { success: false, claimedAmount: 0 };
+        }
+      } catch (apiErr) {
+        console.warn('[claimDailyDividends] Server API call note, using local fallback:', apiErr);
+      }
+
+      // 2. Resilient Local Fallback (in case server is temporarily unreachable)
+      const now = Date.now();
+      const activeContracts = orders.filter(
+        (o) => o.status === 'active' && (!targetOrderId || o.id === targetOrderId)
+      );
+
+      if (activeContracts.length === 0) {
+        showToast('All investment contracts have reached their full cycle term', 'info');
         return { success: false, claimedAmount: 0 };
       }
-    } catch (apiErr) {
-      console.warn('[claimDailyDividends] Server API call note, using local fallback:', apiErr);
-    }
 
-    // 2. Resilient Local Fallback (in case server is temporarily unreachable)
-    const now = Date.now();
-    const activeContracts = orders.filter(
-      (o) => o.status === 'active' && (!targetOrderId || o.id === targetOrderId)
-    );
+      // Filter only contracts where 24 hours have elapsed
+      const eligibleOrders: InvestmentOrder[] = [];
+      let minWaitMs = Infinity;
 
-    if (activeContracts.length === 0) {
-      showToast('All investment contracts have reached their full cycle term', 'info');
-      return { success: false, claimedAmount: 0 };
-    }
-
-    // Filter only contracts where 24 hours have elapsed
-    const eligibleOrders: InvestmentOrder[] = [];
-    let minWaitMs = Infinity;
-
-    for (const ord of activeContracts) {
-      const status = getOrderClaimStatus(ord, now);
-      if (status.canClaim) {
-        eligibleOrders.push(ord);
-      } else if (status.remainingMs < minWaitMs) {
-        minWaitMs = status.remainingMs;
+      for (const ord of activeContracts) {
+        const status = getOrderClaimStatus(ord, now);
+        if (status.canClaim) {
+          eligibleOrders.push(ord);
+        } else if (status.remainingMs < minWaitMs) {
+          minWaitMs = status.remainingMs;
+        }
       }
-    }
 
-    if (eligibleOrders.length === 0) {
-      const waitTimeText = formatCountdownHuman(minWaitMs);
-      showToast(
-        `Daily dividend requires 24 hours cooldown! Next claim available in: ${waitTimeText} (24 घंटे पूरे होने के बाद ही अगला क्लेम करें)`,
-        'info'
-      );
-      return { success: false, claimedAmount: 0 };
-    }
-
-    let totalClaim = 0;
-    const nextClaimTime = now + 24 * 60 * 60 * 1000;
-
-    const updatedOrders = orders.map((o) => {
-      const isEligible = eligibleOrders.some((el) => el.id === o.id);
-      if (isEligible) {
-        const dividend = o.dailyEarnings;
-        totalClaim += dividend;
-        const newElapsed = o.daysElapsed + 1;
-        const isFinished = newElapsed >= o.cycleDays;
-        return {
-          ...o,
-          daysElapsed: newElapsed,
-          totalAccrued: Number((o.totalAccrued + dividend).toFixed(2)),
-          lastClaimDate: new Date(now).toISOString().split('T')[0],
-          lastClaimTimestamp: now,
-          nextClaimTimestamp: nextClaimTime,
-          status: isFinished ? ('completed' as const) : ('active' as const),
-        };
+      if (eligibleOrders.length === 0) {
+        const waitTimeText = formatCountdownHuman(minWaitMs);
+        showToast(
+          `Daily dividend requires 24 hours cooldown! Next claim available in: ${waitTimeText} (24 घंटे पूरे होने के बाद ही अगला क्लेम करें)`,
+          'info'
+        );
+        return { success: false, claimedAmount: 0 };
       }
-      return o;
-    });
 
-    setOrders(updatedOrders);
-    try {
-      localStorage.setItem(STORAGE_KEY_ORDERS, JSON.stringify(updatedOrders));
-    } catch {}
+      let totalClaim = 0;
+      const nextClaimTime = now + 24 * 60 * 60 * 1000;
 
-    for (const ord of updatedOrders) {
-      if (eligibleOrders.some((el) => el.id === ord.id)) {
-        await dbService.saveOrder(ord, user.id);
+      const updatedOrders = orders.map((o) => {
+        const isEligible = eligibleOrders.some((el) => el.id === o.id);
+        if (isEligible) {
+          const dividend = o.dailyEarnings;
+          totalClaim += dividend;
+          const newElapsed = o.daysElapsed + 1;
+          const isFinished = newElapsed >= o.cycleDays;
+          return {
+            ...o,
+            daysElapsed: newElapsed,
+            totalAccrued: Number((o.totalAccrued + dividend).toFixed(2)),
+            lastClaimDate: new Date(now).toISOString().split('T')[0],
+            lastClaimTimestamp: now,
+            nextClaimTimestamp: nextClaimTime,
+            status: isFinished ? ('completed' as const) : ('active' as const),
+          };
+        }
+        return o;
+      });
+
+      setOrders(updatedOrders);
+      try {
+        localStorage.setItem(STORAGE_KEY_ORDERS, JSON.stringify(updatedOrders));
+      } catch {}
+
+      for (const ord of updatedOrders) {
+        if (eligibleOrders.some((el) => el.id === ord.id)) {
+          await dbService.saveOrder(ord, user.id);
+        }
       }
+
+      const updatedUser: User = {
+        ...user,
+        withdrawalBalance: Number((user.withdrawalBalance + totalClaim).toFixed(2)),
+        productRevenue: Number((user.productRevenue + totalClaim).toFixed(2)),
+      };
+      userRef.current = updatedUser;
+      setUser(updatedUser);
+      try {
+        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(updatedUser));
+      } catch {}
+      await dbService.saveUser(updatedUser);
+
+      const divTx: Transaction = {
+        id: `tx-${Date.now()}`,
+        userId: user.id,
+        type: 'earnings',
+        amount: totalClaim,
+        title: `Daily 24-Hour Dividend Settled (${eligibleOrders.length} contracts)`,
+        timestamp: new Date().toLocaleString(),
+        status: 'completed',
+        referenceNo: `DIV${Date.now()}`,
+      };
+      await dbService.saveTransaction(divTx, user.id);
+      setTransactions((prev) => prependTxUnique(prev, divTx));
+      setAdminTransactions((prev) => prependTxUnique(prev, divTx));
+
+      // Distribute multi-tier referral commissions to upliners on daily returns (Tier 1: 10%, Tier 2: 3%, Tier 3: 1%)
+      await distributeMultiTierCommissions(updatedUser, totalClaim, 'daily_income', divTx.referenceNo);
+
+      confetti({
+        particleCount: 90,
+        spread: 70,
+        origin: { y: 0.6 },
+      });
+
+      showToast(`Claimed $${totalClaim.toFixed(2)} dividends! Wallet and senior commissions updated.`, 'success');
+      return { success: true, claimedAmount: totalClaim };
+    } finally {
+      setTimeout(() => {
+        isClaimingDividendRef.current = false;
+      }, 1200);
     }
-
-    const updatedUser: User = {
-      ...user,
-      withdrawalBalance: Number((user.withdrawalBalance + totalClaim).toFixed(2)),
-      productRevenue: Number((user.productRevenue + totalClaim).toFixed(2)),
-    };
-    userRef.current = updatedUser;
-    setUser(updatedUser);
-    try {
-      localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(updatedUser));
-    } catch {}
-    await dbService.saveUser(updatedUser);
-
-    const divTx: Transaction = {
-      id: `tx-${Date.now()}`,
-      userId: user.id,
-      type: 'earnings',
-      amount: totalClaim,
-      title: `Daily 24-Hour Dividend Settled (${eligibleOrders.length} contracts)`,
-      timestamp: new Date().toLocaleString(),
-      status: 'completed',
-      referenceNo: `DIV${Date.now()}`,
-    };
-    await dbService.saveTransaction(divTx, user.id);
-    setTransactions((prev) => prependTxUnique(prev, divTx));
-    setAdminTransactions((prev) => prependTxUnique(prev, divTx));
-
-    // Distribute multi-tier referral commissions to upliners on daily returns (Tier 1: 10%, Tier 2: 3%, Tier 3: 1%)
-    await distributeMultiTierCommissions(updatedUser, totalClaim, 'daily_income', divTx.referenceNo);
-
-    confetti({
-      particleCount: 90,
-      spread: 70,
-      origin: { y: 0.6 },
-    });
-
-    showToast(`Claimed $${totalClaim.toFixed(2)} dividends! Wallet and senior commissions updated.`, 'success');
-    return { success: true, claimedAmount: totalClaim };
   };
 
   // Daily Check-In
