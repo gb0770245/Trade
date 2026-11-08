@@ -952,8 +952,19 @@ export const AdminPanel: React.FC = () => {
           : {}),
       };
 
+      // Direct HTTP POST to server to immediately write changes into SQLite
+      try {
+        await fetch(`/api/admin/user/${selectedUserForEdit.id}/update`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updatedPayload),
+        });
+      } catch (apiErr) {
+        console.warn('Direct server update warning:', apiErr);
+      }
+
       await adminUpdateUser(selectedUserForEdit.id, updatedPayload);
-      showToast(`User ${selectedUserForEdit.phone} full details, sponsor & password saved permanently!`, 'success');
+      showToast(`User ${selectedUserForEdit.phone} full details, balance & password saved permanently!`, 'success');
       setSelectedUserForEdit(null);
       await loadAdminUsers();
     } catch (err: any) {
@@ -3583,43 +3594,80 @@ export const AdminPanel: React.FC = () => {
                 </button>
               </div>
 
-              {/* Mode Selection Toggle */}
-              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
-                <div>
-                  <span className="font-bold text-slate-200">Gateway Environment Mode:</span>
-                  <p className="text-[11px] text-slate-400">Switch between PayU Test Sandbox and Live Production payments</p>
+              {/* Mode Selection Toggle & Live Gateway Status Banner */}
+              <div className="space-y-2">
+                <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div>
+                    <span className="font-bold text-slate-200">Gateway Environment Mode:</span>
+                    <p className="text-[11px] text-slate-400">Switch between PayU Test Sandbox and Live Production payments</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setLocalSettings({ ...localSettings, payuMode: 'test' });
+                        await updatePlatformSettings({ payuMode: 'test' });
+                        showToast('Switched PayU to Test Sandbox Mode', 'success');
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                        localSettings.payuMode !== 'live'
+                          ? 'bg-amber-500 text-slate-950 shadow-md'
+                          : 'bg-slate-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      🧪 Test Sandbox
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setLocalSettings({ ...localSettings, payuMode: 'live' });
+                        await updatePlatformSettings({ payuMode: 'live' });
+                        showToast('Switched PayU to LIVE Production Mode', 'success');
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                        localSettings.payuMode === 'live'
+                          ? 'bg-emerald-500 text-slate-950 shadow-md'
+                          : 'bg-slate-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      🟢 LIVE Production
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      setLocalSettings({ ...localSettings, payuMode: 'test' });
-                      await updatePlatformSettings({ payuMode: 'test' });
-                      showToast('Switched PayU to Test Sandbox Mode', 'success');
-                    }}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                      localSettings.payuMode !== 'live'
-                        ? 'bg-amber-500 text-slate-950 shadow-md'
-                        : 'bg-slate-800 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    🧪 Test Sandbox
-                  </button>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      setLocalSettings({ ...localSettings, payuMode: 'live' });
-                      await updatePlatformSettings({ payuMode: 'live' });
-                      showToast('Switched PayU to LIVE Production Mode', 'success');
-                    }}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                      localSettings.payuMode === 'live'
-                        ? 'bg-emerald-500 text-slate-950 shadow-md'
-                        : 'bg-slate-800 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    🟢 LIVE Production
-                  </button>
+
+                {/* Gateway Target URL Status Indicator */}
+                <div
+                  className={`p-3 rounded-xl border flex items-center justify-between text-xs ${
+                    localSettings.payuMerchantKey && localSettings.payuMerchantKey !== 'gtKFFx' && !localSettings.payuMerchantKey.toLowerCase().includes('test')
+                      ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-200'
+                      : 'bg-amber-950/40 border-amber-500/50 text-amber-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm">
+                      {localSettings.payuMerchantKey && localSettings.payuMerchantKey !== 'gtKFFx' && !localSettings.payuMerchantKey.toLowerCase().includes('test')
+                        ? '🟢'
+                        : '🧪'}
+                    </span>
+                    <div>
+                      <div className="font-bold">
+                        {localSettings.payuMerchantKey && localSettings.payuMerchantKey !== 'gtKFFx' && !localSettings.payuMerchantKey.toLowerCase().includes('test')
+                          ? 'LIVE Production Gateway Active (Real Bank / UPI Payments)'
+                          : 'Test Sandbox Gateway Active (Demo Simulation)'}
+                      </div>
+                      <div className="text-[10px] font-mono opacity-80">
+                        Target Gateway Endpoint:{' '}
+                        {localSettings.payuMerchantKey && localSettings.payuMerchantKey !== 'gtKFFx' && !localSettings.payuMerchantKey.toLowerCase().includes('test')
+                          ? 'https://secure.payu.in/_payment'
+                          : 'https://test.payu.in/_payment'}
+                      </div>
+                    </div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-md bg-black/40 text-[10px] font-mono border border-white/10">
+                    {localSettings.payuMerchantKey && localSettings.payuMerchantKey !== 'gtKFFx' && !localSettings.payuMerchantKey.toLowerCase().includes('test')
+                      ? 'REAL MONEY MODE'
+                      : 'SANDBOX MODE'}
+                  </span>
                 </div>
               </div>
 
@@ -3632,8 +3680,8 @@ export const AdminPanel: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        setLocalSettings({ ...localSettings, payuMerchantKey: 'gtKFFx' });
-                        updatePlatformSettings({ payuMerchantKey: 'gtKFFx' });
+                        setLocalSettings({ ...localSettings, payuMerchantKey: 'gtKFFx', payuMode: 'test' });
+                        updatePlatformSettings({ payuMerchantKey: 'gtKFFx', payuMode: 'test' });
                         showToast('Reset to default PayU Test key', 'success');
                       }}
                       className="text-[10px] text-teal-400 hover:underline font-mono"
@@ -3644,8 +3692,22 @@ export const AdminPanel: React.FC = () => {
                   <input
                     type="text"
                     value={localSettings.payuMerchantKey || ''}
-                    onChange={(e) => setLocalSettings({ ...localSettings, payuMerchantKey: e.target.value })}
-                    onBlur={() => updatePlatformSettings({ payuMerchantKey: localSettings.payuMerchantKey?.trim() || 'gtKFFx' })}
+                    onChange={(e) => {
+                      const newKey = e.target.value;
+                      const isCustom = Boolean(newKey && newKey.trim() !== 'gtKFFx' && !newKey.toLowerCase().includes('test'));
+                      setLocalSettings({
+                        ...localSettings,
+                        payuMerchantKey: newKey,
+                        payuMode: isCustom ? 'live' : localSettings.payuMode,
+                      });
+                    }}
+                    onBlur={() => {
+                      const cleanKey = localSettings.payuMerchantKey?.trim() || 'gtKFFx';
+                      const isCustom = cleanKey !== 'gtKFFx' && !cleanKey.toLowerCase().includes('test');
+                      const nextMode = isCustom ? 'live' : (localSettings.payuMode || 'test');
+                      setLocalSettings({ ...localSettings, payuMerchantKey: cleanKey, payuMode: nextMode });
+                      updatePlatformSettings({ payuMerchantKey: cleanKey, payuMode: nextMode });
+                    }}
                     className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300 focus:outline-none focus:border-teal-500"
                     placeholder="Enter PayU Merchant Key"
                   />
@@ -3673,11 +3735,179 @@ export const AdminPanel: React.FC = () => {
                     type="password"
                     value={localSettings.payuMerchantSalt || ''}
                     onChange={(e) => setLocalSettings({ ...localSettings, payuMerchantSalt: e.target.value })}
-                    onBlur={() => updatePlatformSettings({ payuMerchantSalt: localSettings.payuMerchantSalt?.trim() || '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW' })}
+                    onBlur={() => {
+                      const cleanSalt = localSettings.payuMerchantSalt?.trim() || '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW';
+                      setLocalSettings({ ...localSettings, payuMerchantSalt: cleanSalt });
+                      updatePlatformSettings({ payuMerchantSalt: cleanSalt });
+                    }}
                     className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-emerald-300 focus:outline-none focus:border-teal-500"
                     placeholder="Enter PayU Merchant Salt"
                   />
                   <p className="text-[10px] text-slate-500 mt-1">Used for cryptographic SHA-512 payment hash computation & response verification</p>
+                </div>
+
+                {/* Gateway Environment Mode Toggle */}
+                <div className="md:col-span-2 p-3.5 rounded-xl bg-slate-900/90 border border-slate-700/80 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <label className="text-xs font-bold text-slate-200 block">
+                      PayU Environment Mode (गेटवे मोड चुनें)
+                    </label>
+                    <p className="text-[10px] text-slate-400">
+                      Live mode uses real money on <code className="text-emerald-400 font-mono">secure.payu.in</code>. Test mode uses sandbox on <code className="text-amber-400 font-mono">test.payu.in</code>.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const updated = { ...localSettings, payuMode: 'live' as const };
+                        setLocalSettings(updated);
+                        await updatePlatformSettings({ payuMode: 'live' });
+                        showToast('PayU Mode set to LIVE (secure.payu.in)', 'success');
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                        localSettings.payuMode === 'live' || (!localSettings.payuMode && localSettings.payuMerchantKey !== 'gtKFFx')
+                          ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
+                          : 'bg-slate-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      <span>🟢</span> Live (Production - secure.payu.in)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const updated = { ...localSettings, payuMode: 'test' as const };
+                        setLocalSettings(updated);
+                        await updatePlatformSettings({ payuMode: 'test' });
+                        showToast('PayU Mode set to TEST Sandbox (test.payu.in)', 'info');
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                        localSettings.payuMode === 'test' && localSettings.payuMerchantKey === 'gtKFFx'
+                          ? 'bg-amber-600 text-white shadow-lg shadow-amber-500/20'
+                          : 'bg-slate-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      <span>🧪</span> Test (Sandbox - test.payu.in)
+                    </button>
+                  </div>
+                </div>
+
+                {/* Instant Save PayU Credentials Button */}
+                <div className="md:col-span-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const cleanKey = localSettings.payuMerchantKey?.trim() || 'gtKFFx';
+                      const cleanSalt = localSettings.payuMerchantSalt?.trim() || '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW';
+                      const isCustom = cleanKey !== 'gtKFFx' && !cleanKey.toLowerCase().includes('test');
+                      const modeToSave = isCustom ? 'live' : (localSettings.payuMode || 'test');
+                      const toSave = {
+                        payuMerchantKey: cleanKey,
+                        payuMerchantSalt: cleanSalt,
+                        payuMode: modeToSave,
+                      };
+                      setLocalSettings({ ...localSettings, ...toSave });
+                      await updatePlatformSettings(toSave);
+                      showToast('✅ PayU credentials saved permanently to server & SQLite!', 'success');
+                    }}
+                    className="px-4 py-2 rounded-xl bg-gradient-to-r from-teal-500 to-emerald-600 hover:from-teal-400 hover:to-emerald-500 text-white font-bold text-xs shadow-lg shadow-teal-500/20 flex items-center gap-2 cursor-pointer transition-all"
+                  >
+                    <span>💾</span> Save & Apply PayU Credentials Now
+                  </button>
+                </div>
+
+                {/* Render.com Deployment Environment Guide Box */}
+                <div className="md:col-span-2 p-4 rounded-xl bg-indigo-950/40 border border-indigo-500/40 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-base">🚀</span>
+                      <h5 className="text-xs font-bold text-indigo-300">
+                        Render.com Environment Variables Setup (Deploy Hone Ke Baad Ke Liye)
+                      </h5>
+                    </div>
+                    <span className="text-[10px] font-mono bg-indigo-500/20 text-indigo-200 px-2.5 py-0.5 rounded-full border border-indigo-500/30">
+                      Production Persistence Guide
+                    </span>
+                  </div>
+
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Render.com par redeploy hone par bhi credentials hamesha permanent live rakhne ke liye Render Dashboard → <strong>Web Service ('nexa')</strong> → <strong>Environment</strong> tab me jaakar ye 4 variables add karein:
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono">
+                    <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] text-slate-400 font-sans">Key:</div>
+                        <div className="text-emerald-400 font-bold">PAYU_MERCHANT_KEY</div>
+                        <div className="text-[10px] text-slate-500 truncate max-w-[180px]">Value: {localSettings.payuMerchantKey || 'Your Merchant Key'}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(localSettings.payuMerchantKey || '');
+                          showToast('Copied Merchant Key value for Render!', 'success');
+                        }}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 transition-colors cursor-pointer"
+                      >
+                        Copy Value
+                      </button>
+                    </div>
+
+                    <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] text-slate-400 font-sans">Key:</div>
+                        <div className="text-emerald-400 font-bold">PAYU_MERCHANT_SALT</div>
+                        <div className="text-[10px] text-slate-500">Value: ••••••••</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(localSettings.payuMerchantSalt || '');
+                          showToast('Copied Merchant Salt value for Render!', 'success');
+                        }}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 transition-colors cursor-pointer"
+                      >
+                        Copy Value
+                      </button>
+                    </div>
+
+                    <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] text-slate-400 font-sans">Key:</div>
+                        <div className="text-emerald-400 font-bold">PAYU_MODE</div>
+                        <div className="text-[10px] text-cyan-400">Value: live</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText('live');
+                          showToast('Copied PAYU_MODE value ("live")!', 'success');
+                        }}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 transition-colors cursor-pointer"
+                      >
+                        Copy 'live'
+                      </button>
+                    </div>
+
+                    <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] text-slate-400 font-sans">Key:</div>
+                        <div className="text-emerald-400 font-bold">APP_URL</div>
+                        <div className="text-[10px] text-cyan-400 truncate max-w-[180px]">Value: {typeof window !== 'undefined' ? window.location.origin : 'https://nexatrad.site'}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const url = typeof window !== 'undefined' ? window.location.origin : 'https://nexatrad.site';
+                          navigator.clipboard?.writeText(url);
+                          showToast(`Copied APP_URL (${url})!`, 'success');
+                        }}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 transition-colors cursor-pointer"
+                      >
+                        Copy URL
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 {/* PayU Merchant Name & Branding */}

@@ -54,10 +54,14 @@ export const InvestView: React.FC = () => {
     setIsInvesting(true);
     try {
       const paymentInrAmount = Math.round(product.price * 100);
+      const merchantKey = platformSettings.payuMerchantKey?.trim();
+      const isCustomLiveKey = Boolean(merchantKey && merchantKey !== 'gtKFFx' && !merchantKey.toLowerCase().includes('test'));
+      const merchantMode = (isCustomLiveKey || platformSettings.payuMode === 'live') ? 'live' : 'test';
+
       const res = await triggerOfficialPayUPayment({
-        key: platformSettings.payuMerchantKey,
+        key: merchantKey,
         salt: platformSettings.payuMerchantSalt,
-        mode: platformSettings.payuMode,
+        mode: merchantMode,
         amount: paymentInrAmount,
         usdAmount: product.price,
         merchantName: platformSettings.payuMerchantName?.trim() || 'Nexa AI',

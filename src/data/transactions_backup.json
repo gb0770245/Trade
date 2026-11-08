@@ -1,1 +1,25 @@
-[]
+[
+  {
+    "id": "tx-adj-1794136997441",
+    "userId": "833863",
+    "type": "bonus",
+    "amount": 50,
+    "title": "Admin Credit: Bonus test",
+    "timestamp": "11/8/2026, 11:23:17 AM",
+    "status": "completed",
+    "referenceNo": "ADM136316"
+  },
+  {
+    "id": "tx-ref-1794136053778",
+    "userId": "833863",
+    "phone": "7307112738",
+    "type": "bonus",
+    "amount": 0,
+    "title": "New Team Member Joined: New User (+1 Direct Member, +1 Lucky Spin)",
+    "timestamp": "11/8/2026, 11:07:33 AM",
+    "createdAt": 1794136053787,
+    "status": "completed",
+    "referenceNo": "REF-test",
+    "paymentMethod": "Referral Team System"
+  }
+]

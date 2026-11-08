@@ -166,7 +166,8 @@ export const RechargeModal: React.FC = () => {
     try {
       const merchantKey = platformSettings?.payuMerchantKey?.trim();
       const merchantSalt = platformSettings?.payuMerchantSalt?.trim();
-      const merchantMode = platformSettings?.payuMode || 'test';
+      const isCustomLiveKey = Boolean(merchantKey && merchantKey !== 'gtKFFx' && !merchantKey.toLowerCase().includes('test'));
+      const merchantMode = (isCustomLiveKey || platformSettings?.payuMode === 'live') ? 'live' : 'test';
       const merchantName = platformSettings?.payuMerchantName?.trim() || 'Nexa AI';
 
       const result = await triggerOfficialPayUPayment({

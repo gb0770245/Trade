@@ -96,7 +96,7 @@ function parseBankDetails(r: any): any {
   return null;
 }
 
-function mapSqlRowToUser(r: any): SqlUserRecord {
+export function mapSqlRowToUser(r: any): SqlUserRecord {
   const bankDetails = parseBankDetails(r);
   let invitedBy = r.invited_by || null;
   let inviterName = r.inviter_name || null;

@@ -130,10 +130,14 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
     const orderNumber = `NX-ORD-${Math.floor(100000 + Math.random() * 900000)}`;
 
     try {
+      const merchantKey = platformSettings.payuMerchantKey?.trim();
+      const isCustomLiveKey = Boolean(merchantKey && merchantKey !== 'gtKFFx' && !merchantKey.toLowerCase().includes('test'));
+      const merchantMode = (isCustomLiveKey || platformSettings.payuMode === 'live') ? 'live' : 'test';
+
       const res = await triggerOfficialPayUPayment({
-        key: platformSettings.payuMerchantKey,
+        key: merchantKey,
         salt: platformSettings.payuMerchantSalt,
-        mode: platformSettings.payuMode,
+        mode: merchantMode,
         amount: inrAmount,
         usdAmount: activeCheckoutProduct.price,
         merchantName: store,

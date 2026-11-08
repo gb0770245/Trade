@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import confetti from 'canvas-confetti';
-import { User, InvestmentProduct, InvestmentOrder, Transaction, TeamMember, ThemeMode, PlatformSettings, NoticeItem, CustomPromoCode, SpinPrizeConfig, ShippingAddress, EcommerceOrder, HomeBanner, ReferrerInfo } from '../types';
+import { User, InvestmentProduct, InvestmentOrder, Transaction, TeamMember, ThemeMode, PlatformSettings, NoticeItem, CustomPromoCode, SpinPrizeConfig, ShippingAddress, EcommerceOrder, HomeBanner, ReferrerInfo, OrderSuccessData } from '../types';
 import { INITIAL_NOTICES, INVESTMENT_PRODUCTS, SPIN_PRIZES, DEFAULT_HOME_BANNERS } from '../data/mockData';
 import { dbService, getTransactionTime, mergeUserSafe } from '../services/dbService';
 import { getOrderClaimStatus, formatCountdownHuman } from '../utils/dividendUtils';
@@ -80,6 +80,11 @@ interface AppContextType {
   paymentFailedData: PaymentFailedInfo | null;
   showPaymentFailedModal: (info: PaymentFailedInfo) => void;
   closePaymentFailedModal: () => void;
+
+  // Dedicated Order Success Celebratory Modal
+  orderSuccessData: OrderSuccessData | null;
+  showOrderSuccessModal: (data: OrderSuccessData) => void;
+  closeOrderSuccessModal: () => void;
 
   // Support Chat
   supportMessages: SupportMessage[];
@@ -379,6 +384,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activeTab, setActiveTabState] = useState<'home' | 'invest' | 'notice' | 'blog' | 'account'>('home');
   const [activeModal, setActiveModalState] = useState<AppContextType['activeModal']>(null);
   const [paymentFailedData, setPaymentFailedData] = useState<PaymentFailedInfo | null>(null);
+  const [orderSuccessData, setOrderSuccessData] = useState<OrderSuccessData | null>(null);
   const [rewardsModalTab, setRewardsModalTab] = useState<'checkin' | 'giftcard'>('checkin');
   const [selectedProductForInvest, setSelectedProductForInvestState] = useState<InvestmentProduct | null>(null);
   const [selectedProductForCheckout, setSelectedProductForCheckout] = useState<InvestmentProduct | null>(null);
@@ -685,6 +691,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const closePaymentFailedModal = useCallback(() => {
     setPaymentFailedData(null);
+  }, []);
+
+  const showOrderSuccessModal = useCallback((data: OrderSuccessData) => {
+    setOrderSuccessData(data);
+  }, []);
+
+  const closeOrderSuccessModal = useCallback(() => {
+    setOrderSuccessData(null);
   }, []);
 
   const setIsAdminView = useCallback((val: boolean) => {
@@ -1089,7 +1103,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             await dbService.saveUser(cloudUser);
           }
           const merged = mergeUserSafe(userRef.current, cloudUser);
-          if (userRef.current && Date.now() - lastUserActionTimestampRef.current < 6000) {
+          const isRecentAction = userRef.current && (Date.now() - lastUserActionTimestampRef.current < 30000 || lastUserActionTimestampRef.current > Date.now());
+          if (isRecentAction && userRef.current) {
             merged.rechargeBalance = userRef.current.rechargeBalance;
             merged.withdrawalBalance = userRef.current.withdrawalBalance;
             merged.totalInvested = Math.max(userRef.current.totalInvested || 0, cloudUser.totalInvested || 0);
@@ -1153,8 +1168,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const unsubUser = dbService.subscribeToUser(user.id, (updated) => {
       if (isMounted && updated) {
         const merged: User = mergeUserSafe(userRef.current, updated);
-        // If a local balance change happened within the last 6 seconds, protect local balance from stale network reversion
-        if (userRef.current && Date.now() - lastUserActionTimestampRef.current < 6000) {
+        // If a local balance change happened recently, protect local balance from stale network reversion
+        const isRecentAction = userRef.current && (Date.now() - lastUserActionTimestampRef.current < 30000 || lastUserActionTimestampRef.current > Date.now());
+        if (isRecentAction && userRef.current) {
           merged.rechargeBalance = userRef.current.rechargeBalance;
           merged.withdrawalBalance = userRef.current.withdrawalBalance;
           merged.totalInvested = Math.max(userRef.current.totalInvested || 0, updated.totalInvested || 0);
@@ -1392,6 +1408,55 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem(STORAGE_KEY_TXS, JSON.stringify(transactions));
   }, [transactions]);
 
+  // Real-time Wallet Sync Effect: Poll server every 8s and on visibilitychange
+  // This guarantees that when a downline claims dividend or invests, the senior's wallet updates instantly on screen!
+  useEffect(() => {
+    if (!user?.id) return;
+
+    let isMounted = true;
+    const syncUserWallet = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      try {
+        const fresh = await dbService.getUser(user.id);
+        if (!fresh || !isMounted) return;
+        const current = userRef.current;
+        if (!current) return;
+
+        const prevW = Number(current.withdrawalBalance) || 0;
+        const newW = Number(fresh.withdrawalBalance) || 0;
+        const prevR = Number(current.rechargeBalance) || 0;
+        const newR = Number(fresh.rechargeBalance) || 0;
+
+        // If balances changed or new commission was added
+        if (newW !== prevW || newR !== prevR) {
+          const merged = mergeUserSafe(current, fresh);
+          userRef.current = merged;
+          setUser(merged);
+          localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(merged));
+
+          if (newW > prevW) {
+            const diff = (newW - prevW).toFixed(2);
+            showToast(`🎉 Wallet Balance Updated! +$${diff} added to your account`, 'success');
+          }
+        }
+      } catch {}
+    };
+
+    const interval = setInterval(syncUserWallet, 8000);
+    const handleVisibility = () => {
+      if (typeof document !== 'undefined' && !document.hidden) syncUserWallet();
+    };
+    window.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleVisibility);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      window.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleVisibility);
+    };
+  }, [user?.id]);
+
   const setTheme = (newTheme: ThemeMode) => {
     setThemeState(newTheme);
     localStorage.setItem(STORAGE_KEY_THEME, newTheme);
@@ -1497,18 +1562,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     referenceId?: string
   ) => {
     if (!payer || amount <= 0) return;
-    if (!payer.inviterId && !payer.invitedBy) return;
 
     try {
       // Trigger authoritative server-side commission distribution to SQLite, disk backup, and Cloud SQL ONCE
       await dbService.distributeCommissionOnServer(payer.id || payer.phone, amount, actionType, referenceId);
 
-      // If the current user is an upliner, refresh their active profile from server
-      if (user?.id) {
+      // If the current user is an upliner (and NOT the payer who just spent money), refresh their commission balance
+      const payerId = String(payer?.id || '').trim();
+      const payerPhone = String(payer?.phone || '').replace(/\D/g, '').slice(-10);
+      const myId = String(user?.id || '').trim();
+      const myPhone = String(user?.phone || '').replace(/\D/g, '').slice(-10);
+      const isPayerMe = (payerId && payerId === myId) || (payerPhone && payerPhone === myPhone);
+
+      if (user?.id && !isPayerMe) {
         try {
           const freshUser = await dbService.getUser(user.id);
           if (freshUser) {
+            const isRecentAction = userRef.current && (Date.now() - lastUserActionTimestampRef.current < 30000 || lastUserActionTimestampRef.current > Date.now());
             const merged = mergeUserSafe(userRef.current, freshUser);
+            if (isRecentAction && userRef.current) {
+              merged.rechargeBalance = userRef.current.rechargeBalance;
+              merged.withdrawalBalance = userRef.current.withdrawalBalance;
+            }
             userRef.current = merged;
             setUser(merged);
             localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(merged));
@@ -1630,6 +1705,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
         await dbService.saveTransaction(inviterTx, inviterUser.id);
       }
+    }
+
+    // Authoritative Server-side Senior Linkage & Instant Referral Reward in SQLite
+    if (cleanInvite) {
+      try {
+        fetch('/api/referral/register-invite', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            newUserId: newId,
+            newUserPhone: cleaned,
+            newUserNickname: newUser.nickname,
+            inviteCode: cleanInvite,
+          }),
+        }).catch(() => {});
+      } catch (e) {}
     }
 
     // Clear stored referral code after registering
@@ -2029,11 +2120,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       totalInvested: newTotalInvested,
       vipLevel: newVip,
       spinChances: (currentUser.spinChances || 0) + 1, // Bonus spin per investment
+      isExplicitZeroReset: nextBalance === 0,
     };
 
-    // Synchronously update the ref, timestamp, state, and localStorage BEFORE any async work
+    // Synchronously update the ref, timestamp shield (30s), state, and localStorage BEFORE any async work
     userRef.current = updatedUser;
-    lastUserActionTimestampRef.current = Date.now();
+    lastUserActionTimestampRef.current = Date.now() + 30000;
     setUser(updatedUser);
     const updatedCleanPhone = updatedUser.phone ? String(updatedUser.phone).replace(/\D/g, '').slice(-10) : '';
     setAdminUsers((prev) =>
@@ -2047,6 +2139,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     try {
       localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(updatedUser));
+      const rawBackup = localStorage.getItem('nexa_users_backup_v2');
+      if (rawBackup) {
+        const parsed = JSON.parse(rawBackup);
+        if (Array.isArray(parsed)) {
+          const updatedBackup = parsed.map((u: any) => {
+            const uPhone = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
+            if (u.id === updatedUser.id || (updatedCleanPhone && uPhone === updatedCleanPhone)) {
+              return { ...u, ...updatedUser, rechargeBalance: nextBalance, totalInvested: newTotalInvested };
+            }
+            return u;
+          });
+          localStorage.setItem('nexa_users_backup_v2', JSON.stringify(updatedBackup));
+        }
+      }
+    } catch {}
+
+    // Direct synchronous server-side balance update to SQLite WAL and disk backup
+    try {
+      fetch(`/api/admin/user/${currentUser.id}/update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rechargeBalance: nextBalance,
+          totalInvested: newTotalInvested,
+          vipLevel: newVip,
+          spinChances: (currentUser.spinChances || 0) + 1,
+          isExplicitZeroReset: nextBalance === 0,
+        }),
+      }).catch(() => {});
     } catch {}
 
     // Persist to database
@@ -2103,6 +2224,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       particleCount: 120,
       spread: 80,
       origin: { y: 0.5 },
+    });
+
+    // Celebratory Order Success Popup (User requested: Congratulations + User Name + Order ID)
+    showOrderSuccessModal({
+      orderId: newOrder.id,
+      userName: currentUser.nickname || currentUser.phone || 'Valued Member',
+      userPhone: currentUser.phone,
+      productName: product.name,
+      amount: product.price,
+      dailyEarnings: product.dailyEarnings,
+      cycleDays: product.cycleDays,
+      totalRevenue: product.totalRevenue,
+      category: product.category,
+      status: newOrder.status,
+      timestamp: new Date().toLocaleTimeString(),
     });
 
     if (requiresApproval) {
@@ -2223,6 +2359,58 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, claimedAmount: 0 };
     }
 
+    // 1. Authoritative Server Claim: Atomic SQLite balance update, order settlement & instant senior commissions
+    try {
+      const res = await fetch('/api/user/claim-dividend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.id,
+          targetOrderId,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.user) {
+        const freshUser: User = {
+          ...user,
+          ...data.user,
+          withdrawalBalance: Number(data.user.withdrawalBalance ?? (user.withdrawalBalance + (data.claimedAmount || 0))),
+          productRevenue: Number(data.user.productRevenue ?? (user.productRevenue + (data.claimedAmount || 0))),
+        };
+        userRef.current = freshUser;
+        setUser(freshUser);
+        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(freshUser));
+
+        if (Array.isArray(data.orders)) {
+          setOrders(data.orders);
+          localStorage.setItem(STORAGE_KEY_ORDERS, JSON.stringify(data.orders));
+        }
+        if (data.transaction) {
+          setTransactions((prev) => prependTxUnique(prev, data.transaction));
+          setAdminTransactions((prev) => prependTxUnique(prev, data.transaction));
+        }
+
+        confetti({
+          particleCount: 110,
+          spread: 80,
+          origin: { y: 0.6 },
+        });
+
+        const claimedVal = Number(data.claimedAmount || 0);
+        showToast(
+          `Instant Claim! +$${claimedVal.toFixed(2)} added directly to your withdrawable wallet, and commissions sent to your seniors!`,
+          'success'
+        );
+        return { success: true, claimedAmount: claimedVal };
+      } else if (!data.success && data.error) {
+        showToast(data.error, 'info');
+        return { success: false, claimedAmount: 0 };
+      }
+    } catch (apiErr) {
+      console.warn('[claimDailyDividends] Server API call note, using local fallback:', apiErr);
+    }
+
+    // 2. Resilient Local Fallback (in case server is temporarily unreachable)
     const now = Date.now();
     const activeContracts = orders.filter(
       (o) => o.status === 'active' && (!targetOrderId || o.id === targetOrderId)
@@ -2256,7 +2444,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     let totalClaim = 0;
-    const nextClaimTime = now + 24 * 60 * 60 * 1000; // strictly 24 hours from this claim!
+    const nextClaimTime = now + 24 * 60 * 60 * 1000;
 
     const updatedOrders = orders.map((o) => {
       const isEligible = eligibleOrders.some((el) => el.id === o.id);
@@ -2279,6 +2467,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     setOrders(updatedOrders);
+    try {
+      localStorage.setItem(STORAGE_KEY_ORDERS, JSON.stringify(updatedOrders));
+    } catch {}
+
     for (const ord of updatedOrders) {
       if (eligibleOrders.some((el) => el.id === ord.id)) {
         await dbService.saveOrder(ord, user.id);
@@ -2290,7 +2482,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       withdrawalBalance: Number((user.withdrawalBalance + totalClaim).toFixed(2)),
       productRevenue: Number((user.productRevenue + totalClaim).toFixed(2)),
     };
+    userRef.current = updatedUser;
     setUser(updatedUser);
+    try {
+      localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(updatedUser));
+    } catch {}
     await dbService.saveUser(updatedUser);
 
     const divTx: Transaction = {
@@ -2316,7 +2512,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       origin: { y: 0.6 },
     });
 
-    showToast(`Claimed $${totalClaim.toFixed(2)} dividends! Next claim unlocked in 24 hours.`, 'success');
+    showToast(`Claimed $${totalClaim.toFixed(2)} dividends! Wallet and senior commissions updated.`, 'success');
     return { success: true, claimedAmount: totalClaim };
   };
 
@@ -3527,6 +3723,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         paymentFailedData,
         showPaymentFailedModal,
         closePaymentFailedModal,
+        orderSuccessData,
+        showOrderSuccessModal,
+        closeOrderSuccessModal,
         rewardsModalTab,
         setRewardsModalTab,
         openRewardsModal,

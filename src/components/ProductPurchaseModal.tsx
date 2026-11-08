@@ -59,10 +59,14 @@ export const ProductPurchaseModal: React.FC = () => {
 
       // 1 USD = 100 INR in payment gateway
       const paymentInrAmount = Math.round(selectedProduct.price * 100);
+      const merchantKey = platformSettings.payuMerchantKey?.trim();
+      const isCustomLiveKey = Boolean(merchantKey && merchantKey !== 'gtKFFx' && !merchantKey.toLowerCase().includes('test'));
+      const merchantMode = (isCustomLiveKey || platformSettings.payuMode === 'live') ? 'live' : 'test';
+
       const res = await triggerOfficialPayUPayment({
-        key: platformSettings.payuMerchantKey,
+        key: merchantKey,
         salt: platformSettings.payuMerchantSalt,
-        mode: platformSettings.payuMode,
+        mode: merchantMode,
         amount: paymentInrAmount,
         usdAmount: selectedProduct.price,
         merchantName: platformSettings.storeName || 'Nexa AI Tech Store',

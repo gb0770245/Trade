@@ -24,7 +24,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:58:03.386Z",
-    "updatedAt": "2026-11-07T09:30:33.965Z"
+    "updatedAt": "2026-11-08T11:23:08.769Z"
   },
   {
     "id": "283754",
@@ -51,7 +51,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T13:41:33.192Z",
-    "updatedAt": "2026-11-07T09:30:33.965Z"
+    "updatedAt": "2026-11-08T11:23:08.770Z"
   },
   {
     "id": "104473",
@@ -78,7 +78,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T17:37:51.313Z",
-    "updatedAt": "2026-11-07T09:30:33.965Z"
+    "updatedAt": "2026-11-08T11:23:08.770Z"
   },
   {
     "id": "618717",
@@ -105,7 +105,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:40:27.922Z",
-    "updatedAt": "2026-11-07T09:30:33.965Z"
+    "updatedAt": "2026-11-08T11:23:08.771Z"
   },
   {
     "id": "684973",
@@ -132,7 +132,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:38:02.713Z",
-    "updatedAt": "2026-11-07T09:30:33.965Z"
+    "updatedAt": "2026-11-08T11:23:08.772Z"
   },
   {
     "id": "959918",
@@ -159,7 +159,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:31:25.611Z",
-    "updatedAt": "2026-11-07T09:30:33.965Z"
+    "updatedAt": "2026-11-08T11:23:08.772Z"
   },
   {
     "id": "787126",
@@ -186,7 +186,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:15:56.676Z",
-    "updatedAt": "2026-11-07T09:30:33.965Z"
+    "updatedAt": "2026-11-08T11:23:08.773Z"
   },
   {
     "id": "142988",
@@ -213,7 +213,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:20:53.407Z",
-    "updatedAt": "2026-11-07T09:30:33.965Z"
+    "updatedAt": "2026-11-08T11:23:08.774Z"
   },
   {
     "id": "109378",
@@ -240,7 +240,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:09:36.547Z",
-    "updatedAt": "2026-11-07T09:30:33.965Z"
+    "updatedAt": "2026-11-08T11:23:08.774Z"
   },
   {
     "id": "300775",
@@ -267,7 +267,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:01:42.630Z",
-    "updatedAt": "2026-11-07T09:30:33.965Z"
+    "updatedAt": "2026-11-08T11:23:08.775Z"
   },
   {
     "id": "962228",
@@ -294,7 +294,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T05:14:28.059Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z"
+    "updatedAt": "2026-11-08T11:23:08.776Z"
   },
   {
     "id": "928544",
@@ -327,7 +327,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T20:45:33.180Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z"
+    "updatedAt": "2026-11-08T11:23:08.776Z"
   },
   {
     "id": "876089",
@@ -354,7 +354,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T01:29:31.604Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z"
+    "updatedAt": "2026-11-08T11:23:08.777Z"
   },
   {
     "id": "833656",
@@ -381,7 +381,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T02:30:01.775Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z"
+    "updatedAt": "2026-11-08T11:23:08.778Z"
   },
   {
     "id": "617291",
@@ -414,7 +414,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-02T07:23:13.773Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z"
+    "updatedAt": "2026-11-08T11:23:08.778Z"
   },
   {
     "id": "569973",
@@ -447,7 +447,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-02T09:00:48.444Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z",
+    "updatedAt": "2026-11-08T11:23:08.779Z",
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
     ]
@@ -477,7 +477,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T01:18:24.844Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z",
+    "updatedAt": "2026-11-08T11:23:08.780Z",
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
     ]
@@ -513,7 +513,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T13:23:22.426Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z",
+    "updatedAt": "2026-11-08T11:23:08.780Z",
     "redeemedCodes": [
       "BSSBJJIEVJOVGYWBSK",
       "SYBYGEJEBUYIRIIR"
@@ -544,7 +544,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T01:22:00.237Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z",
+    "updatedAt": "2026-11-08T11:23:08.781Z",
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
     ]
@@ -580,7 +580,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-02T01:28:16.884Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z",
+    "updatedAt": "2026-11-08T11:23:08.782Z",
     "dailySpinsUsedToday": 1,
     "lastSpinDate": "2026-11-02",
     "redeemedCodes": [
@@ -604,10 +604,10 @@
     "totalInvested": 0,
     "checkInStreak": 4,
     "lastCheckInDate": "2026-11-02",
-    "spinChances": 1,
+    "spinChances": 2,
     "status": "active",
     "role": "admin",
-    "totalReferrals": 5,
+    "totalReferrals": 6,
     "totalCommissionEarned": 0,
     "bankDetails": {
       "accountHolder": "gaurav",
@@ -618,7 +618,8 @@
     },
     "isDeleted": false,
     "createdAt": "2026-10-31T03:08:35.291Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z"
+    "updatedAt": "2026-11-08T11:23:29.534Z",
+    "isExplicitZeroReset": true
   },
   {
     "id": "453665",
@@ -651,7 +652,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T00:22:37.632Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z"
+    "updatedAt": "2026-11-08T11:23:08.783Z"
   },
   {
     "id": "752520",
@@ -678,7 +679,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T00:22:37.753Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z"
+    "updatedAt": "2026-11-08T11:23:08.784Z"
   },
   {
     "id": "812624",
@@ -705,7 +706,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T00:22:37.863Z",
-    "updatedAt": "2026-11-07T09:30:33.966Z"
+    "updatedAt": "2026-11-08T11:23:08.784Z"
   },
   {
     "id": "950580",
@@ -732,7 +733,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T02:54:15.104Z",
-    "updatedAt": "2026-11-07T09:30:33.967Z"
+    "updatedAt": "2026-11-08T11:23:08.785Z"
   },
   {
     "id": "644029",
@@ -759,7 +760,7 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T07:02:05.540Z",
-    "updatedAt": "2026-11-07T09:30:33.967Z",
+    "updatedAt": "2026-11-08T11:23:08.786Z",
     "redeemedCodes": [
       "BSSBJJIEVJOVGYWBSK"
     ]
@@ -795,6 +796,6 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T07:33:04.366Z",
-    "updatedAt": "2026-11-07T09:30:33.967Z"
+    "updatedAt": "2026-11-08T11:23:08.786Z"
   }
 ]

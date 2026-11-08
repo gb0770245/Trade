@@ -43,6 +43,7 @@ export interface User {
     bankName: string;
     upiId: string;
   };
+  isExplicitZeroReset?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -362,4 +363,18 @@ export interface NewsArticle {
   snippet: string;
   content: string;
   views: number;
+}
+
+export interface OrderSuccessData {
+  orderId: string;
+  userName: string;
+  userPhone?: string;
+  productName: string;
+  amount: number;
+  dailyEarnings?: number;
+  cycleDays?: number;
+  totalRevenue?: number;
+  category?: string;
+  timestamp?: string;
+  status?: string;
 }

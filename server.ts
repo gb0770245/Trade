@@ -53,6 +53,8 @@ import {
   syncAllRealUserOrders,
 } from './src/db/sqliteOrders.ts';
 import {
+  initSqliteUsersTable,
+  mapSqlRowToUser,
   upsertUserInSql,
   getUserByIdOrPhoneFromSql,
   getAllUsersFromSql,
@@ -169,16 +171,40 @@ const DEFAULT_SERVER_PLATFORM_SETTINGS: Record<string, any> = {
   adminPin: '8888',
 };
 
+function initSqlitePlatformSettings(): void {
+  try {
+    const db = getSqliteDb();
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS platform_settings_kv (
+        id TEXT PRIMARY KEY,
+        settings_json TEXT NOT NULL,
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+  } catch {}
+}
+
 function loadServerPlatformSettings(): Record<string, any> {
+  let fileSettings: Record<string, any> = {};
   try {
     if (fs.existsSync(PLATFORM_SETTINGS_PATH)) {
-      const parsed = JSON.parse(fs.readFileSync(PLATFORM_SETTINGS_PATH, 'utf-8'));
-      return { ...DEFAULT_SERVER_PLATFORM_SETTINGS, ...parsed };
+      fileSettings = JSON.parse(fs.readFileSync(PLATFORM_SETTINGS_PATH, 'utf-8'));
     }
   } catch (err) {
     console.warn('Could not read platform_settings.json:', err);
   }
-  return { ...DEFAULT_SERVER_PLATFORM_SETTINGS };
+
+  try {
+    initSqlitePlatformSettings();
+    const db = getSqliteDb();
+    const row = db.prepare('SELECT settings_json FROM platform_settings_kv WHERE id = ?').get('global') as any;
+    if (row?.settings_json) {
+      const sqlSettings = JSON.parse(row.settings_json);
+      return { ...DEFAULT_SERVER_PLATFORM_SETTINGS, ...fileSettings, ...sqlSettings };
+    }
+  } catch {}
+
+  return { ...DEFAULT_SERVER_PLATFORM_SETTINGS, ...fileSettings };
 }
 
 function saveServerPlatformSettings(next: Record<string, any>): Record<string, any> {
@@ -188,6 +214,19 @@ function saveServerPlatformSettings(next: Record<string, any>): Record<string, a
     fs.writeFileSync(PLATFORM_SETTINGS_PATH, JSON.stringify(merged, null, 2), 'utf-8');
   } catch (err) {
     console.warn('Could not write platform_settings.json:', err);
+  }
+  try {
+    initSqlitePlatformSettings();
+    const db = getSqliteDb();
+    db.prepare(`
+      INSERT INTO platform_settings_kv (id, settings_json, updated_at)
+      VALUES ('global', ?, datetime('now'))
+      ON CONFLICT(id) DO UPDATE SET
+        settings_json = excluded.settings_json,
+        updated_at = datetime('now')
+    `).run(JSON.stringify(merged));
+  } catch (e) {
+    console.warn('Could not write platform settings to SQLite:', e);
   }
   return merged;
 }
@@ -1093,9 +1132,18 @@ function mergeTwoUsers(existing: any, incoming: any): any {
   if (!incoming) return { ...existing };
   const merged: any = { ...existing };
   for (const [k, v] of Object.entries(incoming)) {
-    // Prevent accidental undefined or null or NaN overwriting of financial balances & streaks (allow valid 0 when deducted or withdrawn)
+    // Prevent accidental undefined or null or NaN or stale 0 overwriting of financial balances & streaks
     if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'vipLevel', 'spinChances', 'totalReferrals', 'totalCommissionEarned', 'checkInStreak'].includes(k)) {
-      if (merged[k] !== undefined && (v === null || v === undefined || Number.isNaN(v))) {
+      const existingNum = Number(existing[k]) || 0;
+      const incomingNum = Number(v) || 0;
+
+      // CRITICAL SAFEGUARD: If existing user record already has a positive balance (e.g. admin credited rechargeBalance > 0),
+      // NEVER let stale background fetches or default 0s wipe that positive balance to 0!
+      if (existingNum > 0 && incomingNum === 0 && !incoming.isExplicitZeroReset) {
+        continue;
+      }
+
+      if (merged[k] !== undefined && (v === null || v === undefined || Number.isNaN(Number(v)))) {
         continue;
       }
     }
@@ -1114,6 +1162,11 @@ function mergeTwoUsers(existing: any, incoming: any): any {
         merged[k] = v;
       }
     } else if (((v as any) === 0 || (v as any) === false) && typeof v === typeof existing[k]) {
+      if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested'].includes(k)) {
+        if ((Number(existing[k]) || 0) > 0 && !incoming.isExplicitZeroReset) {
+          continue;
+        }
+      }
       merged[k] = v;
     }
   }
@@ -1245,8 +1298,9 @@ async function getCombinedServerUsers(): Promise<any[]> {
   }
 
   // Merge SQL users with disk users and Cloud SQL users
-  const merged1 = deduplicateAndMergeUsers(sqlUsers, diskUsers);
-  const mergedAll = deduplicateAndMergeUsers(merged1, cloudUsers);
+  // SQLite is authoritative: sqlUsers takes precedence over disk and cloud
+  const merged1 = deduplicateAndMergeUsers(diskUsers, sqlUsers);
+  const mergedAll = deduplicateAndMergeUsers(cloudUsers, merged1);
 
   // Filter one more time through deletedSet to be 1000% certain
   const finalCleanUsers = mergedAll.filter((u) => {
@@ -1366,6 +1420,244 @@ app.post(['/api/user/save', '/api/user/update'], async (req, res) => {
       success: true,
       message: 'User details saved permanently in SQLite SQL database!',
       user: saved,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// API Route: Atomic Daily Dividend Claim with Instant Wallet Credit & Instant Senior Referral Commission
+app.post('/api/user/claim-dividend', async (req, res) => {
+  try {
+    const { userId, targetOrderId, customEarnings } = req.body;
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'User ID is required' });
+    }
+
+    const cleanUserId = String(userId).trim();
+    const user = getUserByIdOrPhoneFromSql(cleanUserId);
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found in database' });
+    }
+
+    // 1. Fetch user orders from SQLite
+    const userOrders = getOrdersForUserFromSql([cleanUserId, user.phone].filter(Boolean) as string[]);
+    const now = Date.now();
+
+    const activeContracts = userOrders.filter(
+      (o: any) => o.status === 'active' && (!targetOrderId || o.id === targetOrderId)
+    );
+
+    if (activeContracts.length === 0) {
+      return res.status(400).json({ success: false, error: 'No active contracts eligible for daily dividend' });
+    }
+
+    let totalClaim = 0;
+    const eligibleOrders: any[] = [];
+    const nextClaimTime = now + 24 * 60 * 60 * 1000;
+
+    for (const ord of activeContracts) {
+      const lastClaim = ord.lastClaimTimestamp
+        ? Number(ord.lastClaimTimestamp)
+        : (ord.purchaseTimestamp ? Number(ord.purchaseTimestamp) : 0);
+      const isDue = (now - lastClaim) >= (23.5 * 3600 * 1000) || !ord.lastClaimTimestamp || customEarnings !== undefined;
+
+      if (isDue) {
+        eligibleOrders.push(ord);
+        const dividend = customEarnings !== undefined ? Number(customEarnings) : Number(ord.dailyEarnings || 0);
+        totalClaim += dividend;
+
+        const newElapsed = (Number(ord.daysElapsed) || 0) + 1;
+        const isFinished = newElapsed >= (Number(ord.cycleDays) || 1);
+        const updatedOrd = {
+          ...ord,
+          daysElapsed: newElapsed,
+          totalAccrued: Number(((Number(ord.totalAccrued) || 0) + dividend).toFixed(2)),
+          lastClaimDate: new Date(now).toISOString().split('T')[0],
+          lastClaimTimestamp: now,
+          nextClaimTimestamp: nextClaimTime,
+          status: isFinished ? 'completed' : 'active',
+        };
+        upsertOrderInSql(updatedOrd);
+      }
+    }
+
+    if (eligibleOrders.length === 0 || totalClaim <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Daily dividend requires 24 hours cooldown between claims (24 घंटे पूरे होने के बाद ही अगला क्लेम करें)',
+      });
+    }
+
+    totalClaim = Number(totalClaim.toFixed(2));
+
+    // 2. Atomically credit user's Withdrawable Balance & Product Revenue in SQLite
+    const db = getSqliteDb();
+    initSqliteUsersTable();
+    const newWithdrawal = Number((Number(user.withdrawalBalance || 0) + totalClaim).toFixed(2));
+    const newRevenue = Number((Number(user.productRevenue || 0) + totalClaim).toFixed(2));
+
+    db.prepare(`
+      UPDATE platform_users 
+      SET withdrawal_balance = ?, 
+          product_revenue = ?,
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(newWithdrawal, newRevenue, user.id);
+
+    // Update in disk backup
+    const diskUsers = getCachedUsersBackup();
+    const diskIdx = diskUsers.findIndex((u) => u.id === user.id);
+    if (diskIdx >= 0) {
+      diskUsers[diskIdx].withdrawalBalance = newWithdrawal;
+      diskUsers[diskIdx].productRevenue = newRevenue;
+      saveUsersBackup(diskUsers);
+    }
+
+    // Sync to Cloud SQL in background
+    upsertUser({
+      uid: user.id,
+      withdrawalBalance: newWithdrawal,
+      productRevenue: newRevenue,
+    }).catch(() => {});
+
+    // 3. Create dividend earnings transaction
+    const divRef = `DIV-${user.id}-${Date.now()}`;
+    const divTx = {
+      id: `tx-div-${Date.now()}`,
+      userId: user.id,
+      phone: user.phone || '',
+      type: 'earnings',
+      amount: totalClaim,
+      title: `Daily 24-Hour Dividend Settled (${eligibleOrders.length} contracts)`,
+      timestamp: new Date().toLocaleString(),
+      createdAt: now,
+      status: 'completed',
+      referenceNo: divRef,
+      paymentMethod: 'Product Daily Return',
+    };
+    const allTxs = loadServerTransactions();
+    allTxs.unshift(divTx);
+    saveServerTransactions(allTxs);
+    createTransaction(divTx).catch(() => {});
+
+    // 4. INSTANTLY DISTRIBUTE SENIOR / UPLINE REFERRAL COMMISSIONS!
+    const commissionResult = await distributeReferralCommissionServer(
+      user.id,
+      totalClaim,
+      'daily_income',
+      divRef
+    );
+
+    const freshUser = getUserByIdOrPhoneFromSql(user.id);
+    const updatedOrders = getOrdersForUserFromSql([user.id, user.phone].filter(Boolean) as string[]);
+
+    console.log(`[Daily Dividend Engine] ✅ Successfully settled $${totalClaim} dividend for ${user.nickname} (${user.id}). Senior commission distributed to ${commissionResult?.credited?.length || 0} upliners.`);
+
+    return res.json({
+      success: true,
+      claimedAmount: totalClaim,
+      user: freshUser,
+      orders: updatedOrders,
+      transaction: divTx,
+      commissionResult,
+      message: `Daily dividend of $${totalClaim.toFixed(2)} added instantly to your wallet, and commission credited to your seniors!`,
+    });
+  } catch (err: any) {
+    console.error('[Claim Dividend Error]:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// API Route: Real-time Senior Referral Linkage & Instant Referral Reward on Registration
+app.post('/api/referral/register-invite', async (req, res) => {
+  try {
+    const { newUserId, newUserPhone, newUserNickname, inviteCode } = req.body;
+    if (!newUserId || !inviteCode) {
+      return res.status(400).json({ success: false, error: 'newUserId and inviteCode required' });
+    }
+
+    const cleanCode = String(inviteCode).trim().toUpperCase();
+    const cleanDigits = String(inviteCode).replace(/\D/g, '').slice(-10);
+
+    const db = getSqliteDb();
+    initSqliteUsersTable();
+
+    // Find senior by invitation code, id, or phone in SQLite
+    const row = db.prepare(`
+      SELECT * FROM platform_users 
+      WHERE UPPER(invitation_code) = ? 
+         OR id = ? 
+         OR (phone = ? AND length(?) = 10)
+      LIMIT 1
+    `).get(cleanCode, cleanCode, cleanDigits, cleanDigits) as any;
+
+    if (!row) {
+      return res.json({ success: false, message: 'Inviter not found' });
+    }
+
+    const senior = mapSqlRowToUser(row);
+
+    // Atomically increment senior's total referrals and lucky spin in SQLite
+    const newReferralCount = (senior.totalReferrals || 0) + 1;
+    const newSpins = (senior.spinChances || 0) + 1;
+
+    db.prepare(`
+      UPDATE platform_users 
+      SET total_referrals = ?,
+          spin_chances = ?,
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(newReferralCount, newSpins, senior.id);
+
+    // Also link senior to new user row in SQLite
+    db.prepare(`
+      UPDATE platform_users 
+      SET invited_by = ?,
+          inviter_id = ?,
+          inviter_name = ?,
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(senior.invitationCode, senior.id, senior.nickname, String(newUserId).trim());
+
+    // Update in disk backup
+    const diskUsers = getCachedUsersBackup();
+    const seniorDiskIdx = diskUsers.findIndex((u) => u.id === senior.id);
+    if (seniorDiskIdx >= 0) {
+      diskUsers[seniorDiskIdx].totalReferrals = newReferralCount;
+      diskUsers[seniorDiskIdx].spinChances = newSpins;
+      saveUsersBackup(diskUsers);
+    }
+
+    // Create senior notification transaction
+    const seniorTx = {
+      id: `tx-ref-${Date.now()}`,
+      userId: senior.id,
+      phone: senior.phone || '',
+      type: 'bonus',
+      amount: 0,
+      title: `New Team Member Joined: ${newUserNickname || 'New User'} (+1 Direct Member, +1 Lucky Spin)`,
+      timestamp: new Date().toLocaleString(),
+      createdAt: Date.now(),
+      status: 'completed',
+      referenceNo: `REF-${newUserId}`,
+      paymentMethod: 'Referral Team System',
+    };
+    const allTxs = loadServerTransactions();
+    allTxs.unshift(seniorTx);
+    saveServerTransactions(allTxs);
+    createTransaction(seniorTx).catch(() => {});
+
+    console.log(`[Referral System] ✅ Linked new user ${newUserId} to senior ${senior.nickname} (${senior.id}). Total referrals: ${newReferralCount}`);
+
+    return res.json({
+      success: true,
+      senior: {
+        id: senior.id,
+        nickname: senior.nickname,
+        totalReferrals: newReferralCount,
+        spinChances: newSpins,
+      },
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
@@ -1756,12 +2048,13 @@ export async function distributeReferralCommissionServer(
 
   const nowMs = Date.now();
   const lastProcessed = processedCommissionCache.get(dedupeKey);
-  if (lastProcessed && nowMs - lastProcessed < 15 * 60 * 1000) {
-    console.log(`[Referral Commission] BLOCKED duplicate commission distribution call for key: ${dedupeKey}`);
+  const debounceWindowMs = actionType === 'daily_income' ? 30 * 1000 : 60 * 1000;
+  if (lastProcessed && nowMs - lastProcessed < debounceWindowMs) {
+    console.log(`[Referral Commission] Debounced duplicate commission distribution call for key: ${dedupeKey}`);
     return { success: true, credited: [] };
   }
 
-  // 2. Also check if commission transactions already exist in transactions log for this reference
+  // 2. Also check if commission transactions already exist in transactions log for this reference (EXACT match)
   if (cleanRef) {
     const existingTxs = loadServerTransactions();
     const alreadyCredited = existingTxs.some(
@@ -1770,7 +2063,7 @@ export async function distributeReferralCommissionServer(
         (t.referenceNo === `COMM1-${cleanRef}` ||
           t.referenceNo === `COMM2-${cleanRef}` ||
           t.referenceNo === `COMM3-${cleanRef}` ||
-          (t.referenceNo && t.referenceNo.includes(cleanRef)))
+          t.referenceNo === `COMM-${cleanRef}`)
     );
     if (alreadyCredited) {
       console.log(`[Referral Commission] BLOCKED: Commission already recorded in database for reference: ${cleanRef}`);
@@ -1791,11 +2084,15 @@ export async function distributeReferralCommissionServer(
 
   const allUsers = await getCombinedServerUsers();
 
-  const payer = allUsers.find(
+  let payer = allUsers.find(
     (u) =>
       String(u.id).trim() === cleanPayer ||
       (cleanPayerPhone.length === 10 && String(u.phone || '').replace(/\D/g, '').slice(-10) === cleanPayerPhone)
   );
+
+  if (!payer) {
+    payer = getUserByIdOrPhoneFromSql(cleanPayer);
+  }
 
   if (!payer) {
     console.log(`[Referral Commission] Payer ${payerIdentifier} not found in users list.`);
@@ -1803,6 +2100,29 @@ export async function distributeReferralCommissionServer(
   }
 
   const findUpliner = (inviterId?: string, invitedByCode?: string): any | null => {
+    // 1. Direct SQLite lookup first for absolute real-time accuracy:
+    try {
+      const db = getSqliteDb();
+      initSqliteUsersTable();
+      if (inviterId) {
+        const row = db.prepare('SELECT * FROM platform_users WHERE id = ?').get(String(inviterId).trim()) as any;
+        if (row) return mapSqlRowToUser(row);
+      }
+      if (invitedByCode) {
+        const cleanCode = invitedByCode.trim().toUpperCase();
+        const cleanDigits = invitedByCode.replace(/\D/g, '').slice(-10);
+        const row = db.prepare(`
+          SELECT * FROM platform_users 
+          WHERE UPPER(invitation_code) = ? 
+             OR id = ? 
+             OR (phone = ? AND length(?) = 10)
+          LIMIT 1
+        `).get(cleanCode, cleanCode, cleanDigits, cleanDigits) as any;
+        if (row) return mapSqlRowToUser(row);
+      }
+    } catch {}
+
+    // 2. Legacy / memory lookup
     if (
       inviterId === '852539' ||
       inviterId === '325697' ||
@@ -2927,8 +3247,44 @@ app.post(['/api/orders', '/api/admin/orders'], async (req, res) => {
       console.warn('Error syncing order to Cloud SQL:', e?.message || e);
     }
 
-    // 4. Concurrently distribute multi-tier referral commissions to upliners
+    // 4. Atomically deduct product price from the buyer's recharge_balance on server (SQLite + Backup)
     const orderPrice = Number(enriched.price) || 0;
+    const buyerIdentifier = enriched.userId || enriched.userPhone;
+    if (orderPrice > 0 && buyerIdentifier) {
+      try {
+        const cleanBuyer = String(buyerIdentifier).trim();
+        const buyerSql = getUserByIdOrPhoneFromSql(cleanBuyer);
+        if (buyerSql) {
+          const curBal = Number(buyerSql.rechargeBalance) || 0;
+          const newBal = Math.max(0, Number((curBal - orderPrice).toFixed(2)));
+          const newInvested = Number(((buyerSql.totalInvested || 0) + orderPrice).toFixed(2));
+          updateUserWalletBalanceInSql(buyerSql.id, 'rechargeBalance', newBal);
+          try {
+            const db = getSqliteDb();
+            db.prepare('UPDATE platform_users SET total_invested = ? WHERE id = ?').run(newInvested, buyerSql.id);
+          } catch {}
+
+          const currentBackup = getCachedUsersBackup();
+          const bIdx = currentBackup.findIndex(
+            (u) => u.id === buyerSql.id || (buyerSql.phone && u.phone && String(u.phone).slice(-10) === String(buyerSql.phone).slice(-10))
+          );
+          if (bIdx >= 0) {
+            currentBackup[bIdx] = {
+              ...currentBackup[bIdx],
+              rechargeBalance: newBal,
+              totalInvested: newInvested,
+              isExplicitZeroReset: newBal === 0,
+              updatedAt: new Date().toISOString(),
+            };
+            saveUsersBackup(currentBackup);
+          }
+        }
+      } catch (deductErr) {
+        console.warn('Server-side order balance deduction warning:', deductErr);
+      }
+    }
+
+    // 5. Concurrently distribute multi-tier referral commissions to upliners
     if (orderPrice > 0 && (enriched.userId || enriched.userPhone)) {
       distributeReferralCommissionServer(
         enriched.userId || enriched.userPhone,
@@ -4300,14 +4656,25 @@ const getActivePayUConfig = (overrideKey?: string, overrideSalt?: string, overri
     salt = '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW';
   }
 
+  // Determine Gateway Environment Mode:
+  // 1. If key is NOT 'gtKFFx' and does NOT include 'test', it is a real LIVE production key.
+  //    Submitting a production merchant key to test.payu.in causes:
+  //    "Pardon, Some Problem Occurred (Error: 957375_...)".
+  //    Therefore, any custom merchant key must automatically route to https://secure.payu.in/_payment.
+  // 2. If key IS 'gtKFFx' or contains 'test', it routes to sandbox https://test.payu.in/_payment.
+  const isCustomLiveKey = Boolean(key && key !== 'gtKFFx' && !key.toLowerCase().includes('test'));
+
   let mode: 'test' | 'live' = 'test';
-  if (overrideMode === 'live' || overrideMode === 'test') {
-    mode = overrideMode;
-  } else if (envMode === 'live' || envMode === 'test') {
-    mode = envMode;
-  } else if (serverSettings.payuMode === 'live' || serverSettings.payuMode === 'test') {
-    mode = serverSettings.payuMode;
-  } else if (key !== 'gtKFFx' && !key.toLowerCase().includes('test')) {
+  if (isCustomLiveKey) {
+    mode = 'live';
+  } else if (overrideMode === 'live' || serverSettings.payuMode === 'live' || envMode === 'live') {
+    mode = 'live';
+  } else if (overrideMode === 'test' || serverSettings.payuMode === 'test' || envMode === 'test') {
+    mode = 'test';
+  }
+
+  // Safety guarantee: Any merchant key from real PayU dashboard MUST route to secure.payu.in production
+  if (key && key !== 'gtKFFx' && !key.toLowerCase().includes('test')) {
     mode = 'live';
   }
 

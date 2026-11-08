@@ -45,9 +45,18 @@ export const getTransactionTime = (tx: Transaction): number => {
 export const mergeUserSafe = (existing: Partial<User> | undefined | null, incoming: Partial<User>): User => {
   const base: any = { ...(existing || {}) };
   for (const [k, v] of Object.entries(incoming)) {
-    // Prevent accidental undefined or null or NaN overwriting of balances & stats (allow valid 0 when deducted or withdrawn)
+    // Prevent accidental undefined or null or NaN or stale 0 overwriting of balances & stats
     if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'vipLevel', 'spinChances', 'totalReferrals', 'totalCommissionEarned', 'checkInStreak'].includes(k)) {
-      if (base[k] !== undefined && (v === null || v === undefined || Number.isNaN(v))) {
+      const existingNum = Number(base[k]) || 0;
+      const incomingNum = Number(v) || 0;
+
+      // CRITICAL SAFEGUARD: If base record already has a positive balance (e.g. admin added rechargeBalance),
+      // NEVER let stale background fetches or default 0s wipe that positive balance to 0!
+      if (existingNum > 0 && incomingNum === 0 && !(incoming as any).isExplicitZeroReset) {
+        continue;
+      }
+
+      if (base[k] !== undefined && (v === null || v === undefined || Number.isNaN(Number(v)))) {
         continue;
       }
     }
@@ -66,6 +75,11 @@ export const mergeUserSafe = (existing: Partial<User> | undefined | null, incomi
         base[k] = v;
       }
     } else if (((v as any) === 0 || (v as any) === false) && typeof v === typeof base[k]) {
+      if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested'].includes(k)) {
+        if ((Number(base[k]) || 0) > 0 && !(incoming as any).isExplicitZeroReset) {
+          continue;
+        }
+      }
       base[k] = v;
     }
   }
@@ -274,6 +288,11 @@ export const dbService = {
             );
             if (existing) {
               completeUser = mergeUserSafe(existing, user);
+              if (user.rechargeBalance !== undefined) completeUser.rechargeBalance = user.rechargeBalance;
+              if (user.withdrawalBalance !== undefined) completeUser.withdrawalBalance = user.withdrawalBalance;
+              if (user.totalInvested !== undefined) completeUser.totalInvested = user.totalInvested;
+              if (user.productRevenue !== undefined) completeUser.productRevenue = user.productRevenue;
+              if (user.isExplicitZeroReset !== undefined) completeUser.isExplicitZeroReset = user.isExplicitZeroReset;
             }
           }
         }
@@ -692,6 +711,19 @@ export const dbService = {
       const merged: User = mergeUserSafe(existing || { id: cleanId }, data);
       await this.syncUsersToBackup([merged], true);
     } catch (e) {}
+
+    // Direct HTTP POST to server to immediately update SQLite & disk backup
+    try {
+      if (typeof window !== 'undefined') {
+        await fetch(`/api/admin/user/${cleanId}/update`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+      }
+    } catch (apiErr) {
+      console.warn('API /api/admin/user/:userId/update error:', apiErr);
+    }
 
     const path = `users/${cleanId}`;
     try {

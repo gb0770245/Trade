@@ -23,6 +23,7 @@ import { EcommercePoliciesModal } from './components/EcommercePoliciesModal';
 import { EcommerceStorefront } from './components/EcommerceStorefront';
 import { ProductPurchaseModal } from './components/ProductPurchaseModal';
 import { PaymentFailedModal } from './components/PaymentFailedModal';
+import { OrderSuccessModal } from './components/OrderSuccessModal';
 import { AdminPanel } from './components/AdminPanel';
 import { CheckCircle2, AlertCircle, Info } from 'lucide-react';
 
@@ -177,6 +178,7 @@ const MainContent: React.FC = () => {
           {activeModal === 'support' && <CustomerSupportChat />}
           {activeModal === 'policies' && <EcommercePoliciesModal />}
           <PaymentFailedModal />
+          <OrderSuccessModal />
         </div>
       );
     }
@@ -194,6 +196,7 @@ const MainContent: React.FC = () => {
         {activeModal === 'support' && <CustomerSupportChat />}
         {activeModal === 'policies' && <EcommercePoliciesModal />}
         <PaymentFailedModal />
+        <OrderSuccessModal />
 
         {/* Global Toast Feedback */}
         {toast && (
@@ -238,6 +241,7 @@ const MainContent: React.FC = () => {
       {activeModal === 'policies' && <EcommercePoliciesModal />}
       <ProductPurchaseModal />
       <PaymentFailedModal />
+      <OrderSuccessModal />
 
       {/* Global Toast Feedback */}
       {toast && (
