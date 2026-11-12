@@ -53,7 +53,7 @@ export const EcommercePoliciesModal: React.FC = () => {
                   Compliance & E-Commerce Policies
                 </h3>
                 <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                  PayU India Verified & Compliant
+                  Razorpay Approved
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -179,7 +179,7 @@ export const EcommercePoliciesModal: React.FC = () => {
                   3. Secure Payments & Gateway
                 </h4>
                 <p>
-                  Payments are processed through PayU India (PayU Payments Private Limited), an RBI-authorized, PCI-DSS Level 1 compliant payment gateway.
+                  Payments are processed through Razorpay's RBI-authorized, PCI-DSS Level 1 compliant payment gateway.
                   Supported payment methods include UPI (Google Pay, PhonePe, Paytm, BHIM), Net Banking across 50+
                   Indian banks, Debit Cards, and Credit Cards. We do not store sensitive payment credentials such as
                   CVV numbers or UPI PINs.
@@ -311,7 +311,7 @@ export const EcommercePoliciesModal: React.FC = () => {
                 </h4>
                 <p>
                   Approved refunds are processed within 24 to 48 hours of verification and are credited back to the
-                  original payment method (UPI / Bank Account / Card) via PayU India within <strong>5 to 7 business days</strong>,
+                  original payment method (UPI / Bank Account / Card) via Razorpay within <strong>5 to 7 business days</strong>,
                   in accordance with Reserve Bank of India settlement regulations.
                 </p>
               </div>
@@ -344,8 +344,8 @@ export const EcommercePoliciesModal: React.FC = () => {
                   2. Payment Data Protection
                 </h4>
                 <p>
-                  All transactional payments are encrypted end-to-end via 256-bit TLS encryption by PayU Payments Private
-                  Limited. Our servers never retain credit card numbers, CVVs, or bank login passwords.
+                  All transactional payments are encrypted end-to-end via 256-bit TLS encryption by Razorpay Software
+                  Pvt Ltd. Our servers never retain credit card numbers, CVVs, or bank login passwords.
                 </p>
               </div>
 
@@ -361,7 +361,7 @@ export const EcommercePoliciesModal: React.FC = () => {
             </div>
           )}
 
-          {/* TAB 5: CONTACT US & GRIEVANCE REDRESSAL (MANDATORY FOR PAYU KYC) */}
+          {/* TAB 5: CONTACT US & GRIEVANCE REDRESSAL (MANDATORY FOR RAZORPAY KYC) */}
           {activePolicyTab === 'contact' && (
             <div className="space-y-4 animate-in fade-in">
               <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
@@ -369,7 +369,7 @@ export const EcommercePoliciesModal: React.FC = () => {
                   Registered Corporate Headquarters & Grievance Desk
                 </span>
                 <p className="text-[11px] text-slate-500 mt-0.5">
-                  Official registered details verified for PayU Merchant Onboarding & Tax Compliance.
+                  Official registered details verified for Razorpay Merchant Onboarding & Tax Compliance.
                 </p>
               </div>
 

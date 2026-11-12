@@ -186,7 +186,7 @@ const MainContent: React.FC = () => {
     return (
       <div className={`min-h-screen relative flex flex-col items-center justify-start overflow-x-hidden transition-colors duration-500 ${getRootThemeClasses()}`}>
         <NetworkBackground theme={theme} />
-        <div className="w-full max-w-xl md:max-w-2xl min-h-screen bg-white dark:bg-slate-900 shadow-2xl relative flex flex-col mx-auto overflow-x-hidden border-x border-slate-200/40 dark:border-slate-800/60 z-10 py-2">
+        <div className="w-full max-w-md min-h-screen bg-white dark:bg-slate-900 shadow-2xl relative flex flex-col mx-auto overflow-x-hidden border-x border-slate-200/40 dark:border-slate-800/60 z-10 py-2">
           <main className="flex-1 w-full relative flex flex-col">
             <AuthScreen onOpenStore={() => setShowPublicStore(true)} />
           </main>
