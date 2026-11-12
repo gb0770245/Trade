@@ -509,7 +509,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     bannerAutoPlaySpeedSeconds: 4,
 
     // PayU India Payment Gateway Settings (Official Production Gateway)
-    isPayUEnabled: true,
+    isPayUEnabled: false,
     payuMerchantKey: 'JvSfdw',
     payuMerchantSalt: 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e',
     payuMode: 'live',
@@ -560,6 +560,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (cached) {
           const parsed = JSON.parse(cached);
           if (parsed && typeof parsed === 'object') {
+            parsed.isPayUEnabled = false;
             // Auto-heal outdated test sandbox credentials if present in browser localStorage
             if (
               !parsed.payuMerchantKey ||
@@ -570,8 +571,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               parsed.payuMerchantKey = 'JvSfdw';
               parsed.payuMerchantSalt = 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e';
               parsed.payuMode = 'live';
-              localStorage.setItem('nexa_platform_settings', JSON.stringify({ ...DEFAULT_PLATFORM_SETTINGS, ...parsed }));
             }
+            localStorage.setItem('nexa_platform_settings', JSON.stringify({ ...DEFAULT_PLATFORM_SETTINGS, ...parsed }));
             return { ...DEFAULT_PLATFORM_SETTINGS, ...parsed };
           }
         }

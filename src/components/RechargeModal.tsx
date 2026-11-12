@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   CheckCircle2,
@@ -41,13 +41,17 @@ export const RechargeModal: React.FC = () => {
       ? platformSettings.minRecharge
       : 0.01;
   const isRechargeAllowed = platformSettings?.isRechargeEnabled !== false;
-  const isPayUAllowed = platformSettings?.isPayUEnabled !== false;
+  const isPayUAllowed = Boolean(platformSettings?.isPayUEnabled);
   const isManualUpiAllowed = platformSettings?.isManualUpiEnabled !== false;
 
-  // Active Gateway Tab: 'manual_upi' or 'payu'
-  const [activeGateway, setActiveGateway] = useState<'manual_upi' | 'payu'>(
-    isManualUpiAllowed ? 'manual_upi' : 'payu'
-  );
+  // Active Gateway Tab: default strictly to manual_upi when PayU is hidden
+  const [activeGateway, setActiveGateway] = useState<'manual_upi' | 'payu'>('manual_upi');
+
+  useEffect(() => {
+    if (!isPayUAllowed) {
+      setActiveGateway('manual_upi');
+    }
+  }, [isPayUAllowed]);
 
   const PRESETS =
     minDeposit < 25
@@ -336,40 +340,42 @@ export const RechargeModal: React.FC = () => {
           </div>
         ) : (
           <div className="mt-3.5 space-y-4">
-            {/* Gateway Tabs Switcher */}
-            <div className="grid grid-cols-2 p-1 bg-slate-100 dark:bg-slate-800/80 rounded-2xl border border-slate-200 dark:border-slate-700 text-xs font-bold">
-              <button
-                type="button"
-                onClick={() => setActiveGateway('manual_upi')}
-                className={`py-2 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                  activeGateway === 'manual_upi'
-                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
-                    : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-                }`}
-              >
-                <QrCode className="w-4 h-4" />
-                <span>UPI Dynamic QR</span>
-                <span className="text-[9px] bg-emerald-400 text-slate-950 px-1.5 py-0.2 rounded-full font-black">
-                  FAST
-                </span>
-              </button>
+            {/* Gateway Tabs Switcher: Only displayed if PayU Gateway is enabled */}
+            {isPayUAllowed && (
+              <div className="grid grid-cols-2 p-1 bg-slate-100 dark:bg-slate-800/80 rounded-2xl border border-slate-200 dark:border-slate-700 text-xs font-bold">
+                <button
+                  type="button"
+                  onClick={() => setActiveGateway('manual_upi')}
+                  className={`py-2 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                    activeGateway === 'manual_upi'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
+                      : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  <QrCode className="w-4 h-4" />
+                  <span>UPI Dynamic QR</span>
+                  <span className="text-[9px] bg-emerald-400 text-slate-950 px-1.5 py-0.2 rounded-full font-black">
+                    FAST
+                  </span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() => setActiveGateway('payu')}
-                className={`py-2 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                  activeGateway === 'payu'
-                    ? 'bg-teal-600 text-white shadow-md shadow-teal-600/30'
-                    : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-                }`}
-              >
-                <CreditCard className="w-4 h-4" />
-                <span>PayU Gateway</span>
-                <span className="text-[9px] bg-emerald-400 text-slate-950 px-1.5 py-0.2 rounded-full font-black">
-                  INSTANT
-                </span>
-              </button>
-            </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveGateway('payu')}
+                  className={`py-2 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                    activeGateway === 'payu'
+                      ? 'bg-teal-600 text-white shadow-md shadow-teal-600/30'
+                      : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  <CreditCard className="w-4 h-4" />
+                  <span>PayU Gateway</span>
+                  <span className="text-[9px] bg-emerald-400 text-slate-950 px-1.5 py-0.2 rounded-full font-black">
+                    INSTANT
+                  </span>
+                </button>
+              </div>
+            )}
 
             {/* Quick Presets */}
             <div>

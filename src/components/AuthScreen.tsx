@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Smartphone, Lock, Eye, EyeOff, User as UserIcon, KeyRound, ShieldCheck, ArrowLeft, CheckCircle2, Gift, AlertCircle, ShoppingBag } from 'lucide-react';
+import { Smartphone, Lock, Eye, EyeOff, User as UserIcon, KeyRound, ShieldCheck, ArrowLeft, CheckCircle2, Gift, AlertCircle } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
 export const AuthScreen: React.FC<{ onOpenStore?: () => void }> = ({ onOpenStore }) => {
@@ -433,17 +433,6 @@ export const AuthScreen: React.FC<{ onOpenStore?: () => void }> = ({ onOpenStore
               ? 'Create your verified customer account'
               : 'Verify via apitxt.com SMS OTP to reset'}
           </p>
-
-          {onOpenStore && (
-            <button
-              type="button"
-              onClick={onOpenStore}
-              className="mt-3 px-3.5 py-1.5 rounded-full bg-teal-50 dark:bg-teal-950/70 border border-teal-200 dark:border-teal-700/60 text-[11px] font-bold text-teal-700 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-900 transition-all flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
-            >
-              <ShoppingBag className="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
-              <span>🛍️ Nexa AI Official Tech Store • View Products</span>
-            </button>
-          )}
         </div>
 
         {/* Toggle Tabs (Log in | Sign up) */}

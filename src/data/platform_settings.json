@@ -168,7 +168,7 @@
     }
   ],
   "bannerAutoPlaySpeedSeconds": 4,
-  "isPayUEnabled": true,
+  "isPayUEnabled": false,
   "payuMerchantKey": "JvSfdw",
   "payuMerchantSalt": "k6p3rBFHCPis1t4xFkAWd11TCtjkB26e",
   "payuMode": "live",
