@@ -3680,13 +3680,13 @@ export const AdminPanel: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        setLocalSettings({ ...localSettings, payuMerchantKey: 'gtKFFx', payuMode: 'test' });
-                        updatePlatformSettings({ payuMerchantKey: 'gtKFFx', payuMode: 'test' });
-                        showToast('Reset to default PayU Test key', 'success');
+                        setLocalSettings({ ...localSettings, payuMerchantKey: 'JvSfdw', payuMode: 'live' });
+                        updatePlatformSettings({ payuMerchantKey: 'JvSfdw', payuMode: 'live' });
+                        showToast('Set to Live PayU Key (JvSfdw)', 'success');
                       }}
                       className="text-[10px] text-teal-400 hover:underline font-mono"
                     >
-                      Use Test Key ('gtKFFx')
+                      Use Live Key ('JvSfdw')
                     </button>
                   </div>
                   <input
@@ -3702,16 +3702,16 @@ export const AdminPanel: React.FC = () => {
                       });
                     }}
                     onBlur={() => {
-                      const cleanKey = localSettings.payuMerchantKey?.trim() || 'gtKFFx';
+                      const cleanKey = localSettings.payuMerchantKey?.trim() || 'JvSfdw';
                       const isCustom = cleanKey !== 'gtKFFx' && !cleanKey.toLowerCase().includes('test');
-                      const nextMode = isCustom ? 'live' : (localSettings.payuMode || 'test');
+                      const nextMode = isCustom ? 'live' : (localSettings.payuMode || 'live');
                       setLocalSettings({ ...localSettings, payuMerchantKey: cleanKey, payuMode: nextMode });
                       updatePlatformSettings({ payuMerchantKey: cleanKey, payuMode: nextMode });
                     }}
                     className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300 focus:outline-none focus:border-teal-500"
                     placeholder="Enter PayU Merchant Key"
                   />
-                  <p className="text-[10px] text-slate-500 mt-1">Found in PayU Dashboard → Settings → API Credentials (Merchant Key)</p>
+                  <p className="text-[10px] text-slate-500 mt-1">Found in PayU Dashboard → Settings → API Credentials (Merchant Key: JvSfdw)</p>
                 </div>
 
                 <div>
@@ -3722,13 +3722,13 @@ export const AdminPanel: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        setLocalSettings({ ...localSettings, payuMerchantSalt: '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW' });
-                        updatePlatformSettings({ payuMerchantSalt: '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW' });
-                        showToast('Reset to default PayU Test salt', 'success');
+                        setLocalSettings({ ...localSettings, payuMerchantSalt: 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e' });
+                        updatePlatformSettings({ payuMerchantSalt: 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e' });
+                        showToast('Set to Live PayU Salt', 'success');
                       }}
                       className="text-[10px] text-teal-400 hover:underline font-mono"
                     >
-                      Use Test Salt ('4R38Ivwi...')
+                      Use Live Salt ('k6p3r...')
                     </button>
                   </div>
                   <input
@@ -3736,7 +3736,7 @@ export const AdminPanel: React.FC = () => {
                     value={localSettings.payuMerchantSalt || ''}
                     onChange={(e) => setLocalSettings({ ...localSettings, payuMerchantSalt: e.target.value })}
                     onBlur={() => {
-                      const cleanSalt = localSettings.payuMerchantSalt?.trim() || '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW';
+                      const cleanSalt = localSettings.payuMerchantSalt?.trim() || 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e';
                       setLocalSettings({ ...localSettings, payuMerchantSalt: cleanSalt });
                       updatePlatformSettings({ payuMerchantSalt: cleanSalt });
                     }}

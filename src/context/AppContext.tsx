@@ -508,11 +508,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     homeBanners: DEFAULT_HOME_BANNERS,
     bannerAutoPlaySpeedSeconds: 4,
 
-    // PayU India Payment Gateway Settings
+    // PayU India Payment Gateway Settings (Official Production Gateway)
     isPayUEnabled: true,
-    payuMerchantKey: 'gtKFFx',
-    payuMerchantSalt: '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW',
-    payuMode: 'test',
+    payuMerchantKey: 'JvSfdw',
+    payuMerchantSalt: 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e',
+    payuMode: 'live',
     payuMerchantName: 'Nexa AI',
     payuLogoUrl: '/logo.png',
     payuThemeColor: '#0f766e',
@@ -560,9 +560,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (cached) {
           const parsed = JSON.parse(cached);
           if (parsed && typeof parsed === 'object') {
-            // Auto-heal outdated test salt if present in browser localStorage
-            if (parsed.payuMerchantSalt === 'eCwWELxi' || (parsed.payuMerchantKey === 'gtKFFx' && parsed.payuMerchantSalt !== '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW')) {
-              parsed.payuMerchantSalt = '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW';
+            // Auto-heal outdated test sandbox credentials if present in browser localStorage
+            if (
+              !parsed.payuMerchantKey ||
+              parsed.payuMerchantKey === 'gtKFFx' ||
+              parsed.payuMerchantSalt === 'eCwWELxi' ||
+              parsed.payuMerchantSalt === '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW'
+            ) {
+              parsed.payuMerchantKey = 'JvSfdw';
+              parsed.payuMerchantSalt = 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e';
+              parsed.payuMode = 'live';
+              localStorage.setItem('nexa_platform_settings', JSON.stringify({ ...DEFAULT_PLATFORM_SETTINGS, ...parsed }));
             }
             return { ...DEFAULT_PLATFORM_SETTINGS, ...parsed };
           }
@@ -1562,7 +1570,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     actionType: 'recharge' | 'investment' | 'daily_income',
     referenceId?: string
   ) => {
-    if (!payer || amount <= 0) return;
+    // USER SPECIFICATION: Upliner commission is only granted when user BUYS a product!
+    // No commission on recharge / deposit.
+    if (!payer || amount <= 0 || actionType === 'recharge') return;
 
     try {
       // Trigger authoritative server-side commission distribution to SQLite, disk backup, and Cloud SQL ONCE
@@ -1894,8 +1904,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setTransactions((prev) => prependTxUnique(prev, newTx));
     setAdminTransactions((prev) => prependTxUnique(prev, newTx));
 
-    // Distribute multi-tier referral commissions to uplines
-    distributeMultiTierCommissions(updatedUser, amount, 'recharge', newTx.referenceNo);
+    // Note: Referral commission is only given when user purchases a product, not on recharge.
 
     confetti({
       particleCount: 100,

@@ -2056,6 +2056,13 @@ export async function distributeReferralCommissionServer(
   actionType: 'recharge' | 'investment' | 'daily_income',
   referenceId?: string
 ): Promise<{ success: boolean; credited: any[] }> {
+  // USER SPECIFICATION: Upliner commission is ONLY granted when downline user BUYS/INVESTS in a product!
+  // No referral commission is granted simply for recharging / depositing funds.
+  if (actionType === 'recharge') {
+    console.log(`[Referral Commission] Skipped: Upliner commission is only granted on product purchase, not on recharge.`);
+    return { success: true, credited: [] };
+  }
+
   if (!payerIdentifier || !amount || amount <= 0) {
     return { success: false, credited: [] };
   }
@@ -4307,12 +4314,8 @@ app.post('/api/admin/recharges/action', async (req, res) => {
           } catch (e) {}
         }
 
-        // 4. Distribute multi-tier referral commission on deposit approval
-        if (targetUserId && numAmount > 0) {
-          distributeReferralCommissionServer(targetUserId, numAmount, 'recharge', cleanId).catch((err) =>
-            console.warn('Recharge approval referral distribution notice:', err)
-          );
-        }
+        // 4. Note: Referral commission is NOT given on deposit/recharge.
+        // Upliner commission is only granted when the user purchases/invests in a product.
       }
 
       return res.json({
@@ -4700,6 +4703,13 @@ app.post('/api/admin/test-otp-sms', async (req, res) => {
 // In-memory set to prevent duplicate credits from concurrent callbacks/webhooks
 const processedPayUTxns = new Set<string>();
 
+// =========================================================================
+// PERMANENT HARDCODED LIVE PAYU CREDENTIALS (payu.in production)
+// Configured: Key JvSfdw | Live Production Gateway (secure.payu.in)
+// =========================================================================
+export let PERMANENT_LIVE_PAYU_KEY = 'JvSfdw';
+export let PERMANENT_LIVE_PAYU_SALT = 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e';
+
 // Helper: Get active PayU credentials and configuration
 const getActivePayUConfig = (overrideKey?: string, overrideSalt?: string, overrideMode?: 'test' | 'live') => {
   const serverSettings = loadServerPlatformSettings();
@@ -4707,44 +4717,44 @@ const getActivePayUConfig = (overrideKey?: string, overrideSalt?: string, overri
   const envSalt = process.env.PAYU_MERCHANT_SALT?.trim();
   const envMode = process.env.PAYU_MODE?.trim() as 'test' | 'live' | undefined;
 
-  // PayU Test Default Sandbox Credentials or Admin Override / Env
+  // PayU Credentials hierarchy:
+  // 1. Permanent Hardcoded live key/salt (Top priority)
+  // 2. Client override (if non-test)
+  // 3. Environment variables
+  // 4. Server platform settings
+  // 5. User's official live credentials
   let key =
-    (overrideKey && overrideKey.trim().length > 0 ? overrideKey.trim() : null) ||
+    (PERMANENT_LIVE_PAYU_KEY && PERMANENT_LIVE_PAYU_KEY.trim().length > 0 ? PERMANENT_LIVE_PAYU_KEY.trim() : null) ||
+    (overrideKey && overrideKey.trim().length > 0 && overrideKey !== 'gtKFFx' ? overrideKey.trim() : null) ||
     (envKey && envKey.length > 0 ? envKey : null) ||
     (serverSettings.payuMerchantKey?.trim() ? serverSettings.payuMerchantKey.trim() : null) ||
-    'gtKFFx';
+    'JvSfdw';
 
   let salt =
-    (overrideSalt && overrideSalt.trim().length > 0 ? overrideSalt.trim() : null) ||
+    (PERMANENT_LIVE_PAYU_SALT && PERMANENT_LIVE_PAYU_SALT.trim().length > 0 ? PERMANENT_LIVE_PAYU_SALT.trim() : null) ||
+    (overrideSalt && overrideSalt.trim().length > 0 && overrideSalt !== '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW' ? overrideSalt.trim() : null) ||
     (envSalt && envSalt.length > 0 ? envSalt : null) ||
     (serverSettings.payuMerchantSalt?.trim() ? serverSettings.payuMerchantSalt.trim() : null) ||
-    '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW';
+    'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e';
 
-  // Safeguard: PayU official test sandbox key 'gtKFFx' must strictly use the verified test salt
-  if (key === 'gtKFFx' && (salt === 'eCwWELxi' || !salt || salt.length < 10)) {
+  // Safeguard: If key is JvSfdw, guarantee the live salt is used
+  if (key === 'JvSfdw') {
+    salt = 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e';
+  } else if (key === 'gtKFFx' && (salt === 'eCwWELxi' || !salt || salt.length < 10)) {
     salt = '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW';
   }
 
   // Determine Gateway Environment Mode:
-  // 1. If key is NOT 'gtKFFx' and does NOT include 'test', it is a real LIVE production key.
-  //    Submitting a production merchant key to test.payu.in causes:
-  //    "Pardon, Some Problem Occurred (Error: 957375_...)".
-  //    Therefore, any custom merchant key must automatically route to https://secure.payu.in/_payment.
-  // 2. If key IS 'gtKFFx' or contains 'test', it routes to sandbox https://test.payu.in/_payment.
-  const isCustomLiveKey = Boolean(key && key !== 'gtKFFx' && !key.toLowerCase().includes('test'));
-
-  let mode: 'test' | 'live' = 'test';
-  if (isCustomLiveKey) {
-    mode = 'live';
-  } else if (overrideMode === 'live' || serverSettings.payuMode === 'live' || envMode === 'live') {
-    mode = 'live';
-  } else if (overrideMode === 'test' || serverSettings.payuMode === 'test' || envMode === 'test') {
+  // JvSfdw is official Live PayU key -> Must submit to https://secure.payu.in/_payment
+  let mode: 'test' | 'live' = 'live';
+  if (key === 'gtKFFx' || key.toLowerCase().includes('test')) {
     mode = 'test';
+  } else {
+    mode = 'live';
   }
 
-  // Safety guarantee: Any merchant key from real PayU dashboard MUST route to secure.payu.in production
-  if (key && key !== 'gtKFFx' && !key.toLowerCase().includes('test')) {
-    mode = 'live';
+  if (overrideMode === 'test' && key === 'gtKFFx') {
+    mode = 'test';
   }
 
   const actionUrl =
@@ -4769,8 +4779,21 @@ const calculatePayURequestHash = (params: {
   udf5?: string;
   salt: string;
 }): string => {
-  const hashString = `${params.key}|${params.txnid}|${params.amount}|${params.productinfo}|${params.firstname}|${params.email}|${params.udf1 || ''}|${params.udf2 || ''}|${params.udf3 || ''}|${params.udf4 || ''}|${params.udf5 || ''}||||||${params.salt}`;
-  return crypto.createHash('sha512').update(hashString).digest('hex').toLowerCase();
+  const cleanKey = String(params.key || '').trim();
+  const cleanTxnid = String(params.txnid || '').trim();
+  const cleanAmount = String(params.amount || '').trim();
+  const cleanProductinfo = String(params.productinfo || '').trim();
+  const cleanFirstname = String(params.firstname || '').trim();
+  const cleanEmail = String(params.email || '').trim();
+  const cleanUdf1 = String(params.udf1 || '').trim();
+  const cleanUdf2 = String(params.udf2 || '').trim();
+  const cleanUdf3 = String(params.udf3 || '').trim();
+  const cleanUdf4 = String(params.udf4 || '').trim();
+  const cleanUdf5 = String(params.udf5 || '').trim();
+  const cleanSalt = String(params.salt || '').trim();
+
+  const hashString = `${cleanKey}|${cleanTxnid}|${cleanAmount}|${cleanProductinfo}|${cleanFirstname}|${cleanEmail}|${cleanUdf1}|${cleanUdf2}|${cleanUdf3}|${cleanUdf4}|${cleanUdf5}||||||${cleanSalt}`;
+  return crypto.createHash('sha512').update(hashString, 'utf8').digest('hex').toLowerCase();
 };
 
 // Helper: Verify PayU Response Hash
@@ -4885,10 +4908,7 @@ const creditUserPayUDeposit = async (
   }
   saveServerTransactions(backupTxs);
 
-  // 4. Distribute referral commission
-  try {
-    await distributeReferralCommissionServer(cleanUserId, numAmount, 'recharge', refKey);
-  } catch (e) {}
+  // 4. Note: Referral commission is strictly given when user BUYS a product, not on recharge deposit.
 
   console.log(`[PayU Gateway] ✅ Successfully credited $${numAmount} to User ${cleanUserId} (Txn: ${refKey})`);
   return updatedUser;
