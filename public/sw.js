@@ -1,5 +1,5 @@
 // Service Worker for HD Energy Invest PWA
-const CACHE_NAME = 'hd-energy-v1';
+const CACHE_NAME = 'hd-energy-v2';
 const PRECACHE_URLS = [
   '/',
   '/index.html',
