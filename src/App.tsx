@@ -11,6 +11,7 @@ import { AuthScreen } from './components/AuthScreen';
 import { AuthModal } from './components/AuthModal';
 import { RechargeModal } from './components/RechargeModal';
 import { WithdrawModal } from './components/WithdrawModal';
+import { P2PTransferModal } from './components/P2PTransferModal';
 import { SpinWheelModal } from './components/SpinWheelModal';
 import { CustomerSupportChat } from './components/CustomerSupportChat';
 import { OrdersModal } from './components/OrdersModal';
@@ -231,6 +232,7 @@ const MainContent: React.FC = () => {
       {activeModal === 'auth' && <AuthModal />}
       {activeModal === 'recharge' && <RechargeModal />}
       {activeModal === 'withdraw' && <WithdrawModal />}
+      {activeModal === 'p2p' && <P2PTransferModal />}
       {activeModal === 'support' && <CustomerSupportChat />}
       {activeModal === 'orders' && <OrdersModal />}
       {activeModal === 'team' && <TeamModal />}

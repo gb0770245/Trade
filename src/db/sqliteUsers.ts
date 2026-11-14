@@ -394,15 +394,34 @@ export function getUserByIdOrPhoneFromSql(identifier: string): SqlUserRecord | n
   const db = getSqliteDb();
   initSqliteUsersTable();
   const raw = String(identifier || '').trim();
-  const cleanPhone = raw.replace(/\D/g, '').slice(-10);
+  if (!raw) return null;
 
-  const row = db.prepare(`
-    SELECT * FROM platform_users 
-    WHERE id = ? 
-       OR phone = ? 
-       OR invitation_code = ?
+  const digits = raw.replace(/\D/g, '');
+  const cleanPhone = digits.length >= 10 ? digits.slice(-10) : '';
+  const upperCode = raw.toUpperCase();
+
+  let row: any = db.prepare(`
+    SELECT * FROM platform_users
+    WHERE is_deleted = 0 AND id = ?
     LIMIT 1
-  `).get(raw, cleanPhone, raw.toUpperCase()) as any;
+  `).get(raw);
+
+  if (!row && cleanPhone.length === 10) {
+    row = db.prepare(`
+      SELECT * FROM platform_users
+      WHERE is_deleted = 0
+        AND (phone = ? OR substr(replace(replace(replace(phone, '+', ''), ' ', ''), '-', ''), -10) = ?)
+      LIMIT 1
+    `).get(cleanPhone, cleanPhone);
+  }
+
+  if (!row && upperCode.length >= 3) {
+    row = db.prepare(`
+      SELECT * FROM platform_users
+      WHERE is_deleted = 0 AND UPPER(invitation_code) = ?
+      LIMIT 1
+    `).get(upperCode);
+  }
 
   if (!row) return null;
   return mapSqlRowToUser(row);
@@ -668,6 +687,127 @@ export function updateUserWalletBalanceInSql(
       target.id
     );
   } catch (e) {}
+
+  const updated = db.prepare(`SELECT * FROM platform_users WHERE id = ?`).get(target.id) as any;
+  return updated ? mapSqlRowToUser(updated) : null;
+}
+
+// Dedicated function to atomically credit daily dividend to withdrawal_balance + product_revenue in SQLite
+export function creditUserDividendInSql(
+  userIdOrPhone: string,
+  dividendAmount: number
+): SqlUserRecord | null {
+  const db = getSqliteDb();
+  initSqliteUsersTable();
+  const raw = String(userIdOrPhone || '').trim();
+  const digits = raw.replace(/\D/g, '');
+  const cleanPhone = digits.length >= 10 ? digits.slice(-10) : '';
+  const amount = Number(dividendAmount) || 0;
+  if (amount <= 0) return null;
+
+  let target = db.prepare(`
+    SELECT * FROM platform_users
+    WHERE is_deleted = 0 AND id = ?
+    LIMIT 1
+  `).get(raw) as any;
+
+  if (!target && cleanPhone.length === 10) {
+    target = db.prepare(`
+      SELECT * FROM platform_users
+      WHERE is_deleted = 0
+        AND (phone = ? OR substr(replace(replace(replace(phone, '+', ''), ' ', ''), '-', ''), -10) = ?)
+      LIMIT 1
+    `).get(cleanPhone, cleanPhone) as any;
+  }
+
+  if (!target) return null;
+
+  const newWithdrawal = Number((Number(target.withdrawal_balance || 0) + amount).toFixed(2));
+  const newRevenue = Number((Number(target.product_revenue || 0) + amount).toFixed(2));
+  const nowIso = new Date().toISOString();
+
+  let parsed: any = {};
+  try {
+    parsed = JSON.parse(target.raw_json || '{}');
+  } catch {}
+  parsed.withdrawalBalance = newWithdrawal;
+  parsed.productRevenue = newRevenue;
+  parsed.isExplicitZeroReset = false;
+  parsed.updatedAt = nowIso;
+
+  db.prepare(`
+    UPDATE platform_users
+    SET withdrawal_balance = ?,
+        product_revenue = ?,
+        raw_json = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run(newWithdrawal, newRevenue, JSON.stringify(parsed), nowIso, target.id);
+
+  const updated = db.prepare(`SELECT * FROM platform_users WHERE id = ?`).get(target.id) as any;
+  return updated ? mapSqlRowToUser(updated) : null;
+}
+
+// Dedicated function to atomically add/adjust a wallet balance by delta in SQLite
+export function creditUserWalletDeltaInSql(
+  userIdOrPhone: string,
+  wallet: 'rechargeBalance' | 'withdrawalBalance' | 'productRevenue',
+  delta: number,
+  extraUpdates?: { totalInvestedDelta?: number }
+): SqlUserRecord | null {
+  const db = getSqliteDb();
+  initSqliteUsersTable();
+  const raw = String(userIdOrPhone || '').trim();
+  const digits = raw.replace(/\D/g, '');
+  const cleanPhone = digits.length >= 10 ? digits.slice(-10) : '';
+
+  let target = db.prepare(`
+    SELECT * FROM platform_users
+    WHERE is_deleted = 0 AND id = ?
+    LIMIT 1
+  `).get(raw) as any;
+
+  if (!target && cleanPhone.length === 10) {
+    target = db.prepare(`
+      SELECT * FROM platform_users
+      WHERE is_deleted = 0
+        AND (phone = ? OR substr(replace(replace(replace(phone, '+', ''), ' ', ''), '-', ''), -10) = ?)
+      LIMIT 1
+    `).get(cleanPhone, cleanPhone) as any;
+  }
+
+  if (!target) return null;
+
+  const colMap: Record<string, string> = {
+    rechargeBalance: 'recharge_balance',
+    withdrawalBalance: 'withdrawal_balance',
+    productRevenue: 'product_revenue',
+  };
+  const col = colMap[wallet] || 'recharge_balance';
+  const nextVal = Math.max(0, Number(((Number(target[col]) || 0) + Number(delta || 0)).toFixed(2)));
+  const nextInvested = extraUpdates?.totalInvestedDelta
+    ? Math.max(0, Number(((Number(target.total_invested) || 0) + extraUpdates.totalInvestedDelta).toFixed(2)))
+    : Number(target.total_invested) || 0;
+  const nowIso = new Date().toISOString();
+
+  let parsed: any = {};
+  try {
+    parsed = JSON.parse(target.raw_json || '{}');
+  } catch {}
+  parsed[wallet] = nextVal;
+  if (extraUpdates?.totalInvestedDelta) {
+    parsed.totalInvested = nextInvested;
+  }
+  parsed.updatedAt = nowIso;
+
+  db.prepare(`
+    UPDATE platform_users
+    SET ${col} = ?,
+        total_invested = ?,
+        raw_json = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run(nextVal, nextInvested, JSON.stringify(parsed), nowIso, target.id);
 
   const updated = db.prepare(`SELECT * FROM platform_users WHERE id = ?`).get(target.id) as any;
   return updated ? mapSqlRowToUser(updated) : null;

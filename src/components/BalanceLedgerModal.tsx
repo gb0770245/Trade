@@ -22,7 +22,7 @@ import { Transaction } from '../types';
 
 export const BalanceLedgerModal: React.FC = () => {
   const { user, transactions, closeModal, theme } = useApp();
-  const [filter, setFilter] = useState<'all' | 'recharge' | 'withdraw' | 'earnings'>('all');
+  const [filter, setFilter] = useState<'all' | 'recharge' | 'withdraw' | 'p2p' | 'earnings'>('all');
   const [copiedRef, setCopiedRef] = useState<string | null>(null);
 
   // Guarantee strict line-by-line chronological descending order & reference deduplication
@@ -32,6 +32,7 @@ export const BalanceLedgerModal: React.FC = () => {
     if (filter === 'all') return true;
     if (filter === 'recharge') return tx.type === 'recharge';
     if (filter === 'withdraw') return tx.type === 'withdraw';
+    if (filter === 'p2p') return tx.type === 'p2p_send' || tx.type === 'p2p_receive';
     if (filter === 'earnings') {
       return (
         tx.type === 'earnings' ||
@@ -55,8 +56,11 @@ export const BalanceLedgerModal: React.FC = () => {
   };
 
   const getTxIcon = (tx: Transaction) => {
-    if (tx.type === 'withdraw') {
-      return <ArrowDownLeft className="w-4 h-4 text-amber-600 dark:text-amber-400" />;
+    if (tx.type === 'withdraw' || tx.type === 'p2p_send') {
+      return <ArrowUpRight className="w-4 h-4 text-amber-600 dark:text-amber-400" />;
+    }
+    if (tx.type === 'p2p_receive') {
+      return <ArrowDownLeft className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />;
     }
     if (tx.type === 'recharge') {
       return <ArrowUpRight className="w-4 h-4 text-blue-600 dark:text-blue-400" />;
@@ -152,6 +156,7 @@ export const BalanceLedgerModal: React.FC = () => {
             { key: 'all', label: 'All History' },
             { key: 'recharge', label: 'Add Money' },
             { key: 'withdraw', label: 'Withdrawal' },
+            { key: 'p2p', label: 'P2P Transfer' },
             { key: 'earnings', label: 'Income & Bonus' },
           ].map((tab) => (
             <button
@@ -179,9 +184,11 @@ export const BalanceLedgerModal: React.FC = () => {
           ) : (
             filteredTxs.map((tx, idx) => {
               const isWithdraw = tx.type === 'withdraw';
+              const isP2PSend = tx.type === 'p2p_send';
+              const isP2PReceive = tx.type === 'p2p_receive';
+              const isDebit = isWithdraw || isP2PSend || tx.amount < 0;
               const isRecharge = tx.type === 'recharge';
-              const isEarnings = tx.type === 'earnings';
-              const isBonus = tx.type === 'bonus' || tx.type === 'commission' || tx.type === 'spin_win';
+              const isEarnings = tx.type === 'earnings' || isP2PReceive;
 
               return (
                 <div
@@ -193,7 +200,7 @@ export const BalanceLedgerModal: React.FC = () => {
                     <div className="flex items-start gap-2.5 min-w-0">
                       <div
                         className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
-                          isWithdraw
+                          isWithdraw || isP2PSend
                             ? 'bg-amber-100 dark:bg-amber-950/60'
                             : isRecharge
                             ? 'bg-blue-100 dark:bg-blue-950/60'
@@ -218,14 +225,14 @@ export const BalanceLedgerModal: React.FC = () => {
                     <div className="text-right shrink-0">
                       <div
                         className={`font-black num-tabular text-sm ${
-                          isWithdraw
+                          isDebit
                             ? 'text-amber-600 dark:text-amber-400'
                             : isRecharge
                             ? 'text-blue-600 dark:text-blue-400'
                             : 'text-emerald-600 dark:text-emerald-400'
                         }`}
                       >
-                        {isWithdraw
+                        {isDebit
                           ? `-$${Math.abs(tx.amount).toFixed(2)}`
                           : `+$${Math.abs(tx.amount).toFixed(2)}`}
                       </div>
@@ -249,7 +256,7 @@ export const BalanceLedgerModal: React.FC = () => {
 
                   {/* Reference Number & Copy Row */}
                   <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-200/50 dark:border-slate-700/50 text-[10px]">
-                    <div className="flex items-center gap-1 text-slate-400 font-mono">
+                    <div className="flex items-center gap-1 text-slate-400 font-mono flex-wrap">
                       <span>Ref:</span>
                       <span className="text-slate-600 dark:text-slate-300 font-bold truncate max-w-[160px]">
                         {tx.referenceNo || tx.id}
@@ -266,6 +273,11 @@ export const BalanceLedgerModal: React.FC = () => {
                           <Copy className="w-3 h-3" />
                         )}
                       </button>
+                      {tx.utrNumber && (
+                        <span className="text-emerald-600 dark:text-emerald-400 font-bold ml-1">
+                          • UTR: {tx.utrNumber}
+                        </span>
+                      )}
                     </div>
 
                     {tx.paymentMethod && (

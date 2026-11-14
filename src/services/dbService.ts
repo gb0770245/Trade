@@ -10,7 +10,7 @@ import {
   onSnapshot,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
-import { User, Transaction, InvestmentOrder, PlatformSettings, InvestmentProduct, NoticeItem, CustomPromoCode, TeamMember, ReferrerInfo } from '../types';
+import { User, Transaction, InvestmentOrder, PlatformSettings, InvestmentProduct, NoticeItem, CustomPromoCode, TeamMember, ReferrerInfo, P2PRecipientPreview } from '../types';
 
 export const isProductionHost = (): boolean => {
   if (typeof window === 'undefined') return false;
@@ -40,6 +40,111 @@ export const getTransactionTime = (tx: Transaction): number => {
     if (!isNaN(parsed)) return parsed;
   }
   return 0;
+};
+
+const getTxStatusRank = (status: any): number => {
+  const s = String(status || '').trim().toLowerCase();
+  if (s === 'completed' || s === 'rejected') return 3;
+  if (s === 'processing') return 1;
+  return 0;
+};
+
+const isNumericOnlyId = (val: any): boolean =>
+  val !== undefined && val !== null && /^\d+$/.test(String(val).trim());
+
+export const mergeTransactionSafe = (existing: Transaction | undefined | null, incoming: Transaction): Transaction => {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+
+  const existingRank = getTxStatusRank(existing.status);
+  const incomingRank = getTxStatusRank(incoming.status);
+
+  const merged: any = { ...existing };
+  for (const [k, v] of Object.entries(incoming)) {
+    if (v !== undefined && v !== null && v !== '') {
+      merged[k] = v;
+    }
+  }
+
+  // Never let a numeric SQL serial ID overwrite a canonical string ID ("tx-...")
+  const exId = existing.id ? String(existing.id).trim() : '';
+  const inId = incoming.id ? String(incoming.id).trim() : '';
+  if (exId && !isNumericOnlyId(exId)) {
+    merged.id = exId;
+    if (isNumericOnlyId(inId)) merged.sqlId = Number(inId);
+  } else if (inId && !isNumericOnlyId(inId)) {
+    merged.id = inId;
+    if (isNumericOnlyId(exId)) merged.sqlId = Number(exId);
+  } else {
+    merged.id = exId || inId;
+  }
+  if ((existing as any).sqlId && !merged.sqlId) merged.sqlId = (existing as any).sqlId;
+
+  // Terminal status dominance: once 'completed' or 'rejected', NEVER downgrade back to 'processing'
+  if (existingRank > incomingRank) {
+    merged.status = existing.status;
+    if (existing.utrNumber) merged.utrNumber = existing.utrNumber;
+    if (existing.adminNote) merged.adminNote = existing.adminNote;
+    if ((existing as any).rejectReason) merged.rejectReason = (existing as any).rejectReason;
+    if ((existing as any).updatedAt) merged.updatedAt = (existing as any).updatedAt;
+  } else if (!merged.utrNumber && existing.utrNumber) {
+    merged.utrNumber = existing.utrNumber;
+  }
+
+  // Keep WTH.../REC... stable referenceNo and preserve UTR in utrNumber
+  const exRef = String(existing.referenceNo || '').trim();
+  const inRef = String(incoming.referenceNo || '').trim();
+  if (exRef.startsWith('WTH') && inRef.startsWith('UTR')) {
+    merged.referenceNo = exRef;
+    if (!merged.utrNumber) merged.utrNumber = inRef;
+  } else if (inRef.startsWith('WTH') && exRef.startsWith('UTR')) {
+    merged.referenceNo = inRef;
+    if (!merged.utrNumber) merged.utrNumber = exRef;
+  }
+
+  return merged as Transaction;
+};
+
+export const mergeTxListsSafe = (lists: Transaction[][]): Transaction[] => {
+  const mapById = new Map<string, Transaction>();
+  const keyLookup = new Map<string, string>();
+
+  for (const list of lists) {
+    for (const t of list) {
+      if (!t) continue;
+      const rawId = String(t.id || (t as any)._id || `tx-${t.createdAt || Date.now()}`).trim();
+      const rawSqlId = (t as any).sqlId ? String((t as any).sqlId).trim() : '';
+      const rawRef = t.referenceNo ? String(t.referenceNo).trim() : '';
+      const withdrawBucket =
+        t.type === 'withdraw' && t.userId
+          ? `w:${String(t.userId).trim()}_${Number(t.amount || 0).toFixed(2)}_${Math.floor(getTransactionTime(t) / 45000)}`
+          : '';
+
+      const targetId =
+        (rawRef && keyLookup.get(`ref:${rawRef}`)) ||
+        keyLookup.get(`id:${rawId}`) ||
+        (rawSqlId && keyLookup.get(`id:${rawSqlId}`)) ||
+        (withdrawBucket && keyLookup.get(withdrawBucket)) ||
+        rawId;
+
+      const merged = mergeTransactionSafe(mapById.get(targetId), { ...t, id: targetId });
+      // Ensure canonical non-numeric ID is reflected as the map key if available
+      const finalId = merged.id || targetId;
+      if (finalId !== targetId && mapById.has(targetId)) {
+        mapById.delete(targetId);
+      }
+      mapById.set(finalId, { ...merged, id: finalId });
+
+      keyLookup.set(`id:${rawId}`, finalId);
+      keyLookup.set(`id:${finalId}`, finalId);
+      if (rawSqlId) keyLookup.set(`id:${rawSqlId}`, finalId);
+      if (rawRef) keyLookup.set(`ref:${rawRef}`, finalId);
+      if (merged.referenceNo) keyLookup.set(`ref:${String(merged.referenceNo).trim()}`, finalId);
+      if (withdrawBucket) keyLookup.set(withdrawBucket, finalId);
+    }
+  }
+
+  return Array.from(mapById.values()).sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
 };
 
 export const mergeUserSafe = (existing: Partial<User> | undefined | null, incoming: Partial<User>): User => {
@@ -116,9 +221,17 @@ export const mergeUserSafe = (existing: Partial<User> | undefined | null, incomi
     base.inviterId = '406332';
   }
 
-  // Preserve highest stats
+  // Preserve highest stats & protect withdrawalBalance/productRevenue from stale pre-commission/pre-dividend snapshots
+  const existingComm = Number(existing?.totalCommissionEarned) || 0;
+  const incomingComm = Number(incoming.totalCommissionEarned) || 0;
+  const existingRev = Number(existing?.productRevenue) || 0;
+  const incomingRev = Number(incoming.productRevenue) || 0;
+  if (!(incoming as any).isExplicitZeroReset && (existingComm > incomingComm || existingRev > incomingRev)) {
+    base.withdrawalBalance = Math.max(Number(existing?.withdrawalBalance) || 0, Number(base.withdrawalBalance) || 0);
+    base.productRevenue = Math.max(existingRev, Number(base.productRevenue) || 0);
+  }
   base.totalReferrals = Math.max(Number(base.totalReferrals) || 0, Number(existing?.totalReferrals) || 0);
-  base.totalCommissionEarned = Math.max(Number(base.totalCommissionEarned) || 0, Number(existing?.totalCommissionEarned) || 0);
+  base.totalCommissionEarned = Math.max(existingComm, Number(base.totalCommissionEarned) || 0);
 
   if (incoming.password && String(incoming.password).trim().length > 0) {
     base.password = String(incoming.password).trim();
@@ -430,8 +543,21 @@ export const dbService = {
       (snap) => {
         if (snap.exists()) {
           const u = snap.data() as User;
-          this.syncUsersToBackup([u], false);
-          onUpdate(u);
+          this.syncUsersToBackup([u], false)
+            .then((mergedList) => {
+              const cleanTargetId = String(userId).trim();
+              const mergedUser = Array.isArray(mergedList)
+                ? mergedList.find(
+                    (m) =>
+                      String(m.id).trim() === cleanTargetId ||
+                      (u.phone && m.phone && String(m.phone).slice(-10) === String(u.phone).slice(-10))
+                  )
+                : null;
+              onUpdate(mergedUser || u);
+            })
+            .catch(() => {
+              onUpdate(u);
+            });
         }
       },
       (error) => {
@@ -879,37 +1005,8 @@ export const dbService = {
       handleFirestoreError(error, OperationType.LIST, path);
     }
 
-    // Merge and deduplicate by primary id and referenceNo
-    const mapById = new Map<string, Transaction>();
-    const mapByRef = new Map<string, string>();
-
-    const addOrMerge = (t: Transaction) => {
-      if (!t) return;
-      const id = String(t.id || (t as any)._id || `tx-${t.createdAt || Date.now()}`);
-      const ref = t.referenceNo ? String(t.referenceNo).trim() : '';
-
-      let targetId = id;
-      if (ref && mapByRef.has(ref)) {
-        targetId = mapByRef.get(ref)!;
-      }
-
-      const existing = mapById.get(targetId);
-      const merged: Transaction = {
-        ...(existing || {}),
-        ...t,
-        id: targetId,
-      };
-
-      mapById.set(targetId, merged);
-      if (ref) {
-        mapByRef.set(ref, targetId);
-      }
-    };
-
-    for (const t of apiList) addOrMerge(t);
-    for (const t of firestoreList) addOrMerge(t);
-
-    return Array.from(mapById.values()).sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
+    // Merge and deduplicate by id, referenceNo, and withdrawal signature with terminal status dominance
+    return mergeTxListsSafe([apiList, firestoreList]);
   },
 
   // Real-time listener for user's transactions
@@ -939,25 +1036,13 @@ export const dbService = {
       const unsubscribe = onSnapshot(
         q,
         (snapshot) => {
-          const map = new Map<string, Transaction>();
-          const seenRefs = new Map<string, string>();
+          const rawList: Transaction[] = [];
           snapshot.forEach((d) => {
             const data = d.data() as Transaction;
-            const id = String(data.id || d.id);
-            const ref = data.referenceNo ? String(data.referenceNo).trim() : '';
-
-            if (ref && seenRefs.has(ref)) {
-              const targetId = seenRefs.get(ref)!;
-              const existing = map.get(targetId);
-              map.set(targetId, { ...(existing || {}), ...data, id: targetId });
-              return;
-            }
-
-            map.set(id, { ...data, id });
-            if (ref) seenRefs.set(ref, id);
+            const resolvedId = data.id && !isNumericOnlyId(data.id) ? String(data.id) : d.id || String(data.id);
+            rawList.push({ ...data, id: resolvedId });
           });
-          const list = Array.from(map.values()).sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
-          onUpdate(list);
+          onUpdate(mergeTxListsSafe([rawList]));
         },
         (error) => {
           handleFirestoreError(error, OperationType.LIST, path);
@@ -988,7 +1073,7 @@ export const dbService = {
     }
 
     if (isProductionHost()) {
-      return apiList.sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
+      return mergeTxListsSafe([apiList]);
     }
 
     // 2. Fetch from Firestore (Dev sandbox only)
@@ -997,43 +1082,16 @@ export const dbService = {
     try {
       const querySnapshot = await getDocs(collection(db, 'transactions'));
       querySnapshot.forEach((d) => {
-        firestoreList.push(d.data() as Transaction);
+        const data = d.data() as Transaction;
+        const resolvedId = data.id && !isNumericOnlyId(data.id) ? String(data.id) : d.id || String(data.id);
+        firestoreList.push({ ...data, id: resolvedId });
       });
     } catch (error) {
       handleFirestoreError(error, OperationType.LIST, path);
     }
 
-    // Merge and deduplicate by primary id and referenceNo
-    const mapById = new Map<string, Transaction>();
-    const mapByRef = new Map<string, string>();
-
-    const addOrMerge = (t: Transaction) => {
-      if (!t) return;
-      const id = String(t.id || (t as any)._id || `tx-${t.createdAt || Date.now()}`);
-      const ref = t.referenceNo ? String(t.referenceNo).trim() : '';
-
-      let targetId = id;
-      if (ref && mapByRef.has(ref)) {
-        targetId = mapByRef.get(ref)!;
-      }
-
-      const existing = mapById.get(targetId);
-      const merged: Transaction = {
-        ...(existing || {}),
-        ...t,
-        id: targetId,
-      };
-
-      mapById.set(targetId, merged);
-      if (ref) {
-        mapByRef.set(ref, targetId);
-      }
-    };
-
-    for (const t of apiList) addOrMerge(t);
-    for (const t of firestoreList) addOrMerge(t);
-
-    return Array.from(mapById.values()).sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
+    // Merge and deduplicate cleanly with terminal status dominance (completed/rejected always beats processing)
+    return mergeTxListsSafe([apiList, firestoreList]);
   },
 
   // Real-time listener for all admin transactions
@@ -1063,25 +1121,13 @@ export const dbService = {
       const unsubscribe = onSnapshot(
         q,
         (snapshot) => {
-          const map = new Map<string, Transaction>();
-          const seenRefs = new Map<string, string>();
+          const rawList: Transaction[] = [];
           snapshot.forEach((d) => {
             const data = d.data() as Transaction;
-            const id = String(data.id || d.id);
-            const ref = data.referenceNo ? String(data.referenceNo).trim() : '';
-
-            if (ref && seenRefs.has(ref)) {
-              const targetId = seenRefs.get(ref)!;
-              const existing = map.get(targetId);
-              map.set(targetId, { ...(existing || {}), ...data, id: targetId });
-              return;
-            }
-
-            map.set(id, { ...data, id });
-            if (ref) seenRefs.set(ref, id);
+            const resolvedId = data.id && !isNumericOnlyId(data.id) ? String(data.id) : d.id || String(data.id);
+            rawList.push({ ...data, id: resolvedId });
           });
-          const list = Array.from(map.values()).sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
-          onUpdate(list);
+          onUpdate(mergeTxListsSafe([rawList]));
         },
         (error) => {
           handleFirestoreError(error, OperationType.LIST, path);
@@ -1094,17 +1140,22 @@ export const dbService = {
     }
   },
 
-  // Admin: Update transaction status (Cloud SQL + Firestore)
-  async updateTransaction(txId: string, data: Partial<Transaction>): Promise<void> {
+  // Admin: Update transaction status (Cloud SQL + ALL matching Firestore documents)
+  async updateTransaction(txId: string, data: Partial<Transaction>, originalReferenceNo?: string): Promise<void> {
+    const cleanId = String(txId || '').trim();
+    const cleanOrigRef = originalReferenceNo ? String(originalReferenceNo).trim() : '';
+
     // 1. Update in Cloud SQL backend
     try {
       await fetch('/api/cloudsql/transactions/status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          txId,
+          txId: cleanId,
+          originalReferenceNo: cleanOrigRef || undefined,
           status: data.status,
           referenceNo: data.referenceNo,
+          utrNumber: data.utrNumber,
           paymentMethod: data.paymentMethod,
         }),
       });
@@ -1112,14 +1163,48 @@ export const dbService = {
       console.warn('Backend update transaction status warning:', err);
     }
 
-    // 2. Update in Firestore (Dev sandbox only)
+    // 2. Update ALL matching docs in Firestore (Dev sandbox only)
     if (!isProductionHost()) {
-      const path = `transactions/${txId}`;
+      const path = `transactions/${cleanId}`;
+      const updatePayload = {
+        ...data,
+        updatedAt: new Date().toISOString(),
+      };
       try {
-        await setDoc(doc(db, 'transactions', txId), {
-          ...data,
-          updatedAt: new Date().toISOString(),
-        }, { merge: true });
+        const docIdsToUpdate = new Set<string>();
+
+        // Query by id and referenceNo so numeric SQL IDs or reference-keyed calls still update the canonical doc ("tx-...")
+        const searchQueries = [];
+        if (cleanId) {
+          searchQueries.push(query(collection(db, 'transactions'), where('id', '==', cleanId)));
+          searchQueries.push(query(collection(db, 'transactions'), where('referenceNo', '==', cleanId)));
+        }
+        if (cleanOrigRef && cleanOrigRef !== cleanId) {
+          searchQueries.push(query(collection(db, 'transactions'), where('referenceNo', '==', cleanOrigRef)));
+        }
+
+        const snapshots = await Promise.all(searchQueries.map((sq) => getDocs(sq).catch(() => null)));
+        for (const snap of snapshots) {
+          if (snap) {
+            snap.forEach((d) => docIdsToUpdate.add(d.id));
+          }
+        }
+
+        // Also check direct doc(db, 'transactions', cleanId)
+        if (cleanId) {
+          const directSnap = await getDoc(doc(db, 'transactions', cleanId)).catch(() => null);
+          if (directSnap && directSnap.exists()) {
+            docIdsToUpdate.add(cleanId);
+          } else if (docIdsToUpdate.size === 0 && !isNumericOnlyId(cleanId)) {
+            docIdsToUpdate.add(cleanId);
+          }
+        }
+
+        await Promise.all(
+          Array.from(docIdsToUpdate).map((docId) =>
+            setDoc(doc(db, 'transactions', docId), updatePayload, { merge: true })
+          )
+        );
       } catch (error) {
         handleFirestoreError(error, OperationType.WRITE, path);
       }
@@ -1152,6 +1237,9 @@ export const dbService = {
     action: 'approve' | 'reject';
     txId: string;
     referenceNo?: string;
+    originalReferenceNo?: string;
+    utrNumber?: string;
+    sqlId?: number;
     userId?: string;
     amount?: number;
     reason?: string;
@@ -1175,6 +1263,8 @@ export const dbService = {
   async adminRechargeAction(payload: {
     action: 'approve' | 'reject';
     txId: string;
+    originalReferenceNo?: string;
+    sqlId?: number;
     userId?: string;
     amount?: number;
     reason?: string;
@@ -1219,16 +1309,26 @@ export const dbService = {
   },
 
   // Save investment order to cloud & backend
-  async saveOrder(order: InvestmentOrder, userId: string): Promise<void> {
+  async saveOrder(order: InvestmentOrder, userId: string): Promise<{ commissionResult?: any } | void> {
     const payload = { ...order, userId };
+    let commissionResult: any = null;
     // 1. Sync to backend API (orders_backup.json + Cloud SQL)
     try {
       if (typeof window !== 'undefined') {
-        await fetch('/api/orders', {
+        const res = await fetch('/api/orders', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ order: payload, userId }),
         });
+        if (res.ok) {
+          const json = await res.json();
+          if (json?.commissionResult) {
+            commissionResult = json.commissionResult;
+            if (Array.isArray(commissionResult.credited) && commissionResult.credited.length > 0) {
+              await this.syncCommissionCreditedToFirestore(commissionResult.credited).catch(() => {});
+            }
+          }
+        }
       }
     } catch (e) {
       console.warn('Backend order sync warning:', e);
@@ -1242,6 +1342,10 @@ export const dbService = {
       } catch (error) {
         handleFirestoreError(error, OperationType.WRITE, path);
       }
+    }
+
+    if (commissionResult) {
+      return { commissionResult };
     }
   },
 
@@ -1513,6 +1617,95 @@ export const dbService = {
     }
   },
 
+  // Sync server-credited multi-tier referral commissions (upliners + commission txs) to Firestore (dev sandbox only)
+  async syncCommissionCreditedToFirestore(credited: any[]): Promise<void> {
+    if (isProductionHost() || !Array.isArray(credited) || credited.length === 0) return;
+    for (const item of credited) {
+      if (!item) continue;
+      if (item.updatedUser?.id) {
+        const upPath = `users/${item.updatedUser.id}`;
+        try {
+          await setDoc(
+            doc(db, 'users', item.updatedUser.id),
+            {
+              withdrawalBalance: Number(item.updatedUser.withdrawalBalance) || 0,
+              totalCommissionEarned: Number(item.updatedUser.totalCommissionEarned) || 0,
+              updatedAt: new Date().toISOString(),
+            },
+            { merge: true }
+          );
+        } catch (error) {
+          handleFirestoreError(error, OperationType.WRITE, upPath);
+        }
+      }
+      if (item.transaction?.id) {
+        const txPath = `transactions/${item.transaction.id}`;
+        try {
+          await setDoc(
+            doc(db, 'transactions', item.transaction.id),
+            item.transaction,
+            { merge: true }
+          );
+        } catch (error) {
+          handleFirestoreError(error, OperationType.WRITE, txPath);
+        }
+      }
+    }
+  },
+
+  // Sync server-settled dividend claim state to Firestore (dev sandbox only) so onSnapshot stays synchronized with SQLite
+  async syncDividendClaimToFirestore(payload: {
+    user: User;
+    orders?: InvestmentOrder[];
+    transaction?: Transaction;
+    credited?: any[];
+  }): Promise<void> {
+    if (isProductionHost()) return;
+    if (payload.user?.id) {
+      const userPath = `users/${payload.user.id}`;
+      try {
+        await setDoc(
+          doc(db, 'users', payload.user.id),
+          {
+            ...payload.user,
+            withdrawalBalance: Number(payload.user.withdrawalBalance) || 0,
+            productRevenue: Number(payload.user.productRevenue) || 0,
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true }
+        );
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, userPath);
+      }
+    }
+    if (Array.isArray(payload.orders)) {
+      for (const ord of payload.orders) {
+        if (!ord?.id) continue;
+        const ordPath = `orders/${ord.id}`;
+        try {
+          await setDoc(doc(db, 'orders', ord.id), { ...ord, userId: ord.userId || payload.user?.id }, { merge: true });
+        } catch (error) {
+          handleFirestoreError(error, OperationType.WRITE, ordPath);
+        }
+      }
+    }
+    if (payload.transaction?.id) {
+      const txPath = `transactions/${payload.transaction.id}`;
+      try {
+        await setDoc(
+          doc(db, 'transactions', payload.transaction.id),
+          { ...payload.transaction, userId: payload.transaction.userId || payload.user?.id },
+          { merge: true }
+        );
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, txPath);
+      }
+    }
+    if (Array.isArray(payload.credited) && payload.credited.length > 0) {
+      await this.syncCommissionCreditedToFirestore(payload.credited).catch(() => {});
+    }
+  },
+
   // Admin: Trigger action on order (approve, pause, resume, cancel, payout_dividend, reset_timer)
   async triggerOrderAction(
     orderId: string,
@@ -1523,7 +1716,7 @@ export const dbService = {
       refundWallet?: 'rechargeBalance' | 'withdrawalBalance';
       customEarnings?: number;
     }
-  ): Promise<{ success: boolean; message: string; order?: InvestmentOrder }> {
+  ): Promise<{ success: boolean; message: string; order?: InvestmentOrder; user?: User; transaction?: Transaction; commissionResult?: any }> {
     try {
       if (typeof window !== 'undefined') {
         const res = await fetch(`/api/orders/${orderId}/action`, {
@@ -1533,11 +1726,36 @@ export const dbService = {
         });
         if (res.ok) {
           const json = await res.json();
-          // Also update Firestore to keep in sync
-          if (json.order) {
-            await setDoc(doc(db, 'orders', orderId), json.order, { merge: true }).catch(() => {});
+          if (!isProductionHost()) {
+            if (json.order) {
+              await setDoc(doc(db, 'orders', orderId), json.order, { merge: true }).catch(() => {});
+            }
+            if (json.user?.id) {
+              await setDoc(
+                doc(db, 'users', json.user.id),
+                { ...json.user, updatedAt: new Date().toISOString() },
+                { merge: true }
+              ).catch(() => {});
+            }
+            if (json.transaction?.id) {
+              await setDoc(
+                doc(db, 'transactions', json.transaction.id),
+                json.transaction,
+                { merge: true }
+              ).catch(() => {});
+            }
+            if (Array.isArray(json.commissionResult?.credited) && json.commissionResult.credited.length > 0) {
+              await this.syncCommissionCreditedToFirestore(json.commissionResult.credited).catch(() => {});
+            }
           }
-          return { success: true, message: json.message || 'Action executed successfully', order: json.order };
+          return {
+            success: true,
+            message: json.message || 'Action executed successfully',
+            order: json.order,
+            user: json.user,
+            transaction: json.transaction,
+            commissionResult: json.commissionResult,
+          };
         }
       }
     } catch (e: any) {
@@ -1590,13 +1808,15 @@ export const dbService = {
   },
 
   async savePlatformSettings(settings: PlatformSettings): Promise<void> {
-    this._cachedSettings = { data: settings, timestamp: Date.now() };
+    const nowMs = Date.now();
+    const stampedSettings = { ...settings, updatedAtMs: nowMs } as PlatformSettings & { updatedAtMs: number };
+    this._cachedSettings = { data: stampedSettings, timestamp: nowMs };
     if (typeof window !== 'undefined') {
       try {
         await fetch('/api/platform-settings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(settings),
+          body: JSON.stringify(stampedSettings),
         });
       } catch {}
     }
@@ -1604,12 +1824,13 @@ export const dbService = {
     if (!isProductionHost()) {
       const path = 'settings/platform';
       try {
-        const cleanSettings = JSON.parse(JSON.stringify(settings));
+        const cleanSettings = JSON.parse(JSON.stringify(stampedSettings));
         await setDoc(
           doc(db, 'settings', 'platform'),
           {
             ...cleanSettings,
-            updatedAt: new Date().toISOString(),
+            updatedAtMs: nowMs,
+            updatedAt: new Date(nowMs).toISOString(),
           },
           { merge: true }
         );
@@ -1645,7 +1866,16 @@ export const dbService = {
       doc(db, 'settings', 'platform'),
       (snap) => {
         if (snap.exists()) {
-          onUpdate(snap.data() as PlatformSettings);
+          const fsData = snap.data() as PlatformSettings & { updatedAtMs?: number; updatedAt?: string };
+          const cachedTs = Number((this._cachedSettings?.data as any)?.updatedAtMs) || 0;
+          const fsTs = Number(fsData.updatedAtMs) || (fsData.updatedAt ? Date.parse(fsData.updatedAt) || 0 : 0);
+          // Never overwrite newer SQLite/Admin saved settings with a stale Firestore doc
+          if (cachedTs > fsTs && this._cachedSettings?.data) {
+            onUpdate(this._cachedSettings.data);
+          } else {
+            this._cachedSettings = { data: fsData, timestamp: Date.now() };
+            onUpdate(fsData);
+          }
         }
       },
       (error) => {
@@ -2686,11 +2916,16 @@ export const dbService = {
         }
       });
 
+      const liveSettings = await this.getPlatformSettings().catch(() => null);
+      const t1Rate = liveSettings?.tier1Commission ?? 10;
+      const t2Rate = liveSettings?.tier2Commission ?? 3;
+      const t3Rate = liveSettings?.tier3Commission ?? 1;
+
       const computeDownlineData = (u: any, level: 1 | 2 | 3) => {
         const cleanP = u.phone ? u.phone.replace(/\D/g, '').slice(-10) : '';
         const masked = cleanP.length === 10 ? `+91 ${cleanP.slice(0, 3)}****${cleanP.slice(-3)}` : `User #${u.id}`;
         const join = (u as any).createdAt ? (u as any).createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
-        const rate = level === 1 ? 10 : level === 2 ? 3 : 1;
+        const rate = level === 1 ? t1Rate : level === 2 ? t2Rate : t3Rate;
         const inv = Number(u.totalInvested) || 0;
         const rec = Number(u.rechargeBalance) || 0;
         const realRecharge = inv > 0 ? inv : rec;
@@ -2777,7 +3012,11 @@ export const dbService = {
           body: JSON.stringify({ payerId, amount, actionType, referenceId }),
         });
         if (res.ok) {
-          return await res.json();
+          const json = await res.json();
+          if (Array.isArray(json?.credited) && json.credited.length > 0) {
+            await this.syncCommissionCreditedToFirestore(json.credited).catch(() => {});
+          }
+          return json;
         }
       }
     } catch (e) {
@@ -2801,5 +3040,231 @@ export const dbService = {
     }
     return null;
   },
+
+  // Peer-to-Peer (P2P) Recipient Lookup
+  async lookupP2PRecipient(
+    queryStr: string,
+    senderId?: string,
+    senderPhone?: string
+  ): Promise<{ success: boolean; recipient?: P2PRecipientPreview; error?: string }> {
+    const cleanQuery = String(queryStr || '').trim();
+    if (!cleanQuery) {
+      return { success: false, error: 'Please enter a User ID, Mobile Number, or Invite Code.' };
+    }
+
+    try {
+      const params = new URLSearchParams({ query: cleanQuery });
+      if (senderId) params.set('senderId', senderId);
+      if (senderPhone) params.set('senderPhone', senderPhone.replace(/\D/g, '').slice(-10));
+
+      let res = await fetch(`/api/p2p/lookup?${params.toString()}`);
+      let json = await res.json();
+
+      // Dev sandbox fallback: if user exists in Firestore but has not synced to SQLite yet, sync and retry once
+      if (res.status === 404 && !isProductionHost()) {
+        try {
+          let fsMatch: User | null = null;
+          const cleanDigits = cleanQuery.replace(/\D/g, '');
+          const cleanPhone = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : '';
+          const upperCode = cleanQuery.toUpperCase();
+
+          const byIdSnap = await getDoc(doc(db, 'users', cleanQuery));
+          if (byIdSnap.exists()) {
+            fsMatch = byIdSnap.data() as User;
+          }
+          if (!fsMatch && cleanPhone.length === 10) {
+            const qPhone = query(collection(db, 'users'), where('phone', '==', cleanPhone));
+            const snapPhone = await getDocs(qPhone);
+            if (!snapPhone.empty) fsMatch = snapPhone.docs[0].data() as User;
+          }
+          if (!fsMatch && upperCode.length >= 3) {
+            const qCode = query(collection(db, 'users'), where('invitationCode', '==', upperCode));
+            const snapCode = await getDocs(qCode);
+            if (!snapCode.empty) fsMatch = snapCode.docs[0].data() as User;
+          }
+
+          if (fsMatch && (fsMatch.id || fsMatch.phone)) {
+            await fetch('/api/user/save', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ user: fsMatch }),
+            });
+            res = await fetch(`/api/p2p/lookup?${params.toString()}`);
+            json = await res.json();
+          }
+        } catch {}
+      }
+
+      if (!res.ok || !json.success) {
+        return { success: false, error: json.error || 'Recipient not found.' };
+      }
+      return { success: true, recipient: json.recipient as P2PRecipientPreview };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Unable to verify recipient right now.' };
+    }
+  },
+
+  // Peer-to-Peer (P2P) Atomic Transfer Execution
+  async executeP2PTransfer(payload: {
+    senderId: string;
+    recipientQuery: string;
+    amount: number;
+    sourceWallet: 'withdrawalBalance' | 'rechargeBalance';
+    targetWallet?: 'withdrawalBalance' | 'rechargeBalance';
+    note?: string;
+  }): Promise<{
+    success: boolean;
+    sender?: User;
+    recipientPreview?: P2PRecipientPreview;
+    senderTransaction?: Transaction;
+    recipientTransaction?: Transaction;
+    referenceNo?: string;
+    message?: string;
+    error?: string;
+  }> {
+    try {
+      const res = await fetch('/api/p2p/transfer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return { success: false, error: json.error || 'P2P transfer failed.' };
+      }
+
+      // Mirror updated balances and transactions to Firestore in dev sandbox
+      if (!isProductionHost()) {
+        const nowIso = new Date().toISOString();
+        if (json.sender?.id) {
+          setDoc(
+            doc(db, 'users', String(json.sender.id)),
+            {
+              rechargeBalance: Number(json.sender.rechargeBalance) || 0,
+              withdrawalBalance: Number(json.sender.withdrawalBalance) || 0,
+              updatedAt: nowIso,
+            },
+            { merge: true }
+          ).catch(() => {});
+        }
+        if (json.recipientWalletUpdate?.id) {
+          setDoc(
+            doc(db, 'users', String(json.recipientWalletUpdate.id)),
+            {
+              rechargeBalance: Number(json.recipientWalletUpdate.rechargeBalance) || 0,
+              withdrawalBalance: Number(json.recipientWalletUpdate.withdrawalBalance) || 0,
+              updatedAt: nowIso,
+            },
+            { merge: true }
+          ).catch(() => {});
+        }
+        if (json.senderTransaction?.id) {
+          setDoc(doc(db, 'transactions', String(json.senderTransaction.id)), json.senderTransaction, { merge: true }).catch(() => {});
+        }
+        if (json.recipientTransaction?.id) {
+          setDoc(doc(db, 'transactions', String(json.recipientTransaction.id)), json.recipientTransaction, { merge: true }).catch(() => {});
+        }
+      }
+
+      return json;
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Network error while transferring funds.' };
+    }
+  },
+
+  // Admin: Fetch consolidated P2P transfer history and analytics
+  async getAdminP2PHistory(): Promise<{
+    success: boolean;
+    transfers?: any[];
+    ledger?: Transaction[];
+    stats?: {
+      totalTransfers: number;
+      totalVolume: number;
+      chargedSourceVolume: number;
+      withdrawalSourceVolume: number;
+      chargedSourceCount: number;
+      withdrawalSourceCount: number;
+    };
+    error?: string;
+  }> {
+    try {
+      const res = await fetch('/api/admin/p2p/history');
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return { success: false, error: json.error || 'Failed to load P2P history' };
+      }
+      return json;
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Network error loading P2P history' };
+    }
+  },
+
+  // Admin: Execute P2P transfer between any two users
+  async executeAdminP2PTransfer(payload: {
+    senderQuery: string;
+    recipientQuery: string;
+    amount: number;
+    sourceWallet: 'withdrawalBalance' | 'rechargeBalance';
+    targetWallet: 'withdrawalBalance' | 'rechargeBalance';
+    note?: string;
+  }): Promise<{
+    success: boolean;
+    referenceNo?: string;
+    sender?: User;
+    recipient?: User;
+    senderTransaction?: Transaction;
+    recipientTransaction?: Transaction;
+    message?: string;
+    error?: string;
+  }> {
+    try {
+      const res = await fetch('/api/admin/p2p/transfer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return { success: false, error: json.error || 'Admin P2P transfer failed.' };
+      }
+
+      if (!isProductionHost()) {
+        const nowIso = new Date().toISOString();
+        if (json.sender?.id) {
+          setDoc(
+            doc(db, 'users', String(json.sender.id)),
+            {
+              rechargeBalance: Number(json.sender.rechargeBalance) || 0,
+              withdrawalBalance: Number(json.sender.withdrawalBalance) || 0,
+              updatedAt: nowIso,
+            },
+            { merge: true }
+          ).catch(() => {});
+        }
+        if (json.recipient?.id) {
+          setDoc(
+            doc(db, 'users', String(json.recipient.id)),
+            {
+              rechargeBalance: Number(json.recipient.rechargeBalance) || 0,
+              withdrawalBalance: Number(json.recipient.withdrawalBalance) || 0,
+              updatedAt: nowIso,
+            },
+            { merge: true }
+          ).catch(() => {});
+        }
+        if (json.senderTransaction?.id) {
+          setDoc(doc(db, 'transactions', String(json.senderTransaction.id)), json.senderTransaction, { merge: true }).catch(() => {});
+        }
+        if (json.recipientTransaction?.id) {
+          setDoc(doc(db, 'transactions', String(json.recipientTransaction.id)), json.recipientTransaction, { merge: true }).catch(() => {});
+        }
+      }
+
+      return json;
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Network error executing Admin P2P transfer' };
+    }
+  },
 };
+
 

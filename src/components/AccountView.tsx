@@ -32,6 +32,7 @@ import {
   ExternalLink,
   Calendar,
   Ticket,
+  ArrowLeftRight,
 } from 'lucide-react';
 import { useApp, normalizeRedirectUrl } from '../context/AppContext';
 import { VIP_TIERS } from '../data/mockData';
@@ -385,6 +386,31 @@ export const AccountView: React.FC = () => {
               <span className="text-[10px] sm:text-[11px] font-semibold text-slate-600 dark:text-slate-400 mt-1.5">Guide</span>
             </button>
           </div>
+
+          {/* P2P Instant Member Transfer Action Strip */}
+          <button
+            type="button"
+            onClick={() => openModal('p2p')}
+            className="w-full mt-3.5 pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3 group cursor-pointer active:scale-[0.99] transition-transform"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-teal-600 to-cyan-600 text-white flex items-center justify-center shadow-md shadow-teal-500/20 shrink-0 group-hover:scale-105 transition-transform">
+                <ArrowLeftRight className="w-4 h-4" />
+              </div>
+              <div className="text-left min-w-0">
+                <div className="text-xs font-extrabold text-slate-800 dark:text-slate-100 truncate">
+                  P2P Send & Receive
+                </div>
+                <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                  Pay via Charged or Withdrawal · Receive in Charged Balance
+                </div>
+              </div>
+            </div>
+            <span className="px-3 py-1.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-[11px] font-bold whitespace-nowrap shrink-0 flex items-center gap-1">
+              <span>Open P2P</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </span>
+          </button>
         </div>
 
         {/* Dedicated Official Gift Card Voucher Banner Strip in Account */}
@@ -555,6 +581,27 @@ export const AccountView: React.FC = () => {
             </div>
             <div className="flex items-center gap-1 text-slate-400">
               <span className="text-[11px]">View</span>
+              <ChevronRight className="w-4 h-4" />
+            </div>
+          </button>
+
+          {/* P2P Fund Transfer */}
+          <button
+            type="button"
+            onClick={() => openModal('p2p')}
+            className="w-full px-4 py-3.5 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-xl bg-cyan-500/15 text-cyan-700 dark:text-cyan-400 flex items-center justify-center">
+                <ArrowLeftRight className="w-4 h-4" />
+              </div>
+              <div className="text-left">
+                <span className="font-bold text-slate-800 dark:text-slate-200">P2P Send & Receive</span>
+                <span className="text-[10px] text-slate-400 block">Send from any wallet · Receive in Charged Balance</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-1 text-slate-400">
+              <span className="text-[11px] text-teal-600 dark:text-teal-400 font-bold whitespace-nowrap">Send / Receive</span>
               <ChevronRight className="w-4 h-4" />
             </div>
           </button>

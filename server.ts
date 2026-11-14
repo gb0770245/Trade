@@ -12,6 +12,7 @@ import {
   getUserTransactions,
   getAllTransactionsFromDb,
   createTransaction,
+  findTransactionsInDbByIdentifiers,
   updateTransactionStatusInDb,
   refundUserWithdrawalInDb,
   deleteUserFromDb,
@@ -63,6 +64,8 @@ import {
   initAndSyncSqlUsers,
   relinkUserUplineInSql,
   creditUserCommissionInSql,
+  creditUserDividendInSql,
+  creditUserWalletDeltaInSql,
   updateUserReferralsInSql,
   updateUserWalletBalanceInSql,
   resetAllUsersBalancesInSql,
@@ -169,6 +172,10 @@ const DEFAULT_SERVER_PLATFORM_SETTINGS: Record<string, any> = {
   checkInDay7ExtraSpin: true,
   dailyBonusBase: 50,
   adminPin: '8888',
+  isP2PEnabled: true,
+  minP2PAmount: 1,
+  maxP2PAmount: 50000,
+  p2pNotice: '',
 };
 
 function initSqlitePlatformSettings(): void {
@@ -209,7 +216,17 @@ function loadServerPlatformSettings(): Record<string, any> {
 
 function saveServerPlatformSettings(next: Record<string, any>): Record<string, any> {
   const current = loadServerPlatformSettings();
-  const merged = { ...current, ...next };
+  const parseRate = (val: any, fallback: number): number => {
+    if (val === undefined || val === null || val === '') return fallback;
+    const num = Number(val);
+    return Number.isFinite(num) && num >= 0 ? num : fallback;
+  };
+  const nextNormalized: Record<string, any> = { ...next };
+  if ('tier1Commission' in next) nextNormalized.tier1Commission = parseRate(next.tier1Commission, Number(current.tier1Commission ?? 10));
+  if ('tier2Commission' in next) nextNormalized.tier2Commission = parseRate(next.tier2Commission, Number(current.tier2Commission ?? 3));
+  if ('tier3Commission' in next) nextNormalized.tier3Commission = parseRate(next.tier3Commission, Number(current.tier3Commission ?? 1));
+
+  const merged = { ...current, ...nextNormalized, updatedAtMs: Date.now(), updatedAt: new Date().toISOString() };
   try {
     fs.writeFileSync(PLATFORM_SETTINGS_PATH, JSON.stringify(merged, null, 2), 'utf-8');
   } catch (err) {
@@ -229,6 +246,37 @@ function saveServerPlatformSettings(next: Record<string, any>): Record<string, a
     console.warn('Could not write platform settings to SQLite:', e);
   }
   return merged;
+}
+
+async function getEffectivePlatformSettingsServer(): Promise<Record<string, any>> {
+  const localSettings = loadServerPlatformSettings();
+  try {
+    const dbSettings = (await getPlatformSettingFromDb('general')) as Record<string, any> | null;
+    if (dbSettings && typeof dbSettings === 'object') {
+      const localTs = Number(localSettings.updatedAtMs) || (localSettings.updatedAt ? Date.parse(localSettings.updatedAt) || 0 : 0);
+      const dbTs = Number(dbSettings.updatedAtMs) || (dbSettings.updatedAt ? Date.parse(dbSettings.updatedAt) || 0 : 0);
+      // Prefer whichever settings snapshot is newer so stale DB seed defaults never overwrite Admin updates
+      if (dbTs > localTs) {
+        return { ...localSettings, ...dbSettings };
+      }
+      return { ...dbSettings, ...localSettings };
+    }
+  } catch {}
+  return localSettings;
+}
+
+async function getEffectiveCommissionRatesServer(): Promise<[number, number, number]> {
+  const settings = await getEffectivePlatformSettingsServer();
+  const parseRate = (val: any, fallback: number): number => {
+    if (val === undefined || val === null || val === '') return fallback;
+    const num = Number(val);
+    return Number.isFinite(num) && num >= 0 ? num : fallback;
+  };
+  return [
+    parseRate(settings.tier1Commission, 10),
+    parseRate(settings.tier2Commission, 3),
+    parseRate(settings.tier3Commission, 1),
+  ];
 }
 
 const DEFAULT_OTP_SETTINGS: ServerOtpSettings = {
@@ -572,13 +620,7 @@ app.post('/api/admin/otp-settings', (req, res) => {
 
 // API Routes: Platform Settings (Referral Commission Rates, Payment Gateways, Thresholds)
 app.get('/api/platform-settings', async (_req, res) => {
-  let settings = loadServerPlatformSettings();
-  try {
-    const dbSettings = await getPlatformSettingFromDb('general');
-    if (dbSettings && typeof dbSettings === 'object') {
-      settings = { ...settings, ...dbSettings };
-    }
-  } catch {}
+  const settings = await getEffectivePlatformSettingsServer();
   return res.json({
     success: true,
     settings,
@@ -1212,9 +1254,17 @@ function mergeTwoUsers(existing: any, incoming: any): any {
     merged.inviterId = '406332';
   }
 
-  // Preserve highest stats
+  // Preserve highest stats & protect withdrawalBalance/productRevenue from stale pre-commission/pre-dividend snapshots
+  const existingComm = Number(existing.totalCommissionEarned) || 0;
+  const incomingComm = Number(incoming.totalCommissionEarned) || 0;
+  const existingRev = Number(existing.productRevenue) || 0;
+  const incomingRev = Number(incoming.productRevenue) || 0;
+  if (!incoming.isExplicitZeroReset && (existingComm > incomingComm || existingRev > incomingRev)) {
+    merged.withdrawalBalance = Math.max(Number(existing.withdrawalBalance) || 0, Number(merged.withdrawalBalance) || 0);
+    merged.productRevenue = Math.max(existingRev, Number(merged.productRevenue) || 0);
+  }
   merged.totalReferrals = Math.max(Number(merged.totalReferrals) || 0, Number(existing.totalReferrals) || 0);
-  merged.totalCommissionEarned = Math.max(Number(merged.totalCommissionEarned) || 0, Number(existing.totalCommissionEarned) || 0);
+  merged.totalCommissionEarned = Math.max(existingComm, Number(merged.totalCommissionEarned) || 0);
 
   if (!merged.createdAt) {
     merged.createdAt = existing.createdAt || incoming.createdAt || new Date().toISOString();
@@ -1427,25 +1477,119 @@ app.post(['/api/user/save', '/api/user/update'], async (req, res) => {
 });
 
 // API Route: Atomic Daily Dividend Claim with Instant Wallet Credit & Instant Senior Referral Commission
+const claimDividendLocks = new Set<string>();
+
 app.post('/api/user/claim-dividend', async (req, res) => {
+  const { userId, targetOrderId, customEarnings, clientOrders, clientUser } = req.body || {};
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'User ID is required' });
+  }
+
+  const cleanUserId = String(userId).trim();
+  if (claimDividendLocks.has(cleanUserId)) {
+    return res.status(429).json({
+      success: false,
+      error: 'Dividend claim is already processing. Please wait a moment.',
+    });
+  }
+  claimDividendLocks.add(cleanUserId);
+
   try {
-    const { userId, targetOrderId, customEarnings } = req.body;
-    if (!userId) {
-      return res.status(400).json({ success: false, error: 'User ID is required' });
+    // 1. Authoritative user lookup (SQLite -> Combined SQL/Disk/Cloud -> Dev Client Seed if absent)
+    let user = getUserByIdOrPhoneFromSql(cleanUserId);
+    if (!user) {
+      const combined = await getCombinedServerUsers();
+      const cleanDigits = cleanUserId.replace(/\D/g, '').slice(-10);
+      const matched = combined.find(
+        (u) =>
+          String(u.id || '').trim() === cleanUserId ||
+          String(u.uid || '').trim() === cleanUserId ||
+          (cleanDigits.length === 10 && String(u.phone || '').replace(/\D/g, '').slice(-10) === cleanDigits)
+      );
+      if (matched) {
+        user = upsertUserInSql(matched);
+      } else if (clientUser && (String(clientUser.id || '').trim() === cleanUserId || clientUser.phone)) {
+        user = upsertUserInSql({ ...clientUser, id: cleanUserId });
+      }
     }
 
-    const cleanUserId = String(userId).trim();
-    const user = getUserByIdOrPhoneFromSql(cleanUserId);
     if (!user) {
       return res.status(404).json({ success: false, error: 'User not found in database' });
     }
 
-    // 1. Fetch user orders from SQLite
-    const userOrders = getOrdersForUserFromSql([cleanUserId, user.phone].filter(Boolean) as string[]);
+    const userPhoneDigits = String(user.phone || '').replace(/\D/g, '').slice(-10);
+    const idVariants = Array.from(
+      new Set(
+        [
+          cleanUserId,
+          String(user.id || '').trim(),
+          user.phone,
+          userPhoneDigits,
+          userPhoneDigits ? `+91 ${userPhoneDigits}` : '',
+        ].filter(Boolean) as string[]
+      )
+    );
+    const idSet = new Set(idVariants);
+    const deletedOrdersSet = loadDeletedOrders();
+
+    // 2. Merge orders across SQLite + Disk backup + Cloud SQL + missing client/Firestore orders
+    const sqlOrders = getOrdersForUserFromSql(idVariants);
+    const diskOrdersAll = loadServerOrders();
+    const diskUserOrders = diskOrdersAll.filter((o: any) => {
+      if (!o || !o.id) return false;
+      const oUid = String(o.userId || '').trim();
+      const oPhone = String(o.userPhone || '').replace(/\D/g, '').slice(-10);
+      return idSet.has(oUid) || (oPhone && (idSet.has(oPhone) || oPhone === userPhoneDigits));
+    });
+
+    let cloudUserOrders: any[] = [];
+    try {
+      cloudUserOrders = await getDbOrdersByUser(user.id, user.phone);
+    } catch {}
+
+    const mergedOrderMap = new Map<string, any>();
+    for (const o of [...sqlOrders, ...diskUserOrders, ...cloudUserOrders]) {
+      if (!o || !o.id) continue;
+      const strId = String(o.id).trim();
+      if (deletedOrdersSet.has(strId.toLowerCase())) continue;
+      const prev = mergedOrderMap.get(strId);
+      const next = prev ? mergeOrderSafe(prev, o) : o;
+      mergedOrderMap.set(strId, next);
+      // Ensure SQLite has the reconciled order row
+      try {
+        upsertOrderInSql(next);
+      } catch {}
+    }
+
+    // Seed any active client/Firestore order that does not exist on server yet
+    if (Array.isArray(clientOrders)) {
+      for (const co of clientOrders) {
+        if (!co || !co.id) continue;
+        const strId = String(co.id).trim();
+        if (deletedOrdersSet.has(strId.toLowerCase())) continue;
+        if (!mergedOrderMap.has(strId)) {
+          const coUid = String(co.userId || user.id).trim();
+          const coPhone = String(co.userPhone || user.phone || '').replace(/\D/g, '').slice(-10);
+          const belongsToUser =
+            idSet.has(coUid) || (coPhone && userPhoneDigits && coPhone === userPhoneDigits);
+          if (belongsToUser) {
+            const seeded = upsertOrderInSql({
+              ...co,
+              userId: user.id,
+              userPhone: co.userPhone || user.phone,
+              userNickname: co.userNickname || user.nickname,
+            });
+            if (seeded) mergedOrderMap.set(strId, seeded);
+          }
+        }
+      }
+    }
+
+    const userOrders = Array.from(mergedOrderMap.values());
     const now = Date.now();
 
     const activeContracts = userOrders.filter(
-      (o: any) => o.status === 'active' && (!targetOrderId || o.id === targetOrderId)
+      (o: any) => o.status === 'active' && (!targetOrderId || String(o.id) === String(targetOrderId))
     );
 
     if (activeContracts.length === 0) {
@@ -1453,7 +1597,7 @@ app.post('/api/user/claim-dividend', async (req, res) => {
     }
 
     let totalClaim = 0;
-    const eligibleOrders: any[] = [];
+    const eligibleUpdates: any[] = [];
     const nextClaimTime = now + 24 * 60 * 60 * 1000;
 
     for (const ord of activeContracts) {
@@ -1463,26 +1607,30 @@ app.post('/api/user/claim-dividend', async (req, res) => {
         continue;
       }
 
-      const lastClaim = ord.lastClaimTimestamp
-        ? Number(ord.lastClaimTimestamp)
-        : (ord.purchaseTimestamp ? Number(ord.purchaseTimestamp) : 0);
+      const lastClaim = Number(ord.lastClaimTimestamp) || 0;
+      const effectiveStart = lastClaim > 0 ? lastClaim : Number(ord.purchaseTimestamp) || 0;
+      const nextClaim = Number(ord.nextClaimTimestamp) || (effectiveStart + 24 * 3600 * 1000);
 
       // STRICT 24-HOUR COOLDOWN CHECK:
-      // An order is due ONLY if:
-      // 1. Admin passed explicit customEarnings, OR
-      // 2. nextClaimTimestamp is reached AND (never claimed or at least 23.5h elapsed since last claim)
-      const nextClaim = Number(ord.nextClaimTimestamp) || (lastClaim + 24 * 3600 * 1000);
-      const isDue = customEarnings !== undefined || (now >= nextClaim && (lastClaim === 0 || (now - lastClaim) >= (23.5 * 3600 * 1000)));
+      // Due if Admin passed customEarnings, OR nextClaimTimestamp has arrived AND 23.5h elapsed since last claim (or never claimed yet)
+      const isDue =
+        customEarnings !== undefined ||
+        (now >= nextClaim && (effectiveStart === 0 || now - effectiveStart >= 23.5 * 3600 * 1000));
 
       if (isDue) {
-        eligibleOrders.push(ord);
         const dividend = customEarnings !== undefined ? Number(customEarnings) : Number(ord.dailyEarnings || 0);
+        if (!Number.isFinite(dividend) || dividend <= 0) {
+          continue;
+        }
         totalClaim += dividend;
 
         const newElapsed = daysElapsed + 1;
         const isFinished = newElapsed >= cycleDays;
         const updatedOrd = {
           ...ord,
+          userId: ord.userId || user.id,
+          userPhone: ord.userPhone || user.phone,
+          userNickname: ord.userNickname || user.nickname,
           daysElapsed: newElapsed,
           totalAccrued: Number(((Number(ord.totalAccrued) || 0) + dividend).toFixed(2)),
           lastClaimDate: new Date(now).toISOString().split('T')[0],
@@ -1491,26 +1639,11 @@ app.post('/api/user/claim-dividend', async (req, res) => {
           status: isFinished ? 'completed' : 'active',
           updatedAt: new Date(now).toISOString(),
         };
-
-        // 1. Permanently update SQLite
-        upsertOrderInSql(updatedOrd);
-
-        // 2. Permanently update Disk Orders (orders_backup.json)
-        const diskOrders = loadServerOrders();
-        const dIdx = diskOrders.findIndex((d) => String(d.id) === String(updatedOrd.id));
-        if (dIdx >= 0) {
-          diskOrders[dIdx] = { ...diskOrders[dIdx], ...updatedOrd };
-        } else {
-          diskOrders.unshift(updatedOrd);
-        }
-        saveServerOrders(diskOrders);
-
-        // 3. Sync Cloud SQL PostgreSQL
-        upsertDbOrder(updatedOrd).catch(() => {});
+        eligibleUpdates.push(updatedOrd);
       }
     }
 
-    if (eligibleOrders.length === 0 || totalClaim <= 0) {
+    if (eligibleUpdates.length === 0 || totalClaim <= 0) {
       return res.status(400).json({
         success: false,
         error: 'Daily dividend requires 24 hours cooldown between claims (24 घंटे पूरे होने के बाद ही अगला क्लेम करें)',
@@ -1519,46 +1652,63 @@ app.post('/api/user/claim-dividend', async (req, res) => {
 
     totalClaim = Number(totalClaim.toFixed(2));
 
-    // 2. Atomically credit user's Withdrawable Balance & Product Revenue in SQLite
+    // 3. Atomically update claimed orders AND credit user's Withdrawable Balance & Product Revenue inside SQLite transaction
     const db = getSqliteDb();
     initSqliteUsersTable();
-    const newWithdrawal = Number((Number(user.withdrawalBalance || 0) + totalClaim).toFixed(2));
-    const newRevenue = Number((Number(user.productRevenue || 0) + totalClaim).toFixed(2));
+    let freshUser: any = null;
 
-    db.prepare(`
-      UPDATE platform_users 
-      SET withdrawal_balance = ?, 
-          product_revenue = ?,
-          updated_at = datetime('now')
-      WHERE id = ?
-    `).run(newWithdrawal, newRevenue, user.id);
-
-    // Update in disk backup
-    const diskUsers = getCachedUsersBackup();
-    const diskIdx = diskUsers.findIndex((u) => u.id === user.id);
-    if (diskIdx >= 0) {
-      diskUsers[diskIdx].withdrawalBalance = newWithdrawal;
-      diskUsers[diskIdx].productRevenue = newRevenue;
-      saveUsersBackup(diskUsers);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const updatedOrd of eligibleUpdates) {
+        upsertOrderInSql(updatedOrd);
+      }
+      freshUser = creditUserDividendInSql(user.id, totalClaim);
+      if (!freshUser) {
+        throw new Error('Failed to locate user row in SQLite during atomic dividend credit');
+      }
+      db.exec('COMMIT');
+    } catch (sqlErr: any) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {}
+      throw sqlErr;
     }
 
-    // Sync to Cloud SQL in background
+    // 4. Permanently sync updated orders to disk backup & Cloud SQL
+    const diskOrders = loadServerOrders();
+    for (const updatedOrd of eligibleUpdates) {
+      const dIdx = diskOrders.findIndex((d) => String(d.id) === String(updatedOrd.id));
+      if (dIdx >= 0) {
+        diskOrders[dIdx] = { ...diskOrders[dIdx], ...updatedOrd };
+      } else {
+        diskOrders.unshift(updatedOrd);
+      }
+      upsertDbOrder(updatedOrd).catch(() => {});
+    }
+    saveServerOrders(diskOrders);
+
+    // 5. Permanently sync credited user to disk backup & Cloud SQL
+    const diskUsers = getCachedUsersBackup();
+    const mergedDiskUsers = deduplicateAndMergeUsers(diskUsers, [freshUser]);
+    saveUsersBackup(mergedDiskUsers);
+
     upsertUser({
-      uid: user.id,
-      withdrawalBalance: newWithdrawal,
-      productRevenue: newRevenue,
+      uid: freshUser.id,
+      phone: freshUser.phone,
+      withdrawalBalance: freshUser.withdrawalBalance,
+      productRevenue: freshUser.productRevenue,
     }).catch(() => {});
 
-    // 3. Create dividend earnings transaction
-    const divRef = `DIV-${user.id}-${Date.now()}`;
+    // 6. Create dividend earnings transaction
+    const divRef = `DIV-${freshUser.id}-${now}`;
     const divTx = {
-      id: `tx-div-${Date.now()}`,
-      userId: user.id,
-      phone: user.phone || '',
+      id: `tx-div-${now}`,
+      userId: freshUser.id,
+      phone: freshUser.phone || '',
       type: 'earnings',
       amount: totalClaim,
-      title: `Daily 24-Hour Dividend Settled (${eligibleOrders.length} contracts)`,
-      timestamp: new Date().toLocaleString(),
+      title: `Daily 24-Hour Dividend Settled (${eligibleUpdates.length} contract${eligibleUpdates.length > 1 ? 's' : ''})`,
+      timestamp: new Date(now).toLocaleString(),
       createdAt: now,
       status: 'completed',
       referenceNo: divRef,
@@ -1569,18 +1719,24 @@ app.post('/api/user/claim-dividend', async (req, res) => {
     saveServerTransactions(allTxs);
     createTransaction(divTx).catch(() => {});
 
-    // 4. INSTANTLY DISTRIBUTE SENIOR / UPLINE REFERRAL COMMISSIONS!
-    const commissionResult = await distributeReferralCommissionServer(
-      user.id,
-      totalClaim,
-      'daily_income',
-      divRef
+    // 7. Safely distribute senior / upline commissions (non-blocking if error)
+    let commissionResult: any = { success: true, credited: [] };
+    try {
+      commissionResult = await distributeReferralCommissionServer(
+        freshUser.id,
+        totalClaim,
+        'daily_income',
+        divRef
+      );
+    } catch (commErr) {
+      console.warn('[Daily Dividend Engine] Senior commission notice:', commErr);
+    }
+
+    const updatedOrders = getOrdersForUserFromSql(idVariants);
+
+    console.log(
+      `[Daily Dividend Engine] ✅ Successfully settled $${totalClaim} dividend for ${freshUser.nickname} (${freshUser.id}) -> Withdrawable: $${freshUser.withdrawalBalance}, Revenue: $${freshUser.productRevenue}. Senior commission distributed to ${commissionResult?.credited?.length || 0} upliners.`
     );
-
-    const freshUser = getUserByIdOrPhoneFromSql(user.id);
-    const updatedOrders = getOrdersForUserFromSql([user.id, user.phone].filter(Boolean) as string[]);
-
-    console.log(`[Daily Dividend Engine] ✅ Successfully settled $${totalClaim} dividend for ${user.nickname} (${user.id}). Senior commission distributed to ${commissionResult?.credited?.length || 0} upliners.`);
 
     return res.json({
       success: true,
@@ -1594,6 +1750,653 @@ app.post('/api/user/claim-dividend', async (req, res) => {
   } catch (err: any) {
     console.error('[Claim Dividend Error]:', err);
     return res.status(500).json({ success: false, error: err.message });
+  } finally {
+    claimDividendLocks.delete(cleanUserId);
+  }
+});
+
+// ==========================================
+// API Routes: Peer-to-Peer (P2P) Instant Fund Transfer
+// ==========================================
+const p2pTransferLocks = new Set<string>();
+
+function maskPhoneNumber(phone?: string): string {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length < 4) return '******';
+  return `******${digits.slice(-4)}`;
+}
+
+async function resolveAuthoritativeUserForP2P(identifier: string): Promise<any | null> {
+  const raw = String(identifier || '').trim();
+  if (!raw) return null;
+  const deletedSet = loadDeletedUsers();
+
+  let userRecord = getUserByIdOrPhoneFromSql(raw);
+  if (!userRecord) {
+    const digits = raw.replace(/\D/g, '');
+    const cleanPhone = digits.length >= 10 ? digits.slice(-10) : '';
+    const upperCode = raw.toUpperCase();
+    const lowerRaw = raw.toLowerCase();
+    const allUsers = await getCombinedServerUsers();
+
+    // Prioritize deterministic unique identifiers before nickname fallback
+    let match =
+      allUsers.find((u) => String(u.id || '').trim() === raw) ||
+      (cleanPhone.length === 10
+        ? allUsers.find((u) => String(u.phone || '').replace(/\D/g, '').slice(-10) === cleanPhone)
+        : undefined) ||
+      allUsers.find((u) => u.invitationCode && String(u.invitationCode).trim().toUpperCase() === upperCode);
+
+    if (!match && raw.length >= 2) {
+      const nameMatches = allUsers.filter(
+        (u) => u.nickname && String(u.nickname).trim().toLowerCase() === lowerRaw
+      );
+      if (nameMatches.length === 1) {
+        match = nameMatches[0];
+      }
+    }
+
+    if (match) {
+      userRecord = upsertUserInSql(match);
+    }
+  }
+
+  if (!userRecord) return null;
+  const uId = String(userRecord.id || '').trim();
+  const uPhone = String(userRecord.phone || '').replace(/\D/g, '').slice(-10);
+  if (deletedSet.has(uId) || (uPhone && deletedSet.has(uPhone)) || userRecord.isDeleted) {
+    return null;
+  }
+  return userRecord;
+}
+
+function isSameUserForP2P(
+  sender: { id?: string; phone?: string } | null,
+  recipient: { id?: string; phone?: string } | null,
+  fallbackSenderId?: string,
+  fallbackSenderPhone?: string
+): boolean {
+  if (!recipient) return false;
+  const recipientId = String(recipient.id || '').trim();
+  const recipientPhoneDigits = String(recipient.phone || '').replace(/\D/g, '');
+  const recipientPhone = recipientPhoneDigits.length >= 10 ? recipientPhoneDigits.slice(-10) : '';
+
+  const sId = String(sender?.id || fallbackSenderId || '').trim();
+  const sPhoneRaw = String(sender?.phone || fallbackSenderPhone || '').replace(/\D/g, '');
+  const sPhone = sPhoneRaw.length >= 10 ? sPhoneRaw.slice(-10) : '';
+
+  if (sId && recipientId && recipientId === sId) return true;
+  if (sPhone.length === 10 && recipientPhone.length === 10 && recipientPhone === sPhone) return true;
+  return false;
+}
+
+// Lookup recipient safely by User ID, 10-digit Mobile Number, or Invitation Code
+app.get('/api/p2p/lookup', async (req, res) => {
+  try {
+    const rawQuery = String(req.query.query || req.query.q || '').trim();
+    const senderId = String(req.query.senderId || req.query.excludeUserId || '').trim();
+    const senderPhone = String(req.query.senderPhone || '').replace(/\D/g, '').slice(-10);
+
+    if (!rawQuery || rawQuery.length < 3) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please enter a valid User ID, 10-digit Mobile Number, or Invite Code.',
+      });
+    }
+
+    const recipient = await resolveAuthoritativeUserForP2P(rawQuery);
+    if (!recipient) {
+      return res.status(404).json({
+        success: false,
+        error: 'No registered user found with that User ID, Mobile Number, or Invite Code.',
+      });
+    }
+
+    if (senderId || senderPhone.length === 10) {
+      const senderRecord =
+        (senderId ? await resolveAuthoritativeUserForP2P(senderId) : null) ||
+        (senderPhone.length === 10 ? await resolveAuthoritativeUserForP2P(senderPhone) : null);
+
+      if (isSameUserForP2P(senderRecord, recipient, senderId, senderPhone)) {
+        const senderLabel = senderRecord
+          ? `${senderRecord.nickname || 'Member'} (ID ${senderRecord.id})`
+          : `ID ${senderId}`;
+        return res.status(400).json({
+          success: false,
+          error: `You cannot transfer funds to your own account (${senderLabel}). Please enter a different member's User ID, Mobile, or Invite Code.`,
+        });
+      }
+    }
+
+    if (recipient.status === 'frozen' || recipient.status === 'suspended') {
+      return res.status(403).json({
+        success: false,
+        error: 'Recipient account is currently frozen or suspended.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      recipient: {
+        id: String(recipient.id),
+        nickname: recipient.nickname || `Member_${String(recipient.id).slice(-4)}`,
+        phoneMasked: maskPhoneNumber(recipient.phone),
+        invitationCode: recipient.invitationCode || '',
+        vipLevel: Number(recipient.vipLevel) || 0,
+        avatar: recipient.avatar || 'HD',
+      },
+    });
+  } catch (err: any) {
+    console.error('[P2P Lookup Error]:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Lookup failed' });
+  }
+});
+
+// Shared atomic P2P execution helper (used by both user P2P & Admin P2P)
+async function performAtomicP2PTransfer(params: {
+  sender: any;
+  recipient: any;
+  amount: number;
+  sourceWallet: 'withdrawalBalance' | 'rechargeBalance';
+  targetWallet: 'withdrawalBalance' | 'rechargeBalance';
+  note?: string;
+  initiatedBy?: 'user' | 'admin';
+}) {
+  const { sender, recipient, amount, sourceWallet, targetWallet, note, initiatedBy = 'user' } = params;
+  const srcCol = sourceWallet === 'rechargeBalance' ? 'recharge_balance' : 'withdrawal_balance';
+  const dstCol = targetWallet === 'rechargeBalance' ? 'recharge_balance' : 'withdrawal_balance';
+
+  const db = getSqliteDb();
+  initSqliteUsersTable();
+  const nowIso = new Date().toISOString();
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const senderRow = db.prepare('SELECT * FROM platform_users WHERE id = ?').get(sender.id) as any;
+    const recipientRow = db.prepare('SELECT * FROM platform_users WHERE id = ?').get(recipient.id) as any;
+
+    if (!senderRow || !recipientRow) {
+      throw new Error('User record missing during atomic transfer');
+    }
+
+    const dbSenderBal = Number(senderRow[srcCol]) || 0;
+    if (dbSenderBal < amount) {
+      throw new Error('INSUFFICIENT_FUNDS');
+    }
+
+    const atomicSenderNext = Number((dbSenderBal - amount).toFixed(2));
+    const atomicRecipientNext = Number(((Number(recipientRow[dstCol]) || 0) + amount).toFixed(2));
+
+    let senderRaw: any = {};
+    try {
+      senderRaw = JSON.parse(senderRow.raw_json || '{}');
+    } catch {}
+    senderRaw[sourceWallet] = atomicSenderNext;
+    senderRaw.isExplicitZeroReset = atomicSenderNext === 0;
+    senderRaw.updatedAt = nowIso;
+
+    let recipientRaw: any = {};
+    try {
+      recipientRaw = JSON.parse(recipientRow.raw_json || '{}');
+    } catch {}
+    recipientRaw[targetWallet] = atomicRecipientNext;
+    recipientRaw.updatedAt = nowIso;
+
+    db.prepare(
+      `UPDATE platform_users SET ${srcCol} = ?, raw_json = ?, updated_at = datetime('now') WHERE id = ?`
+    ).run(atomicSenderNext, JSON.stringify(senderRaw), sender.id);
+
+    db.prepare(
+      `UPDATE platform_users SET ${dstCol} = ?, raw_json = ?, updated_at = datetime('now') WHERE id = ?`
+    ).run(atomicRecipientNext, JSON.stringify(recipientRaw), recipient.id);
+
+    db.exec('COMMIT');
+  } catch (sqlErr: any) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {}
+    throw sqlErr;
+  }
+
+  const updatedSender = getUserByIdOrPhoneFromSql(sender.id) || {
+    ...sender,
+    [sourceWallet]: Number(((Number(sender[sourceWallet]) || 0) - amount).toFixed(2)),
+  };
+  const updatedRecipient = getUserByIdOrPhoneFromSql(recipient.id) || {
+    ...recipient,
+    [targetWallet]: Number(((Number(recipient[targetWallet]) || 0) + amount).toFixed(2)),
+  };
+
+  const senderWithZeroFlag = {
+    ...updatedSender,
+    isExplicitZeroReset: Number(updatedSender[sourceWallet]) === 0,
+  };
+
+  const diskUsers = getCachedUsersBackup();
+  const updatedDisk = deduplicateAndMergeUsers(diskUsers, [senderWithZeroFlag, updatedRecipient]);
+  saveUsersBackup(updatedDisk);
+
+  upsertUser({
+    uid: updatedSender.id,
+    [sourceWallet]: updatedSender[sourceWallet],
+  }).catch(() => {});
+  upsertUser({
+    uid: updatedRecipient.id,
+    [targetWallet]: updatedRecipient[targetWallet],
+  }).catch(() => {});
+
+  const nowMs = Date.now();
+  const refBase = `${initiatedBy === 'admin' ? 'AP2P' : 'P2P'}${nowMs.toString().slice(-6)}${Math.floor(100 + Math.random() * 900)}`;
+  const cleanNote = String(note || '').trim().slice(0, 120);
+  const srcLabel = sourceWallet === 'withdrawalBalance' ? 'Withdrawal Balance' : 'Charged Balance';
+  const dstLabel = targetWallet === 'withdrawalBalance' ? 'Withdrawal Balance' : 'Charged Balance';
+  const timestampStr = new Date(nowMs).toLocaleString();
+  const adminPrefix = initiatedBy === 'admin' ? '[Admin] ' : '';
+
+  const senderTx = {
+    id: `tx-p2p-out-${nowMs}`,
+    userId: updatedSender.id,
+    type: 'p2p_send',
+    amount,
+    title: `${adminPrefix}P2P Transfer to ${updatedRecipient.nickname} (ID ${updatedRecipient.id})${cleanNote ? ` • ${cleanNote}` : ''}`,
+    timestamp: timestampStr,
+    createdAt: nowMs,
+    status: 'completed',
+    referenceNo: `${refBase}-OUT`,
+    paymentMethod: `${adminPrefix}P2P (${srcLabel} → ${dstLabel})`,
+    counterpartyId: updatedRecipient.id,
+    counterpartyName: updatedRecipient.nickname,
+    counterpartyPhone: updatedRecipient.phone,
+    senderId: updatedSender.id,
+    senderName: updatedSender.nickname,
+    senderPhone: updatedSender.phone,
+    recipientId: updatedRecipient.id,
+    recipientName: updatedRecipient.nickname,
+    recipientPhone: updatedRecipient.phone,
+    sourceWallet,
+    targetWallet,
+    initiatedBy,
+    note: cleanNote || undefined,
+  };
+
+  const recipientTx = {
+    id: `tx-p2p-in-${nowMs + 1}`,
+    userId: updatedRecipient.id,
+    type: 'p2p_receive',
+    amount,
+    title: `${adminPrefix}P2P Received from ${updatedSender.nickname} (ID ${updatedSender.id})${cleanNote ? ` • ${cleanNote}` : ''}`,
+    timestamp: timestampStr,
+    createdAt: nowMs,
+    status: 'completed',
+    referenceNo: `${refBase}-IN`,
+    paymentMethod: `${adminPrefix}P2P Credit (${dstLabel})`,
+    counterpartyId: updatedSender.id,
+    counterpartyName: updatedSender.nickname,
+    counterpartyPhone: updatedSender.phone,
+    senderId: updatedSender.id,
+    senderName: updatedSender.nickname,
+    senderPhone: updatedSender.phone,
+    recipientId: updatedRecipient.id,
+    recipientName: updatedRecipient.nickname,
+    recipientPhone: updatedRecipient.phone,
+    sourceWallet,
+    targetWallet,
+    initiatedBy,
+    note: cleanNote || undefined,
+  };
+
+  const allTxs = loadServerTransactions();
+  allTxs.unshift(recipientTx);
+  allTxs.unshift(senderTx);
+  saveServerTransactions(allTxs);
+  createTransaction(senderTx).catch(() => {});
+  createTransaction(recipientTx).catch(() => {});
+
+  return {
+    refBase,
+    nowIso,
+    senderWithZeroFlag,
+    updatedRecipient,
+    senderTx,
+    recipientTx,
+  };
+}
+
+// Execute atomic P2P wallet-to-wallet transfer
+app.post('/api/p2p/transfer', async (req, res) => {
+  const { senderId, recipientQuery, amount, sourceWallet, note } = req.body || {};
+  const cleanSenderId = String(senderId || '').trim();
+
+  if (!cleanSenderId) {
+    return res.status(400).json({ success: false, error: 'Sender authentication is required.' });
+  }
+  if (!recipientQuery || !String(recipientQuery).trim()) {
+    return res.status(400).json({ success: false, error: 'Recipient User ID, Phone, or Invite Code is required.' });
+  }
+
+  const liveSettings = loadServerPlatformSettings();
+  if (liveSettings.isP2PEnabled === false) {
+    return res.status(403).json({
+      success: false,
+      error: liveSettings.p2pNotice || 'P2P transfers are currently paused by Administrator.',
+    });
+  }
+
+  const minAmt = Math.max(0.01, Number(liveSettings.minP2PAmount) || 1);
+  const maxAmt = Math.max(minAmt, Number(liveSettings.maxP2PAmount) || 50000);
+  const transferAmount = Number(Number(amount).toFixed(2));
+  if (!Number.isFinite(transferAmount) || transferAmount < minAmt) {
+    return res.status(400).json({ success: false, error: `Minimum P2P transfer amount is $${minAmt.toFixed(2)}.` });
+  }
+  if (transferAmount > maxAmt) {
+    return res.status(400).json({ success: false, error: `Maximum single P2P transfer limit is $${maxAmt.toFixed(2)}.` });
+  }
+
+  if (p2pTransferLocks.has(cleanSenderId)) {
+    return res.status(429).json({
+      success: false,
+      error: 'A transfer is already processing for your account. Please wait a moment.',
+    });
+  }
+  p2pTransferLocks.add(cleanSenderId);
+
+  try {
+    const sender = await resolveAuthoritativeUserForP2P(cleanSenderId);
+    if (!sender) {
+      return res.status(404).json({ success: false, error: 'Sender account not found.' });
+    }
+    if (sender.status === 'frozen' || sender.status === 'suspended') {
+      return res.status(403).json({
+        success: false,
+        error: 'Your account is frozen or suspended. Please contact support.',
+      });
+    }
+
+    const recipient = await resolveAuthoritativeUserForP2P(String(recipientQuery).trim());
+    if (!recipient) {
+      return res.status(404).json({
+        success: false,
+        error: 'Recipient user not found. Please verify User ID, Mobile Number, or Invite Code.',
+      });
+    }
+
+    if (isSameUserForP2P(sender, recipient)) {
+      return res.status(400).json({
+        success: false,
+        error: `You cannot transfer funds to your own account (${sender.nickname || 'Member'} · ID ${sender.id}).`,
+      });
+    }
+
+    if (recipient.status === 'frozen' || recipient.status === 'suspended') {
+      return res.status(403).json({
+        success: false,
+        error: 'Recipient account is currently frozen or suspended.',
+      });
+    }
+
+    const srcWallet: 'withdrawalBalance' | 'rechargeBalance' =
+      sourceWallet === 'rechargeBalance' ? 'rechargeBalance' : 'withdrawalBalance';
+
+    // Always credit the receiver's Charged Balance (rechargeBalance) regardless of sender's payment method
+    const dstWallet: 'rechargeBalance' = 'rechargeBalance';
+
+    const currentSenderBal = Number(sender[srcWallet]) || 0;
+    if (currentSenderBal < transferAmount) {
+      const walletLabel = srcWallet === 'withdrawalBalance' ? 'Withdrawal Balance' : 'Charged Balance';
+      return res.status(400).json({
+        success: false,
+        error: `Insufficient ${walletLabel}. Available: $${currentSenderBal.toFixed(2)}`,
+      });
+    }
+
+    let transferResult;
+    try {
+      transferResult = await performAtomicP2PTransfer({
+        sender,
+        recipient,
+        amount: transferAmount,
+        sourceWallet: srcWallet,
+        targetWallet: dstWallet,
+        note,
+        initiatedBy: 'user',
+      });
+    } catch (sqlErr: any) {
+      if (sqlErr?.message === 'INSUFFICIENT_FUNDS') {
+        return res.status(400).json({ success: false, error: 'Insufficient wallet balance for P2P transfer.' });
+      }
+      throw sqlErr;
+    }
+
+    const { refBase, nowIso, senderWithZeroFlag, updatedRecipient, senderTx, recipientTx } = transferResult;
+
+    console.log(
+      `[P2P Transfer] ✅ ${senderWithZeroFlag.nickname} (${senderWithZeroFlag.id}) sent $${transferAmount.toFixed(2)} (${srcWallet} → ${dstWallet}) to ${updatedRecipient.nickname} (${updatedRecipient.id}) [Ref: ${refBase}]`
+    );
+
+    return res.json({
+      success: true,
+      referenceNo: refBase,
+      sender: senderWithZeroFlag,
+      recipientPreview: {
+        id: String(updatedRecipient.id),
+        nickname: updatedRecipient.nickname,
+        phoneMasked: maskPhoneNumber(updatedRecipient.phone),
+        invitationCode: updatedRecipient.invitationCode || '',
+        vipLevel: Number(updatedRecipient.vipLevel) || 0,
+        avatar: updatedRecipient.avatar || 'HD',
+      },
+      recipientWalletUpdate: {
+        id: String(updatedRecipient.id),
+        rechargeBalance: updatedRecipient.rechargeBalance,
+        withdrawalBalance: updatedRecipient.withdrawalBalance,
+        updatedAt: nowIso,
+      },
+      senderTransaction: senderTx,
+      recipientTransaction: recipientTx,
+      message: `Successfully transferred $${transferAmount.toFixed(2)} to ${updatedRecipient.nickname} (ID ${updatedRecipient.id})!`,
+    });
+  } catch (err: any) {
+    console.error('[P2P Transfer Error]:', err);
+    return res.status(500).json({ success: false, error: err.message || 'P2P transfer failed' });
+  } finally {
+    p2pTransferLocks.delete(cleanSenderId);
+  }
+});
+
+// Admin API: Consolidated P2P Transfer History & Analytics
+app.get('/api/admin/p2p/history', async (_req, res) => {
+  try {
+    const [dbTxs, usersList] = await Promise.all([
+      getAllTransactionsFromDb().catch(() => []),
+      getCombinedServerUsers().catch(() => []),
+    ]);
+    const backupTxs = loadServerTransactions();
+
+    const usersById = new Map<string, any>();
+    for (const u of usersList) {
+      if (u?.id) usersById.set(String(u.id).trim(), u);
+    }
+
+    const txMap = new Map<string, any>();
+    for (const tx of [...backupTxs, ...dbTxs]) {
+      if (!tx) continue;
+      if (tx.type !== 'p2p_send' && tx.type !== 'p2p_receive') continue;
+      const key = String(tx.referenceNo || tx.id || `p2p-${tx.createdAt || Date.now()}`);
+      txMap.set(key, { ...(txMap.get(key) || {}), ...tx });
+    }
+
+    const ledger = Array.from(txMap.values()).sort(
+      (a: any, b: any) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)
+    );
+
+    // Group paired -OUT and -IN records into unified Sender -> Receiver transfer items
+    const pairMap = new Map<string, any>();
+    for (const tx of ledger) {
+      const rawRef = String(tx.referenceNo || tx.id || '').trim();
+      const baseRef = rawRef.replace(/-(OUT|IN)$/i, '');
+      const existing = pairMap.get(baseRef) || {
+        referenceNo: baseRef,
+        amount: Math.abs(Number(tx.amount) || 0),
+        sourceWallet: tx.sourceWallet || 'withdrawalBalance',
+        targetWallet: tx.targetWallet || 'rechargeBalance',
+        status: tx.status || 'completed',
+        timestamp: tx.timestamp || '',
+        createdAt: Number(tx.createdAt) || 0,
+        note: tx.note || '',
+        initiatedBy: tx.initiatedBy || (baseRef.startsWith('AP2P') ? 'admin' : 'user'),
+        senderId: tx.senderId || '',
+        senderName: tx.senderName || '',
+        senderPhone: tx.senderPhone || '',
+        recipientId: tx.recipientId || '',
+        recipientName: tx.recipientName || '',
+        recipientPhone: tx.recipientPhone || '',
+      };
+
+      if (tx.type === 'p2p_send') {
+        const sUser = usersById.get(String(tx.userId || '').trim());
+        const rUser = usersById.get(String(tx.counterpartyId || '').trim());
+        existing.senderId = String(tx.userId || existing.senderId || '');
+        existing.senderName = sUser?.nickname || tx.senderName || existing.senderName || `ID ${existing.senderId}`;
+        existing.senderPhone = sUser?.phone || tx.senderPhone || existing.senderPhone || '';
+        existing.recipientId = String(tx.counterpartyId || existing.recipientId || '');
+        existing.recipientName = rUser?.nickname || tx.counterpartyName || existing.recipientName || `ID ${existing.recipientId}`;
+        existing.recipientPhone = rUser?.phone || tx.counterpartyPhone || existing.recipientPhone || '';
+        existing.sourceWallet = tx.sourceWallet || existing.sourceWallet;
+        existing.targetWallet = tx.targetWallet || existing.targetWallet;
+      } else if (tx.type === 'p2p_receive') {
+        const rUser = usersById.get(String(tx.userId || '').trim());
+        const sUser = usersById.get(String(tx.counterpartyId || '').trim());
+        existing.recipientId = String(tx.userId || existing.recipientId || '');
+        existing.recipientName = rUser?.nickname || tx.recipientName || existing.recipientName || `ID ${existing.recipientId}`;
+        existing.recipientPhone = rUser?.phone || tx.recipientPhone || existing.recipientPhone || '';
+        if (!existing.senderId && tx.counterpartyId) {
+          existing.senderId = String(tx.counterpartyId);
+        }
+        existing.senderName = sUser?.nickname || tx.counterpartyName || existing.senderName || (existing.senderId ? `ID ${existing.senderId}` : 'Member');
+        existing.senderPhone = sUser?.phone || tx.counterpartyPhone || existing.senderPhone || '';
+        existing.targetWallet = tx.targetWallet || existing.targetWallet;
+      }
+
+      if (!existing.note && tx.note) existing.note = tx.note;
+      if (!existing.timestamp && tx.timestamp) existing.timestamp = tx.timestamp;
+      if (!existing.createdAt && tx.createdAt) existing.createdAt = Number(tx.createdAt) || 0;
+      pairMap.set(baseRef, existing);
+    }
+
+    const transfers = Array.from(pairMap.values()).sort(
+      (a: any, b: any) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)
+    );
+
+    let totalVolume = 0;
+    let chargedSourceVolume = 0;
+    let withdrawalSourceVolume = 0;
+    let chargedSourceCount = 0;
+    let withdrawalSourceCount = 0;
+
+    for (const tr of transfers) {
+      const amt = Number(tr.amount) || 0;
+      totalVolume += amt;
+      if (tr.sourceWallet === 'rechargeBalance') {
+        chargedSourceVolume += amt;
+        chargedSourceCount += 1;
+      } else {
+        withdrawalSourceVolume += amt;
+        withdrawalSourceCount += 1;
+      }
+    }
+
+    return res.json({
+      success: true,
+      transfers,
+      ledger,
+      stats: {
+        totalTransfers: transfers.length,
+        totalVolume: Number(totalVolume.toFixed(2)),
+        chargedSourceVolume: Number(chargedSourceVolume.toFixed(2)),
+        withdrawalSourceVolume: Number(withdrawalSourceVolume.toFixed(2)),
+        chargedSourceCount,
+        withdrawalSourceCount,
+      },
+    });
+  } catch (err: any) {
+    console.error('[Admin P2P History Error]:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to fetch P2P history' });
+  }
+});
+
+// Admin API: Execute P2P Transfer between any two platform users
+app.post('/api/admin/p2p/transfer', async (req, res) => {
+  const { senderQuery, recipientQuery, amount, sourceWallet, targetWallet, note } = req.body || {};
+  const cleanSender = String(senderQuery || '').trim();
+  const cleanRecipient = String(recipientQuery || '').trim();
+
+  if (!cleanSender || !cleanRecipient) {
+    return res.status(400).json({
+      success: false,
+      error: 'Both sender and recipient identifiers are required.',
+    });
+  }
+
+  const transferAmount = Number(Number(amount).toFixed(2));
+  if (!Number.isFinite(transferAmount) || transferAmount <= 0) {
+    return res.status(400).json({ success: false, error: 'Valid positive transfer amount is required.' });
+  }
+
+  try {
+    const sender = await resolveAuthoritativeUserForP2P(cleanSender);
+    if (!sender) {
+      return res.status(404).json({ success: false, error: 'Sender user account not found.' });
+    }
+    const recipient = await resolveAuthoritativeUserForP2P(cleanRecipient);
+    if (!recipient) {
+      return res.status(404).json({ success: false, error: 'Recipient user account not found.' });
+    }
+    if (isSameUserForP2P(sender, recipient)) {
+      return res.status(400).json({ success: false, error: 'Sender and recipient cannot be the same account.' });
+    }
+
+    const srcWallet: 'withdrawalBalance' | 'rechargeBalance' =
+      sourceWallet === 'withdrawalBalance' ? 'withdrawalBalance' : 'rechargeBalance';
+    const dstWallet: 'withdrawalBalance' | 'rechargeBalance' =
+      targetWallet === 'withdrawalBalance' ? 'withdrawalBalance' : 'rechargeBalance';
+
+    const currentSenderBal = Number(sender[srcWallet]) || 0;
+    if (currentSenderBal < transferAmount) {
+      return res.status(400).json({
+        success: false,
+        error: `Sender has insufficient ${srcWallet === 'withdrawalBalance' ? 'Withdrawal' : 'Charged'} Balance ($${currentSenderBal.toFixed(2)}).`,
+      });
+    }
+
+    const result = await performAtomicP2PTransfer({
+      sender,
+      recipient,
+      amount: transferAmount,
+      sourceWallet: srcWallet,
+      targetWallet: dstWallet,
+      note: note || 'Admin Executed P2P Transfer',
+      initiatedBy: 'admin',
+    });
+
+    console.log(
+      `[Admin P2P Transfer] ✅ Admin transferred $${transferAmount.toFixed(2)} from ${result.senderWithZeroFlag.nickname} (${result.senderWithZeroFlag.id}) to ${result.updatedRecipient.nickname} (${result.updatedRecipient.id}) [Ref: ${result.refBase}]`
+    );
+
+    return res.json({
+      success: true,
+      referenceNo: result.refBase,
+      sender: result.senderWithZeroFlag,
+      recipient: result.updatedRecipient,
+      senderTransaction: result.senderTx,
+      recipientTransaction: result.recipientTx,
+      message: `Admin P2P Transfer of $${transferAmount.toFixed(2)} completed (${result.senderWithZeroFlag.nickname} → ${result.updatedRecipient.nickname}).`,
+    });
+  } catch (err: any) {
+    if (err?.message === 'INSUFFICIENT_FUNDS') {
+      return res.status(400).json({ success: false, error: 'Sender has insufficient wallet balance.' });
+    }
+    console.error('[Admin P2P Transfer Error]:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Admin P2P transfer failed' });
   }
 });
 
@@ -1920,12 +2723,13 @@ app.get('/api/referral/team/:userId', async (req, res) => {
 
     const allTxs = loadServerTransactions();
     const allOrders = loadServerOrders();
+    const [tier1Rate, tier2Rate, tier3Rate] = await getEffectiveCommissionRatesServer();
 
     const computeDownlineData = (u: any, level: 1 | 2 | 3) => {
       const cleanP = u.phone ? u.phone.replace(/\D/g, '').slice(-10) : '';
       const masked = cleanP.length === 10 ? `+91 ${cleanP.slice(0, 3)}****${cleanP.slice(-3)}` : `User #${u.id}`;
       const join = u.createdAt ? u.createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
-      const rate = level === 1 ? 10 : level === 2 ? 3 : 1;
+      const rate = level === 1 ? tier1Rate : level === 2 ? tier2Rate : tier3Rate;
       const uId = String(u.id).trim();
 
       // 1. Calculate REAL actual recharge / investment:
@@ -2055,7 +2859,7 @@ export async function distributeReferralCommissionServer(
   amount: number,
   actionType: 'recharge' | 'investment' | 'daily_income',
   referenceId?: string
-): Promise<{ success: boolean; credited: any[] }> {
+): Promise<{ success: boolean; rates?: [number, number, number]; credited: any[] }> {
   // USER SPECIFICATION: Upliner commission is ONLY granted when downline user BUYS/INVESTS in a product!
   // No referral commission is granted simply for recharging / depositing funds.
   if (actionType === 'recharge') {
@@ -2218,31 +3022,48 @@ export async function distributeReferralCommissionServer(
       : 'Recharge / Deposit';
 
   const credited: any[] = [];
-  const rates = [10, 3, 1]; // Tier 1: 10%, Tier 2: 3%, Tier 3: 1%
+  const rates = await getEffectiveCommissionRatesServer();
   const refSuffix = cleanRef || `${payer.id}-${Date.now().toString().slice(-4)}`;
+
+  const ensureAndCreditUpliner = (uplinerObj: any, commAmount: number) => {
+    let updated = creditUserCommissionInSql(uplinerObj.id, commAmount);
+    if (!updated) {
+      try {
+        upsertUserInSql(uplinerObj);
+        updated = creditUserCommissionInSql(uplinerObj.id, commAmount);
+      } catch {}
+    }
+    if (!updated && uplinerObj.phone) {
+      updated = creditUserCommissionInSql(uplinerObj.phone, commAmount);
+    }
+    if (updated) {
+      saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [updated]));
+      upsertUser({
+        uid: updated.id,
+        phone: updated.phone,
+        withdrawalBalance: updated.withdrawalBalance,
+        totalCommissionEarned: updated.totalCommissionEarned,
+      }).catch(() => {});
+    }
+    return updated;
+  };
 
   // 1. Tier 1 Inviter (Direct upliner)
   const tier1 = findUpliner(payer.inviterId, payer.invitedBy);
   if (tier1 && String(tier1.id) !== String(payer.id)) {
     const comm1 = Number(((numAmount * rates[0]) / 100).toFixed(2));
-    if (comm1 > 0) {
-      const updated1 = creditUserCommissionInSql(tier1.id, comm1);
-      if (updated1) {
-        saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [updated1]));
-        upsertUser({
-          uid: updated1.id,
-          phone: updated1.phone,
-          withdrawalBalance: updated1.withdrawalBalance,
-          totalCommissionEarned: updated1.totalCommissionEarned,
-        }).catch(() => {});
-      }
+    if (rates[0] > 0 && comm1 > 0) {
+      const updated1 = ensureAndCreditUpliner(tier1, comm1);
       // Record server commission transaction
+      let tx1: any = null;
       try {
         const txList = loadServerTransactions();
-        const tx1 = {
+        tx1 = {
           id: `tx-comm-${Date.now()}-1`,
           userId: tier1.id,
           phone: tier1.phone || '',
+          downlineUserId: payer.id,
+          downlinePhone: payer.phone || '',
           type: 'commission',
           amount: comm1,
           title: `Tier 1 Commission (${rates[0]}%) from ${payer.nickname || payer.phone || 'downline'} - ${actionLabel}`,
@@ -2257,32 +3078,34 @@ export async function distributeReferralCommissionServer(
         createTransaction(tx1).catch(() => {});
       } catch (txErr) {}
 
-      credited.push({ tier: 1, userId: tier1.id, nickname: tier1.nickname, amount: comm1, rate: rates[0] });
-      console.log(`[Referral Commission] Credited Tier 1 ($${comm1}) to ${tier1.nickname || tier1.id} from ${payer.nickname || payer.id} for ${actionLabel} [Ref: ${refSuffix}]`);
+      credited.push({
+        tier: 1,
+        userId: tier1.id,
+        nickname: tier1.nickname,
+        amount: comm1,
+        rate: rates[0],
+        updatedUser: updated1,
+        transaction: tx1,
+      });
+      console.log(`[Referral Commission] Credited Tier 1 (${rates[0]}% = $${comm1}) to ${tier1.nickname || tier1.id} from ${payer.nickname || payer.id} for ${actionLabel} [Ref: ${refSuffix}]`);
     }
 
     // 2. Tier 2 Inviter (Upline's upliner)
     const tier2 = findUpliner(tier1.inviterId, tier1.invitedBy);
     if (tier2 && String(tier2.id) !== String(payer.id) && String(tier2.id) !== String(tier1.id)) {
       const comm2 = Number(((numAmount * rates[1]) / 100).toFixed(2));
-      if (comm2 > 0) {
-        const updated2 = creditUserCommissionInSql(tier2.id, comm2);
-        if (updated2) {
-          saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [updated2]));
-          upsertUser({
-            uid: updated2.id,
-            phone: updated2.phone,
-            withdrawalBalance: updated2.withdrawalBalance,
-            totalCommissionEarned: updated2.totalCommissionEarned,
-          }).catch(() => {});
-        }
+      if (rates[1] > 0 && comm2 > 0) {
+        const updated2 = ensureAndCreditUpliner(tier2, comm2);
         // Record server commission transaction
+        let tx2: any = null;
         try {
           const txList = loadServerTransactions();
-          const tx2 = {
+          tx2 = {
             id: `tx-comm-${Date.now()}-2`,
             userId: tier2.id,
             phone: tier2.phone || '',
+            downlineUserId: payer.id,
+            downlinePhone: payer.phone || '',
             type: 'commission',
             amount: comm2,
             title: `Tier 2 Commission (${rates[1]}%) from ${payer.nickname || payer.phone || 'downline'} - ${actionLabel}`,
@@ -2297,32 +3120,34 @@ export async function distributeReferralCommissionServer(
           createTransaction(tx2).catch(() => {});
         } catch (txErr) {}
 
-        credited.push({ tier: 2, userId: tier2.id, nickname: tier2.nickname, amount: comm2, rate: rates[1] });
-        console.log(`[Referral Commission] Credited Tier 2 ($${comm2}) to ${tier2.nickname || tier2.id} from ${payer.nickname || payer.id} for ${actionLabel} [Ref: ${refSuffix}]`);
+        credited.push({
+          tier: 2,
+          userId: tier2.id,
+          nickname: tier2.nickname,
+          amount: comm2,
+          rate: rates[1],
+          updatedUser: updated2,
+          transaction: tx2,
+        });
+        console.log(`[Referral Commission] Credited Tier 2 (${rates[1]}% = $${comm2}) to ${tier2.nickname || tier2.id} from ${payer.nickname || payer.id} for ${actionLabel} [Ref: ${refSuffix}]`);
       }
 
       // 3. Tier 3 Inviter (Tier 2's upliner)
       const tier3 = findUpliner(tier2.inviterId, tier2.invitedBy);
       if (tier3 && String(tier3.id) !== String(payer.id) && String(tier3.id) !== String(tier1.id) && String(tier3.id) !== String(tier2.id)) {
         const comm3 = Number(((numAmount * rates[2]) / 100).toFixed(2));
-        if (comm3 > 0) {
-          const updated3 = creditUserCommissionInSql(tier3.id, comm3);
-          if (updated3) {
-            saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [updated3]));
-            upsertUser({
-              uid: updated3.id,
-              phone: updated3.phone,
-              withdrawalBalance: updated3.withdrawalBalance,
-              totalCommissionEarned: updated3.totalCommissionEarned,
-            }).catch(() => {});
-          }
+        if (rates[2] > 0 && comm3 > 0) {
+          const updated3 = ensureAndCreditUpliner(tier3, comm3);
           // Record server commission transaction
+          let tx3: any = null;
           try {
             const txList = loadServerTransactions();
-            const tx3 = {
+            tx3 = {
               id: `tx-comm-${Date.now()}-3`,
               userId: tier3.id,
               phone: tier3.phone || '',
+              downlineUserId: payer.id,
+              downlinePhone: payer.phone || '',
               type: 'commission',
               amount: comm3,
               title: `Tier 3 Commission (${rates[2]}%) from ${payer.nickname || payer.phone || 'downline'} - ${actionLabel}`,
@@ -2337,14 +3162,22 @@ export async function distributeReferralCommissionServer(
             createTransaction(tx3).catch(() => {});
           } catch (txErr) {}
 
-          credited.push({ tier: 3, userId: tier3.id, nickname: tier3.nickname, amount: comm3, rate: rates[2] });
-          console.log(`[Referral Commission] Credited Tier 3 ($${comm3}) to ${tier3.nickname || tier3.id} from ${payer.nickname || payer.id} for ${actionLabel} [Ref: ${refSuffix}]`);
+          credited.push({
+            tier: 3,
+            userId: tier3.id,
+            nickname: tier3.nickname,
+            amount: comm3,
+            rate: rates[2],
+            updatedUser: updated3,
+            transaction: tx3,
+          });
+          console.log(`[Referral Commission] Credited Tier 3 (${rates[2]}% = $${comm3}) to ${tier3.nickname || tier3.id} from ${payer.nickname || payer.id} for ${actionLabel} [Ref: ${refSuffix}]`);
         }
       }
     }
   }
 
-  return { success: true, credited };
+  return { success: true, rates, credited };
 }
 
 // Global Referral Income Reconciliation:
@@ -2464,7 +3297,8 @@ export async function reconcileAllReferralStatsServer(targetUserId?: string): Pr
         return Boolean(matchesInviterId || matchesInvitedBy);
       });
 
-      // Compute Total Referral Commission Contributed
+      // Compute Total Referral Commission Contributed using live Admin-configured rates
+      const [t1Rate, t2Rate, t3Rate] = await getEffectiveCommissionRatesServer();
       const getRealBase = (u: any) => {
         const inv = Number(u.totalInvested) || 0;
         const rec = Number(u.rechargeBalance) || 0;
@@ -2473,17 +3307,17 @@ export async function reconcileAllReferralStatsServer(targetUserId?: string): Pr
 
       let tier1Comm = 0;
       tier1Users.forEach((u) => {
-        tier1Comm += getRealBase(u) * 0.10;
+        tier1Comm += (getRealBase(u) * t1Rate) / 100;
       });
 
       let tier2Comm = 0;
       tier2Users.forEach((u) => {
-        tier2Comm += getRealBase(u) * 0.03;
+        tier2Comm += (getRealBase(u) * t2Rate) / 100;
       });
 
       let tier3Comm = 0;
       tier3Users.forEach((u) => {
-        tier3Comm += getRealBase(u) * 0.01;
+        tier3Comm += (getRealBase(u) * t3Rate) / 100;
       });
 
       const totalCalculatedCommission = Number((tier1Comm + tier2Comm + tier3Comm).toFixed(2));
@@ -3084,23 +3918,42 @@ function saveServerOrders(ordersList: any[]): void {
   }
 }
 
-// Safe merge of two order instances, preserving completed status, highest daysElapsed, and newest claim timestamps
+// Safe merge of two order instances, preserving completed status, highest daysElapsed, and newest claim/reset timestamps
 function mergeOrderSafe(existing: any, incoming: any): any {
   if (!existing) return incoming;
   if (!incoming) return existing;
 
-  const isExistingDone = existing.status === 'completed' || (Number(existing.daysElapsed) || 0) >= (Number(existing.cycleDays) || 0);
-  const isIncomingDone = incoming.status === 'completed' || (Number(incoming.daysElapsed) || 0) >= (Number(incoming.cycleDays) || 0);
+  const existingElapsed = Number(existing.daysElapsed) || 0;
+  const incomingElapsed = Number(incoming.daysElapsed) || 0;
+  const isExistingDone = existing.status === 'completed' || existingElapsed >= (Number(existing.cycleDays) || 0);
+  const isIncomingDone = incoming.status === 'completed' || incomingElapsed >= (Number(incoming.cycleDays) || 0);
   const finalStatus = isExistingDone || isIncomingDone ? 'completed' : (incoming.status || existing.status);
 
+  const existingUpdatedAt = existing.updatedAt ? Date.parse(existing.updatedAt) : 0;
+  const incomingUpdatedAt = incoming.updatedAt ? Date.parse(incoming.updatedAt) : 0;
   const existingClaim = Number(existing.lastClaimTimestamp) || 0;
   const incomingClaim = Number(incoming.lastClaimTimestamp) || 0;
-  const useIncoming = incomingClaim >= existingClaim;
 
-  const lastClaimTimestamp = Math.max(existingClaim, incomingClaim) || null;
-  const daysElapsed = Math.max(Number(existing.daysElapsed) || 0, Number(incoming.daysElapsed) || 0);
+  let useIncoming = false;
+  if (incomingElapsed > existingElapsed) {
+    useIncoming = true;
+  } else if (existingElapsed > incomingElapsed) {
+    useIncoming = false;
+  } else if (incomingUpdatedAt && existingUpdatedAt && incomingUpdatedAt !== existingUpdatedAt) {
+    // Respect explicit admin timer resets or updates when daysElapsed is equal
+    useIncoming = incomingUpdatedAt > existingUpdatedAt;
+  } else {
+    useIncoming = incomingClaim >= existingClaim;
+  }
+
+  const lastClaimTimestamp = useIncoming
+    ? (incoming.lastClaimTimestamp ?? existing.lastClaimTimestamp ?? null)
+    : (existing.lastClaimTimestamp ?? incoming.lastClaimTimestamp ?? null);
+  const daysElapsed = Math.max(existingElapsed, incomingElapsed);
   const totalAccrued = Math.max(Number(existing.totalAccrued) || 0, Number(incoming.totalAccrued) || 0);
-  const nextClaimTimestamp = useIncoming ? (incoming.nextClaimTimestamp || existing.nextClaimTimestamp) : (existing.nextClaimTimestamp || incoming.nextClaimTimestamp);
+  const nextClaimTimestamp = useIncoming
+    ? (incoming.nextClaimTimestamp || existing.nextClaimTimestamp)
+    : (existing.nextClaimTimestamp || incoming.nextClaimTimestamp);
 
   return {
     ...existing,
@@ -3352,14 +4205,19 @@ app.post(['/api/orders', '/api/admin/orders'], async (req, res) => {
       }
     }
 
-    // 5. Concurrently distribute multi-tier referral commissions to upliners on brand new purchase
+    // 5. Distribute multi-tier referral commissions to upliners on brand new purchase using live Admin rates
+    let commissionResult: any = { success: true, credited: [] };
     if (isNewPurchase && orderPrice > 0 && (enriched.userId || enriched.userPhone)) {
-      distributeReferralCommissionServer(
-        enriched.userId || enriched.userPhone,
-        orderPrice,
-        'investment',
-        enriched.id
-      ).catch((refErr) => console.warn('Order referral commission notice:', refErr));
+      try {
+        commissionResult = await distributeReferralCommissionServer(
+          enriched.userId || enriched.userPhone,
+          orderPrice,
+          'investment',
+          enriched.id
+        );
+      } catch (refErr) {
+        console.warn('Order referral commission notice:', refErr);
+      }
     }
 
     console.log(`[Permanent SQL Save] Order ${enriched.id} (${enriched.productName}) for User ${enriched.userId} saved permanently in SQL!`);
@@ -3367,6 +4225,7 @@ app.post(['/api/orders', '/api/admin/orders'], async (req, res) => {
       success: true,
       message: 'Order saved permanently in SQL database!',
       order: enriched,
+      commissionResult,
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
@@ -3702,16 +4561,25 @@ app.post('/api/orders/:id/action', async (req, res) => {
     const { id } = req.params;
     const { action, reason, refundAmount, refundWallet, customEarnings } = req.body;
     const diskOrders = loadServerOrders();
-    const allUsers = getCachedUsersBackup();
-    const idx = diskOrders.findIndex((o) => String(o.id) === String(id));
+    const sqlOrders = getAllOrdersFromSql();
+    const allUsers = await getCombinedServerUsers();
 
-    if (idx === -1) {
+    let idx = diskOrders.findIndex((o) => String(o.id) === String(id));
+    let currentOrder = idx >= 0 ? diskOrders[idx] : sqlOrders.find((o) => String(o.id) === String(id));
+
+    if (!currentOrder) {
       return res.status(404).json({ success: false, error: 'Order not found' });
     }
+    if (idx === -1) {
+      diskOrders.unshift(currentOrder);
+      idx = 0;
+    }
 
-    const currentOrder = diskOrders[idx];
     const now = Date.now();
     let message = '';
+    let updatedUserRecord: any = null;
+    let actionTx: any = null;
+    let actionCommissionResult: any = null;
 
     if (action === 'approve') {
       currentOrder.status = 'active';
@@ -3721,7 +4589,14 @@ app.post('/api/orders/:id/action', async (req, res) => {
       currentOrder.nextClaimTimestamp = now + 24 * 60 * 60 * 1000;
       message = `Order ${id} approved & activated! 24h dividend cycle initiated.`;
       if (currentOrder.price && currentOrder.userId) {
-        distributeReferralCommissionServer(currentOrder.userId, Number(currentOrder.price), 'investment', currentOrder.id).catch(() => {});
+        try {
+          actionCommissionResult = await distributeReferralCommissionServer(
+            currentOrder.userId,
+            Number(currentOrder.price),
+            'investment',
+            currentOrder.id
+          );
+        } catch {}
       }
     } else if (action === 'pause') {
       currentOrder.status = 'paused';
@@ -3741,35 +4616,54 @@ app.post('/api/orders/:id/action', async (req, res) => {
 
       if (refund > 0 && currentOrder.userId) {
         const targetUserId = String(currentOrder.userId).trim();
-        const userIdx = allUsers.findIndex(
-          (u) => String(u.id).trim() === targetUserId || String(u.uid).trim() === targetUserId || (u.phone && String(u.phone).trim() === targetUserId)
+        const walletKey: 'withdrawalBalance' | 'rechargeBalance' =
+          refundWallet === 'withdrawalBalance' ? 'withdrawalBalance' : 'rechargeBalance';
+
+        const sqlUpdated = creditUserWalletDeltaInSql(targetUserId, walletKey, refund, {
+          totalInvestedDelta: -(Number(currentOrder.price) || 0),
+        });
+
+        const targetUser = sqlUpdated || allUsers.find(
+          (u) =>
+            String(u.id).trim() === targetUserId ||
+            String(u.uid || '').trim() === targetUserId ||
+            (u.phone && String(u.phone).trim() === targetUserId)
         );
 
-        if (userIdx >= 0) {
-          const u = allUsers[userIdx];
-          const walletKey = refundWallet === 'withdrawalBalance' ? 'withdrawalBalance' : 'rechargeBalance';
-          u[walletKey] = Number(((u[walletKey] || 0) + refund).toFixed(2));
-          // Deduct from totalInvested if appropriate
-          u.totalInvested = Math.max(0, Number(((u.totalInvested || 0) - (currentOrder.price || 0)).toFixed(2)));
-          saveUsersBackup(allUsers);
+        if (targetUser) {
+          if (!sqlUpdated) {
+            targetUser[walletKey] = Number(((targetUser[walletKey] || 0) + refund).toFixed(2));
+            targetUser.totalInvested = Math.max(0, Number(((targetUser.totalInvested || 0) - (currentOrder.price || 0)).toFixed(2)));
+            upsertUserInSql(targetUser);
+          }
+          updatedUserRecord = getUserByIdOrPhoneFromSql(targetUser.id) || targetUser;
 
-          // Record refund transaction
+          saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [updatedUserRecord]));
+          upsertUser({
+            uid: updatedUserRecord.id,
+            phone: updatedUserRecord.phone,
+            [walletKey]: updatedUserRecord[walletKey],
+            totalInvested: updatedUserRecord.totalInvested,
+          }).catch(() => {});
+
           const refundTx = {
-            id: `tx-ref-${Date.now()}`,
-            userId: u.id,
+            id: `tx-ref-${now}`,
+            userId: updatedUserRecord.id,
+            phone: updatedUserRecord.phone || '',
             type: 'bonus',
             amount: refund,
             title: `Admin Refund: Order ${currentOrder.productName} (#${currentOrder.id})`,
-            timestamp: new Date().toLocaleString(),
-            createdAt: Date.now(),
+            timestamp: new Date(now).toLocaleString(),
+            createdAt: now,
             status: 'completed',
             referenceNo: `REFUND-${currentOrder.id}`,
             paymentMethod: `Wallet Credit (${walletKey === 'withdrawalBalance' ? 'Withdrawal Balance' : 'Add Money Balance'})`,
           };
-
-          try {
-            await createTransaction(refundTx);
-          } catch {}
+          actionTx = refundTx;
+          const allTxs = loadServerTransactions();
+          allTxs.unshift(refundTx);
+          saveServerTransactions(allTxs);
+          createTransaction(refundTx).catch(() => {});
         }
       }
       message = `Order ${id} cancelled. ${refund > 0 ? `$${refund} refunded to user.` : 'No refund issued.'}`;
@@ -3777,7 +4671,7 @@ app.post('/api/orders/:id/action', async (req, res) => {
       const dividendAmount = customEarnings !== undefined ? Number(customEarnings) : Number(currentOrder.dailyEarnings || 0);
       currentOrder.daysElapsed = (currentOrder.daysElapsed || 0) + 1;
       currentOrder.totalAccrued = Number(((currentOrder.totalAccrued || 0) + dividendAmount).toFixed(2));
-      currentOrder.lastClaimDate = new Date().toISOString().split('T')[0];
+      currentOrder.lastClaimDate = new Date(now).toISOString().split('T')[0];
       currentOrder.lastClaimTimestamp = now;
       currentOrder.nextClaimTimestamp = now + 24 * 60 * 60 * 1000;
 
@@ -3787,49 +4681,70 @@ app.post('/api/orders/:id/action', async (req, res) => {
 
       if (dividendAmount > 0 && currentOrder.userId) {
         const targetUserId = String(currentOrder.userId).trim();
-        const userIdx = allUsers.findIndex(
-          (u) => String(u.id).trim() === targetUserId || String(u.uid).trim() === targetUserId || (u.phone && String(u.phone).trim() === targetUserId)
+        const sqlUpdated = creditUserDividendInSql(targetUserId, dividendAmount);
+        const targetUser = sqlUpdated || allUsers.find(
+          (u) =>
+            String(u.id).trim() === targetUserId ||
+            String(u.uid || '').trim() === targetUserId ||
+            (u.phone && String(u.phone).trim() === targetUserId)
         );
 
-        if (userIdx >= 0) {
-          const u = allUsers[userIdx];
-          u.withdrawalBalance = Number(((u.withdrawalBalance || 0) + dividendAmount).toFixed(2));
-          u.productRevenue = Number(((u.productRevenue || 0) + dividendAmount).toFixed(2));
-          saveUsersBackup(allUsers);
+        if (targetUser) {
+          if (!sqlUpdated) {
+            targetUser.withdrawalBalance = Number(((targetUser.withdrawalBalance || 0) + dividendAmount).toFixed(2));
+            targetUser.productRevenue = Number(((targetUser.productRevenue || 0) + dividendAmount).toFixed(2));
+            upsertUserInSql(targetUser);
+          }
+          updatedUserRecord = getUserByIdOrPhoneFromSql(targetUser.id) || targetUser;
+
+          saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [updatedUserRecord]));
+          upsertUser({
+            uid: updatedUserRecord.id,
+            phone: updatedUserRecord.phone,
+            withdrawalBalance: updatedUserRecord.withdrawalBalance,
+            productRevenue: updatedUserRecord.productRevenue,
+          }).catch(() => {});
 
           const divTx = {
-            id: `tx-adm-div-${Date.now()}`,
-            userId: u.id,
+            id: `tx-adm-div-${now}`,
+            userId: updatedUserRecord.id,
+            phone: updatedUserRecord.phone || '',
             type: 'earnings',
             amount: dividendAmount,
             title: `Manual Admin Yield: ${currentOrder.productName} (Day ${currentOrder.daysElapsed})`,
-            timestamp: new Date().toLocaleString(),
-            createdAt: Date.now(),
+            timestamp: new Date(now).toLocaleString(),
+            createdAt: now,
             status: 'completed',
-            referenceNo: `DIV-${currentOrder.id}-${Date.now().toString().slice(-6)}`,
+            referenceNo: `DIV-${currentOrder.id}-${now.toString().slice(-6)}`,
             paymentMethod: 'Contract Daily Settlement',
           };
-          try {
-            await createTransaction(divTx);
-          } catch {}
+          actionTx = divTx;
+          const allTxs = loadServerTransactions();
+          allTxs.unshift(divTx);
+          saveServerTransactions(allTxs);
+          createTransaction(divTx).catch(() => {});
 
           // Distribute multi-tier referral commissions to upliners on daily yield
-          distributeReferralCommissionServer(
-            targetUserId,
-            dividendAmount,
-            'daily_income',
-            currentOrder.id
-          ).catch((commErr) => console.warn('Dividend referral commission notice:', commErr));
+          try {
+            actionCommissionResult = await distributeReferralCommissionServer(
+              updatedUserRecord.id,
+              dividendAmount,
+              'daily_income',
+              `ADM-DIV-${currentOrder.id}-${now}`
+            );
+          } catch (commErr) {
+            console.warn('Dividend referral commission notice:', commErr);
+          }
         }
       }
-      message = `Dividend of $${dividendAmount} successfully paid to user wallet!`;
+      message = `Dividend of $${dividendAmount.toFixed(2)} successfully paid to user wallet!`;
     } else if (action === 'reset_timer') {
       currentOrder.nextClaimTimestamp = now - 1000;
       currentOrder.lastClaimTimestamp = now - (24 * 60 * 60 * 1000) - 1000;
       message = `24h cooldown timer reset. User can now claim dividend immediately.`;
     }
 
-    const updated = enrichOrderWithUserData({ ...currentOrder, updatedAt: new Date().toISOString() }, allUsers);
+    const updated = enrichOrderWithUserData({ ...currentOrder, updatedAt: new Date(now).toISOString() }, allUsers);
     diskOrders[idx] = updated;
     saveServerOrders(diskOrders);
 
@@ -3844,7 +4759,14 @@ app.post('/api/orders/:id/action', async (req, res) => {
       await upsertDbOrder(updated);
     } catch {}
 
-    return res.json({ success: true, message, order: updated });
+    return res.json({
+      success: true,
+      message,
+      order: updated,
+      ...(updatedUserRecord ? { user: updatedUserRecord } : {}),
+      ...(actionTx ? { transaction: actionTx } : {}),
+      ...(actionCommissionResult ? { commissionResult: actionCommissionResult } : {}),
+    });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -3888,54 +4810,138 @@ app.post(['/api/admin/transactions/purge-all', '/api/transactions/purge-all'], a
   }
 });
 
+function getTxStatusRank(status: any): number {
+  const s = String(status || '').trim().toLowerCase();
+  if (s === 'completed' || s === 'rejected') return 3;
+  if (s === 'processing') return 1;
+  return 0;
+}
+
+function isNumericOnlyId(val: any): boolean {
+  return val !== undefined && val !== null && /^\d+$/.test(String(val).trim());
+}
+
+function mergeServerTx(existing: any, incoming: any): any {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+
+  const existingRank = getTxStatusRank(existing.status);
+  const incomingRank = getTxStatusRank(incoming.status);
+
+  // Start with existing, apply non-empty incoming fields, then enforce canonical ID & terminal status
+  const merged: any = { ...existing };
+  for (const [k, v] of Object.entries(incoming)) {
+    if (v !== undefined && v !== null && v !== '') {
+      merged[k] = v;
+    }
+  }
+
+  // Never let a Postgres numeric serial ID clobber a canonical string ID (like "tx-179...")
+  const existingId = existing.id !== undefined && existing.id !== null ? String(existing.id).trim() : '';
+  const incomingId = incoming.id !== undefined && incoming.id !== null ? String(incoming.id).trim() : '';
+  if (existingId && !isNumericOnlyId(existingId)) {
+    merged.id = existingId;
+    if (isNumericOnlyId(incomingId)) merged.sqlId = Number(incomingId);
+  } else if (incomingId && !isNumericOnlyId(incomingId)) {
+    merged.id = incomingId;
+    if (isNumericOnlyId(existingId)) merged.sqlId = Number(existingId);
+  } else {
+    merged.id = existingId || incomingId;
+  }
+  if (existing.sqlId && !merged.sqlId) merged.sqlId = existing.sqlId;
+
+  // Terminal status dominance: once 'completed' or 'rejected', NEVER downgrade back to 'processing'
+  if (existingRank > incomingRank) {
+    merged.status = existing.status;
+    if (existing.utrNumber) merged.utrNumber = existing.utrNumber;
+    if (existing.rejectReason) merged.rejectReason = existing.rejectReason;
+    if (existing.updatedAt) merged.updatedAt = existing.updatedAt;
+  } else {
+    if (!merged.utrNumber && existing.utrNumber) merged.utrNumber = existing.utrNumber;
+  }
+
+  // Keep WTH.../REC... original referenceNo if one side has it and the other was mutated to UTR...
+  const exRef = String(existing.referenceNo || '').trim();
+  const inRef = String(incoming.referenceNo || '').trim();
+  if (exRef.startsWith('WTH') && inRef.startsWith('UTR')) {
+    merged.referenceNo = exRef;
+    if (!merged.utrNumber) merged.utrNumber = inRef;
+  } else if (inRef.startsWith('WTH') && exRef.startsWith('UTR')) {
+    merged.referenceNo = inRef;
+    if (!merged.utrNumber) merged.utrNumber = exRef;
+  }
+
+  return merged;
+}
+
+function mergeTxListsForRead(backupTxs: any[], dbTxs: any[]): any[] {
+  const map = new Map<string, any>();
+  const keyLookup = new Map<string, string>(); // maps any id / sqlId / referenceNo -> primary map key
+
+  const ingest = (tx: any) => {
+    if (!tx) return;
+    const rawId = tx.id !== undefined && tx.id !== null ? String(tx.id).trim() : '';
+    const rawSqlId = tx.sqlId !== undefined && tx.sqlId !== null ? String(tx.sqlId).trim() : '';
+    const rawRef = tx.referenceNo ? String(tx.referenceNo).trim() : '';
+
+    let primaryKey =
+      (rawRef && keyLookup.get(`ref:${rawRef}`)) ||
+      (rawId && keyLookup.get(`id:${rawId}`)) ||
+      (rawSqlId && keyLookup.get(`id:${rawSqlId}`)) ||
+      rawRef ||
+      rawId ||
+      `tx-${tx.createdAt || Date.now()}`;
+
+    const merged = map.has(primaryKey) ? mergeServerTx(map.get(primaryKey), tx) : { ...tx };
+    map.set(primaryKey, merged);
+
+    if (rawRef) keyLookup.set(`ref:${rawRef}`, primaryKey);
+    if (rawId) keyLookup.set(`id:${rawId}`, primaryKey);
+    if (rawSqlId) keyLookup.set(`id:${rawSqlId}`, primaryKey);
+    if (merged.referenceNo) keyLookup.set(`ref:${String(merged.referenceNo).trim()}`, primaryKey);
+    if (merged.id) keyLookup.set(`id:${String(merged.id).trim()}`, primaryKey);
+    if (merged.sqlId) keyLookup.set(`id:${String(merged.sqlId).trim()}`, primaryKey);
+  };
+
+  for (const tx of backupTxs) ingest(tx);
+  for (const tx of dbTxs) ingest(tx);
+
+  // Secondary strict deduplication for withdrawals: merge any duplicate records for the same request regardless of status
+  const withdrawMap = new Map<string, any>();
+  const otherTxs: any[] = [];
+
+  for (const tx of map.values()) {
+    if (tx.type === 'withdraw') {
+      const uId = String(tx.userId || '').trim();
+      const amt = Number(tx.amount || 0).toFixed(2);
+      const ref = String(tx.referenceNo || '').trim();
+      const timeBucket = Math.floor((Number(tx.createdAt) || Date.now()) / 45000);
+      // Do NOT include tx.status in dedupeKey so completed/rejected merges cleanly over stale processing
+      const dedupeKey = ref || `${uId}_${amt}_${timeBucket}`;
+
+      if (withdrawMap.has(dedupeKey)) {
+        withdrawMap.set(dedupeKey, mergeServerTx(withdrawMap.get(dedupeKey), tx));
+      } else {
+        withdrawMap.set(dedupeKey, tx);
+      }
+    } else {
+      otherTxs.push(tx);
+    }
+  }
+
+  return [...otherTxs, ...withdrawMap.values()].sort((a: any, b: any) => {
+    const timeA = Number(a.createdAt) || 0;
+    const timeB = Number(b.createdAt) || 0;
+    return timeB - timeA;
+  });
+}
+
 // API Route: Get all transactions (for Admin) from Cloud SQL & backup
 app.get(['/api/cloudsql/transactions', '/api/admin/transactions'], async (_req, res) => {
   try {
     const dbTxs = await getAllTransactionsFromDb();
     const backupTxs = loadServerTransactions();
-
-    // Map by referenceNo or ID
-    const map = new Map<string, any>();
-    for (const tx of backupTxs) {
-      if (!tx) continue;
-      const key = String(tx.referenceNo || tx.id || ('tx-' + (tx.createdAt || Date.now())));
-      map.set(key, tx);
-    }
-    for (const tx of dbTxs) {
-      if (!tx) continue;
-      const key = String(tx.referenceNo || tx.id || ('tx-' + (tx.createdAt || Date.now())));
-      map.set(key, { ...map.get(key), ...tx });
-    }
-
-    // Secondary strict deduplication for withdrawals: prevent admin from seeing duplicate entries for the same request
-    const withdrawMap = new Map<string, any>();
-    const otherTxs: any[] = [];
-
-    for (const tx of map.values()) {
-      if (tx.type === 'withdraw') {
-        const uId = String(tx.userId || '').trim();
-        const amt = Number(tx.amount || 0).toFixed(2);
-        const ref = String(tx.referenceNo || '').trim();
-        // 45-second bucket for same user + amount + status
-        const timeBucket = Math.floor((Number(tx.createdAt) || Date.now()) / 45000);
-        const dedupeKey = ref || `${uId}_${amt}_${tx.status || 'processing'}_${timeBucket}`;
-
-        if (withdrawMap.has(dedupeKey)) {
-          const prev = withdrawMap.get(dedupeKey);
-          withdrawMap.set(dedupeKey, { ...prev, ...tx });
-        } else {
-          withdrawMap.set(dedupeKey, tx);
-        }
-      } else {
-        otherTxs.push(tx);
-      }
-    }
-
-    const merged = [...otherTxs, ...withdrawMap.values()].sort((a: any, b: any) => {
-      const timeA = Number(a.createdAt) || 0;
-      const timeB = Number(b.createdAt) || 0;
-      return timeB - timeA;
-    });
+    const merged = mergeTxListsForRead(backupTxs, dbTxs);
 
     return res.json({ success: true, count: merged.length, transactions: merged });
   } catch (err: any) {
@@ -3952,24 +4958,7 @@ app.get('/api/cloudsql/transactions/:userId', async (req, res) => {
     const backupTxs = loadServerTransactions().filter(
       (tx) => String(tx.userId).trim() === cleanId
     );
-
-    const map = new Map<string, any>();
-    for (const tx of backupTxs) {
-      if (!tx) continue;
-      const key = String(tx.referenceNo || tx.id || ('tx-' + (tx.createdAt || Date.now())));
-      map.set(key, tx);
-    }
-    for (const tx of dbTxs) {
-      if (!tx) continue;
-      const key = String(tx.referenceNo || tx.id || ('tx-' + (tx.createdAt || Date.now())));
-      map.set(key, { ...map.get(key), ...tx });
-    }
-
-    const userTxs = Array.from(map.values()).sort((a: any, b: any) => {
-      const timeA = Number(a.createdAt) || 0;
-      const timeB = Number(b.createdAt) || 0;
-      return timeB - timeA;
-    });
+    const userTxs = mergeTxListsForRead(backupTxs, dbTxs);
 
     return res.json({ success: true, count: userTxs.length, transactions: userTxs });
   } catch (err: any) {
@@ -4029,12 +5018,13 @@ app.post('/api/cloudsql/transactions', async (req, res) => {
     // 1. Save to Cloud SQL
     const createdInDb = await createTransaction(tx);
 
-    // 2. Save to local JSON backup
+    // 2. Save to local JSON backup (preserve canonical string id and record sqlId separately)
     const backupTxs = loadServerTransactions();
     const refKey = tx.referenceNo || tx.id || `tx-${Date.now()}`;
     const payload = {
       ...tx,
       id: tx.id || (createdInDb ? String(createdInDb.id) : refKey),
+      ...(createdInDb?.id && isNumericOnlyId(createdInDb.id) ? { sqlId: Number(createdInDb.id) } : {}),
       createdAt: tx.createdAt || Date.now(),
       status: tx.status || (tx.type === 'withdraw' ? 'processing' : 'completed'),
       referenceNo: tx.referenceNo || refKey,
@@ -4044,57 +5034,140 @@ app.post('/api/cloudsql/transactions', async (req, res) => {
       (t) => (tx.id && t.id === tx.id) || (tx.referenceNo && t.referenceNo === tx.referenceNo)
     );
     if (existingIdx >= 0) {
-      backupTxs[existingIdx] = { ...backupTxs[existingIdx], ...payload };
+      backupTxs[existingIdx] = mergeServerTx(backupTxs[existingIdx], payload);
     } else {
       backupTxs.unshift(payload);
     }
     saveServerTransactions(backupTxs);
 
-    return res.json({ success: true, transaction: createdInDb || payload });
+    return res.json({ success: true, transaction: payload || createdInDb });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
+// Helper: Collect all identifiers (backupTxs + PostgreSQL) matching a transaction update request
+async function resolveAllTxIdentifiers(
+  backupTxs: any[],
+  params: { txId?: string; originalReferenceNo?: string; sqlId?: number | string; referenceNo?: string }
+): Promise<{ candidateIds: Set<string>; dbMatches: any[]; backupMatches: any[] }> {
+  const candidateIds = new Set<string>();
+  const addId = (v: any) => {
+    if (v !== undefined && v !== null) {
+      const s = String(v).trim();
+      if (s) candidateIds.add(s);
+    }
+  };
+
+  addId(params.txId);
+  addId(params.originalReferenceNo);
+  addId(params.sqlId);
+  // Only use referenceNo as a lookup seed if we don't already have originalReferenceNo (avoids confusing new UTR with lookup key)
+  if (!params.originalReferenceNo) {
+    addId(params.referenceNo);
+  }
+
+  // Pass 1: find matching records in backupTxs to expand known ids/refs
+  for (const t of backupTxs) {
+    if (!t) continue;
+    const tId = t.id !== undefined && t.id !== null ? String(t.id).trim() : '';
+    const tSqlId = t.sqlId !== undefined && t.sqlId !== null ? String(t.sqlId).trim() : '';
+    const tRef = t.referenceNo ? String(t.referenceNo).trim() : '';
+    if ((tId && candidateIds.has(tId)) || (tSqlId && candidateIds.has(tSqlId)) || (tRef && candidateIds.has(tRef))) {
+      addId(tId);
+      addId(tSqlId);
+      addId(tRef);
+    }
+  }
+
+  // Pass 2: query PostgreSQL across all known identifiers
+  const dbMatches = await findTransactionsInDbByIdentifiers(Array.from(candidateIds));
+  for (const dt of dbMatches) {
+    addId(dt.id);
+    addId(dt.referenceNo);
+  }
+
+  // Pass 3: collect all matching backupTxs using expanded candidateIds
+  const backupMatches = backupTxs.filter((t) => {
+    if (!t) return false;
+    const tId = t.id !== undefined && t.id !== null ? String(t.id).trim() : '';
+    const tSqlId = t.sqlId !== undefined && t.sqlId !== null ? String(t.sqlId).trim() : '';
+    const tRef = t.referenceNo ? String(t.referenceNo).trim() : '';
+    return (tId && candidateIds.has(tId)) || (tSqlId && candidateIds.has(tSqlId)) || (tRef && candidateIds.has(tRef));
+  });
+
+  return { candidateIds, dbMatches, backupMatches };
+}
+
 // API Route: Update transaction status (for admin approvals, rejections, or status updates)
 app.post(['/api/cloudsql/transactions/status', '/api/admin/transactions/status'], async (req, res) => {
   try {
-    const { txId, status, referenceNo, paymentMethod, reason } = req.body;
+    const { txId, status, referenceNo, originalReferenceNo, utrNumber, sqlId, paymentMethod, reason } = req.body;
     if (!txId || !status) {
       return res.status(400).json({ success: false, error: 'txId and status are required' });
     }
 
     const cleanId = String(txId).trim();
-
-    // 1. Update in Cloud SQL
-    const updatedInDb = await updateTransactionStatusInDb(cleanId, status, {
+    const backupTxs = loadServerTransactions();
+    const { candidateIds, dbMatches } = await resolveAllTxIdentifiers(backupTxs, {
+      txId: cleanId,
+      originalReferenceNo,
+      sqlId,
       referenceNo,
-      paymentMethod,
-      reason,
     });
 
-    // 2. Update in backup
-    const backupTxs = loadServerTransactions();
+    const settledUtr = String(utrNumber || '').trim();
+
+    // 1. Update ALL matching rows in Cloud SQL (keep referenceNo intact; do not clobber with UTR)
+    const updatedInDb = await updateTransactionStatusInDb(cleanId, status, {
+      originalReferenceNo,
+      paymentMethod,
+      reason,
+      identifiers: Array.from(candidateIds),
+    });
+
+    // 2. Update ALL matching entries in backup JSON (no early break!)
     let foundTx: any = null;
     for (let i = 0; i < backupTxs.length; i++) {
-      if (backupTxs[i].id === cleanId || backupTxs[i].referenceNo === cleanId) {
+      const t = backupTxs[i];
+      if (!t) continue;
+      const tId = t.id !== undefined && t.id !== null ? String(t.id).trim() : '';
+      const tSqlId = t.sqlId !== undefined && t.sqlId !== null ? String(t.sqlId).trim() : '';
+      const tRef = t.referenceNo ? String(t.referenceNo).trim() : '';
+      if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef)) {
         backupTxs[i] = {
-          ...backupTxs[i],
+          ...t,
           status,
-          ...(referenceNo ? { referenceNo } : {}),
+          ...(settledUtr ? { utrNumber: settledUtr } : {}),
           ...(paymentMethod ? { paymentMethod } : {}),
           ...(reason ? { rejectReason: reason } : {}),
           updatedAt: new Date().toISOString(),
         };
         foundTx = backupTxs[i];
-        break;
       }
     }
+
+    // If record existed only in PostgreSQL/Firestore and not in backupTxs, insert a canonical backup copy so GET stays in sync
+    if (!foundTx && (dbMatches[0] || updatedInDb)) {
+      const src = updatedInDb || dbMatches[0];
+      foundTx = {
+        ...src,
+        id: !isNumericOnlyId(cleanId) ? cleanId : String(src.id),
+        ...(isNumericOnlyId(src.id) ? { sqlId: Number(src.id) } : {}),
+        status,
+        ...(settledUtr ? { utrNumber: settledUtr } : {}),
+        ...(paymentMethod ? { paymentMethod } : {}),
+        ...(reason ? { rejectReason: reason } : {}),
+        updatedAt: new Date().toISOString(),
+      };
+      backupTxs.unshift(foundTx);
+    }
+
     if (foundTx) {
       saveServerTransactions(backupTxs);
     }
 
-    return res.json({ success: true, transaction: updatedInDb || foundTx });
+    return res.json({ success: true, transaction: foundTx || updatedInDb });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -4108,7 +5181,7 @@ const recentBalanceAdjustHistory = new Map<string, number>();
 
 // API Route: Admin Withdrawal Action (Approve or Reject with automatic user balance refund & anti-double-click protection)
 app.post('/api/admin/withdrawals/action', async (req, res) => {
-  const { action, txId, referenceNo, userId, amount, reason } = req.body;
+  const { action, txId, referenceNo, originalReferenceNo, utrNumber, sqlId, userId, amount, reason } = req.body;
   if (!action || !txId) {
     return res.status(400).json({ success: false, error: 'action and txId are required' });
   }
@@ -4123,27 +5196,57 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
 
   try {
     const backupTxs = loadServerTransactions();
-    const existingTx = backupTxs.find((t) => t.id === cleanId || t.referenceNo === cleanId);
+    const { candidateIds, dbMatches, backupMatches } = await resolveAllTxIdentifiers(backupTxs, {
+      txId: cleanId,
+      originalReferenceNo,
+      sqlId,
+    });
 
-    // 2. Strict Idempotency Check: Don't process twice if already settled
-    if (existingTx) {
-      if (action === 'approve' && existingTx.status === 'completed') {
+    const allMatched = [...backupMatches, ...dbMatches];
+    const settledMatch = allMatched.find((t) => t.status === 'completed' || t.status === 'rejected');
+    const existingTx = settledMatch || backupMatches[0] || dbMatches[0];
+
+    // 2. Strict Idempotency Check across BOTH PostgreSQL & backup JSON
+    if (settledMatch) {
+      // Ensure ALL copies across Postgres & backupTxs are synced to this terminal status so stale copies can never reappear
+      const targetStatus = settledMatch.status;
+      await updateTransactionStatusInDb(cleanId, targetStatus, {
+        originalReferenceNo,
+        identifiers: Array.from(candidateIds),
+      });
+      let dirty = false;
+      for (let i = 0; i < backupTxs.length; i++) {
+        const t = backupTxs[i];
+        if (!t) continue;
+        const tId = String(t.id || '').trim();
+        const tSqlId = String(t.sqlId || '').trim();
+        const tRef = String(t.referenceNo || '').trim();
+        if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef)) {
+          if (t.status !== targetStatus) {
+            backupTxs[i] = { ...t, status: targetStatus, updatedAt: new Date().toISOString() };
+            dirty = true;
+          }
+        }
+      }
+      if (dirty) saveServerTransactions(backupTxs);
+
+      if (action === 'approve' && targetStatus === 'completed') {
         return res.json({
           success: true,
-          message: `Withdrawal was already approved previously (Ref: ${existingTx.referenceNo || referenceNo || 'Settled'})`,
+          message: `Withdrawal was already approved previously (Ref: ${settledMatch.utrNumber || settledMatch.referenceNo || 'Settled'})`,
           alreadyProcessed: true,
-          transaction: existingTx,
+          transaction: settledMatch,
         });
       }
-      if (existingTx.status === 'rejected') {
+      if (targetStatus === 'rejected') {
         return res.json({
           success: true,
           message: `Withdrawal was already rejected previously. No duplicate balance refund applied.`,
           alreadyProcessed: true,
-          transaction: existingTx,
+          transaction: settledMatch,
         });
       }
-      if (action === 'reject' && existingTx.status === 'completed') {
+      if (action === 'reject' && targetStatus === 'completed') {
         return res.status(400).json({
           success: false,
           error: 'Cannot reject a withdrawal that has already been approved and settled.',
@@ -4152,44 +5255,141 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
     }
 
     if (action === 'approve') {
-      // 1. Update transaction in Cloud SQL
-      await updateTransactionStatusInDb(cleanId, 'completed', { referenceNo });
+      const finalUtr = String(utrNumber || referenceNo || '').trim();
+      const basePm = existingTx?.paymentMethod ? String(existingTx.paymentMethod) : '';
+      const nextPm =
+        finalUtr && basePm && !basePm.includes(finalUtr)
+          ? `${basePm} • UTR: ${finalUtr}`
+          : basePm || (finalUtr ? `UTR: ${finalUtr}` : undefined);
 
-      // 2. Update in backup
+      // 1. Update ALL matching rows in Cloud SQL (preserve original referenceNo like WTH... so keys never split!)
+      await updateTransactionStatusInDb(cleanId, 'completed', {
+        originalReferenceNo,
+        paymentMethod: nextPm,
+        identifiers: Array.from(candidateIds),
+      });
+
+      // 2. Update ALL matching entries in backupTxs (no early break, plus match same userId+amount processing fallback!)
+      const targetUid = String(userId || existingTx?.userId || '').trim();
+      const targetAmt = Number(amount || existingTx?.amount || 0);
+      let updatedTx: any = null;
+
       for (let i = 0; i < backupTxs.length; i++) {
-        if (backupTxs[i].id === cleanId || backupTxs[i].referenceNo === cleanId) {
+        const t = backupTxs[i];
+        if (!t) continue;
+        const tId = t.id !== undefined && t.id !== null ? String(t.id).trim() : '';
+        const tSqlId = t.sqlId !== undefined && t.sqlId !== null ? String(t.sqlId).trim() : '';
+        const tRef = t.referenceNo ? String(t.referenceNo).trim() : '';
+        const matchesIdOrRef = candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef);
+        const matchesSamePendingWithdraw =
+          t.type === 'withdraw' &&
+          t.status === 'processing' &&
+          targetUid &&
+          String(t.userId || '').trim() === targetUid &&
+          targetAmt > 0 &&
+          Math.abs(Number(t.amount || 0) - targetAmt) < 0.001 &&
+          (!existingTx?.createdAt || Math.abs((Number(t.createdAt) || 0) - Number(existingTx.createdAt)) < 60000);
+
+        if (matchesIdOrRef || matchesSamePendingWithdraw) {
           backupTxs[i] = {
-            ...backupTxs[i],
+            ...t,
             status: 'completed',
-            ...(referenceNo ? { referenceNo } : {}),
+            ...(finalUtr ? { utrNumber: finalUtr } : {}),
+            ...(nextPm ? { paymentMethod: nextPm } : {}),
             updatedAt: new Date().toISOString(),
           };
-          break;
+          if (!updatedTx) updatedTx = backupTxs[i];
         }
+      }
+
+      // If no entry existed in backupTxs (came from Firestore/Postgres only), persist a canonical settled entry now
+      if (!updatedTx) {
+        const canonicalRef = originalReferenceNo || existingTx?.referenceNo || cleanId;
+        updatedTx = {
+          ...(existingTx || {}),
+          id: !isNumericOnlyId(cleanId) ? cleanId : existingTx?.id && !isNumericOnlyId(existingTx.id) ? existingTx.id : `tx-${Date.now()}`,
+          ...(isNumericOnlyId(existingTx?.id) ? { sqlId: Number(existingTx.id) } : {}),
+          userId: targetUid || existingTx?.userId || '',
+          type: 'withdraw',
+          amount: targetAmt || Number(existingTx?.amount || 0),
+          title: existingTx?.title || 'Bank Withdrawal',
+          timestamp: existingTx?.timestamp || new Date().toLocaleString(),
+          createdAt: existingTx?.createdAt || Date.now(),
+          status: 'completed',
+          referenceNo: canonicalRef,
+          ...(finalUtr ? { utrNumber: finalUtr } : {}),
+          ...(nextPm ? { paymentMethod: nextPm } : {}),
+          updatedAt: new Date().toISOString(),
+        };
+        backupTxs.unshift(updatedTx);
       }
       saveServerTransactions(backupTxs);
 
       return res.json({
         success: true,
-        message: `Withdrawal approved & marked as Paid (Ref: ${referenceNo || 'Settled'})`,
+        message: `Withdrawal approved & marked as Paid (${finalUtr ? `UTR: ${finalUtr}` : 'Settled'})`,
+        transaction: updatedTx,
       });
     } else if (action === 'reject') {
       const numAmount = Number(amount) || (existingTx ? Number(existingTx.amount) : 0);
+      const rejectMsg = reason || 'Bank details mismatch';
 
-      // 1. Update transaction in Cloud SQL
-      await updateTransactionStatusInDb(cleanId, 'rejected', { reason });
+      // 1. Update ALL matching rows in Cloud SQL
+      await updateTransactionStatusInDb(cleanId, 'rejected', {
+        originalReferenceNo,
+        reason: rejectMsg,
+        identifiers: Array.from(candidateIds),
+      });
 
-      // 2. Update in backup
+      // 2. Update ALL matching entries in backupTxs (no early break!)
+      const targetUid = String(userId || existingTx?.userId || '').trim();
+      let updatedTx: any = null;
+
       for (let i = 0; i < backupTxs.length; i++) {
-        if (backupTxs[i].id === cleanId || backupTxs[i].referenceNo === cleanId) {
+        const t = backupTxs[i];
+        if (!t) continue;
+        const tId = t.id !== undefined && t.id !== null ? String(t.id).trim() : '';
+        const tSqlId = t.sqlId !== undefined && t.sqlId !== null ? String(t.sqlId).trim() : '';
+        const tRef = t.referenceNo ? String(t.referenceNo).trim() : '';
+        const matchesIdOrRef = candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef);
+        const matchesSamePendingWithdraw =
+          t.type === 'withdraw' &&
+          t.status === 'processing' &&
+          targetUid &&
+          String(t.userId || '').trim() === targetUid &&
+          numAmount > 0 &&
+          Math.abs(Number(t.amount || 0) - numAmount) < 0.001 &&
+          (!existingTx?.createdAt || Math.abs((Number(t.createdAt) || 0) - Number(existingTx.createdAt)) < 60000);
+
+        if (matchesIdOrRef || matchesSamePendingWithdraw) {
           backupTxs[i] = {
-            ...backupTxs[i],
+            ...t,
             status: 'rejected',
-            rejectReason: reason || 'Bank details mismatch',
+            rejectReason: rejectMsg,
             updatedAt: new Date().toISOString(),
           };
-          break;
+          if (!updatedTx) updatedTx = backupTxs[i];
         }
+      }
+
+      if (!updatedTx) {
+        const canonicalRef = originalReferenceNo || existingTx?.referenceNo || cleanId;
+        updatedTx = {
+          ...(existingTx || {}),
+          id: !isNumericOnlyId(cleanId) ? cleanId : existingTx?.id && !isNumericOnlyId(existingTx.id) ? existingTx.id : `tx-${Date.now()}`,
+          ...(isNumericOnlyId(existingTx?.id) ? { sqlId: Number(existingTx.id) } : {}),
+          userId: targetUid || existingTx?.userId || '',
+          type: 'withdraw',
+          amount: numAmount,
+          title: existingTx?.title || 'Bank Withdrawal',
+          timestamp: existingTx?.timestamp || new Date().toLocaleString(),
+          createdAt: existingTx?.createdAt || Date.now(),
+          status: 'rejected',
+          referenceNo: canonicalRef,
+          rejectReason: rejectMsg,
+          updatedAt: new Date().toISOString(),
+        };
+        backupTxs.unshift(updatedTx);
       }
       saveServerTransactions(backupTxs);
 
@@ -4198,10 +5398,8 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
       const targetUserId = userId || existingTx?.userId;
       if (targetUserId && numAmount > 0) {
         const cleanUserId = String(targetUserId).trim();
-        // Cloud SQL refund
         await refundUserWithdrawalInDb(cleanUserId, numAmount);
 
-        // users_backup.json refund
         const currentUsers = getCachedUsersBackup();
         const userIdx = currentUsers.findIndex(
           (u) => u.id === cleanUserId || u.uid === cleanUserId || u.phone === cleanUserId
@@ -4219,6 +5417,7 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
         success: true,
         message: `Withdrawal rejected and $${numAmount.toFixed(2)} refunded to user balance`,
         user: updatedUser,
+        transaction: updatedTx,
       });
     } else {
       return res.status(400).json({ success: false, error: 'Invalid action: must be approve or reject' });
@@ -4232,7 +5431,7 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
 
 // API Route: Admin Recharge Action (Approve with 1-click balance credit or Reject, with anti-double-click lock)
 app.post('/api/admin/recharges/action', async (req, res) => {
-  const { action, txId, userId, amount, reason } = req.body;
+  const { action, txId, originalReferenceNo, sqlId, userId, amount, reason } = req.body;
   if (!action || !txId) {
     return res.status(400).json({ success: false, error: 'action and txId are required' });
   }
@@ -4247,24 +5446,31 @@ app.post('/api/admin/recharges/action', async (req, res) => {
 
   try {
     const backupTxs = loadServerTransactions();
-    const existingTx = backupTxs.find((t) => t.id === cleanId || t.referenceNo === cleanId);
+    const { candidateIds, dbMatches, backupMatches } = await resolveAllTxIdentifiers(backupTxs, {
+      txId: cleanId,
+      originalReferenceNo,
+      sqlId,
+    });
+    const allMatched = [...backupMatches, ...dbMatches];
+    const settledMatch = allMatched.find((t) => t.status === 'completed' || t.status === 'rejected');
+    const existingTx = settledMatch || backupMatches[0] || dbMatches[0];
 
     // 2. Strict Idempotency Check: If already completed or rejected, do NOT add money twice!
-    if (existingTx) {
-      if (action === 'approve' && existingTx.status === 'completed') {
+    if (settledMatch) {
+      if (action === 'approve' && settledMatch.status === 'completed') {
         return res.json({
           success: true,
           message: 'Deposit has already been approved and credited previously (idempotent)',
           alreadyProcessed: true,
-          transaction: existingTx,
+          transaction: settledMatch,
         });
       }
-      if (existingTx.status === 'rejected') {
+      if (settledMatch.status === 'rejected') {
         return res.json({
           success: true,
           message: 'Deposit was already rejected previously',
           alreadyProcessed: true,
-          transaction: existingTx,
+          transaction: settledMatch,
         });
       }
     }
@@ -4272,19 +5478,37 @@ app.post('/api/admin/recharges/action', async (req, res) => {
     if (action === 'approve') {
       const numAmount = Number(amount) || (existingTx ? Number(existingTx.amount) : 0);
 
-      // 1. Update transaction in Cloud SQL
-      await updateTransactionStatusInDb(cleanId, 'completed');
+      // 1. Update ALL matching rows in Cloud SQL
+      await updateTransactionStatusInDb(cleanId, 'completed', {
+        originalReferenceNo,
+        identifiers: Array.from(candidateIds),
+      });
 
-      // 2. Update in backup
+      // 2. Update ALL matching entries in backup
+      let updatedTx: any = null;
       for (let i = 0; i < backupTxs.length; i++) {
-        if (backupTxs[i].id === cleanId || backupTxs[i].referenceNo === cleanId) {
+        const t = backupTxs[i];
+        if (!t) continue;
+        const tId = String(t.id || '').trim();
+        const tSqlId = String(t.sqlId || '').trim();
+        const tRef = String(t.referenceNo || '').trim();
+        if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef)) {
           backupTxs[i] = {
-            ...backupTxs[i],
+            ...t,
             status: 'completed',
             updatedAt: new Date().toISOString(),
           };
-          break;
+          if (!updatedTx) updatedTx = backupTxs[i];
         }
+      }
+      if (!updatedTx && existingTx) {
+        updatedTx = {
+          ...existingTx,
+          id: !isNumericOnlyId(cleanId) ? cleanId : String(existingTx.id),
+          status: 'completed',
+          updatedAt: new Date().toISOString(),
+        };
+        backupTxs.unshift(updatedTx);
       }
       saveServerTransactions(backupTxs);
 
@@ -4313,37 +5537,55 @@ app.post('/api/admin/recharges/action', async (req, res) => {
             });
           } catch (e) {}
         }
-
-        // 4. Note: Referral commission is NOT given on deposit/recharge.
-        // Upliner commission is only granted when the user purchases/invests in a product.
       }
 
       return res.json({
         success: true,
         message: `Deposit of $${numAmount.toFixed(2)} approved & credited to user wallet`,
         user: updatedUser,
+        transaction: updatedTx,
       });
     } else if (action === 'reject') {
-      // Update in Cloud SQL
-      await updateTransactionStatusInDb(cleanId, 'rejected', { reason });
+      const rejectMsg = reason || 'Deposit verification failed';
+      await updateTransactionStatusInDb(cleanId, 'rejected', {
+        originalReferenceNo,
+        reason: rejectMsg,
+        identifiers: Array.from(candidateIds),
+      });
 
-      // Update in backup
+      let updatedTx: any = null;
       for (let i = 0; i < backupTxs.length; i++) {
-        if (backupTxs[i].id === cleanId || backupTxs[i].referenceNo === cleanId) {
+        const t = backupTxs[i];
+        if (!t) continue;
+        const tId = String(t.id || '').trim();
+        const tSqlId = String(t.sqlId || '').trim();
+        const tRef = String(t.referenceNo || '').trim();
+        if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef)) {
           backupTxs[i] = {
-            ...backupTxs[i],
+            ...t,
             status: 'rejected',
-            rejectReason: reason || 'Deposit verification failed',
+            rejectReason: rejectMsg,
             updatedAt: new Date().toISOString(),
           };
-          break;
+          if (!updatedTx) updatedTx = backupTxs[i];
         }
+      }
+      if (!updatedTx && existingTx) {
+        updatedTx = {
+          ...existingTx,
+          id: !isNumericOnlyId(cleanId) ? cleanId : String(existingTx.id),
+          status: 'rejected',
+          rejectReason: rejectMsg,
+          updatedAt: new Date().toISOString(),
+        };
+        backupTxs.unshift(updatedTx);
       }
       saveServerTransactions(backupTxs);
 
       return res.json({
         success: true,
-        message: `Deposit rejected (${reason || 'Verification failed'})`,
+        message: `Deposit rejected (${rejectMsg})`,
+        transaction: updatedTx,
       });
     } else {
       return res.status(400).json({ success: false, error: 'Invalid action: must be approve or reject' });
@@ -5284,19 +6526,65 @@ app.get('/api/compliance/status', (req, res) => {
   });
 });
 
-const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+function resolveServerPort(): number {
+  const portArgIdx = process.argv.indexOf('--port');
+  if (portArgIdx >= 0 && process.argv[portArgIdx + 1]) {
+    const parsedArg = parseInt(process.argv[portArgIdx + 1], 10);
+    if (Number.isFinite(parsedArg) && parsedArg > 0) return parsedArg;
+  }
+  const eqPortArg = process.argv.find((a) => a.startsWith('--port='));
+  if (eqPortArg) {
+    const parsedEq = parseInt(eqPortArg.split('=')[1], 10);
+    if (Number.isFinite(parsedEq) && parsedEq > 0) return parsedEq;
+  }
+  if (
+    process.env.NODE_ENV !== 'production' &&
+    process.env.PORT === '8080' &&
+    process.env.NGINX_PORT === '8080'
+  ) {
+    return Number(process.env.DEFAULT_APP_PORT || 3000);
+  }
+  return process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+}
+
+const port = resolveServerPort();
+
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, port, uptime: process.uptime() });
+});
 
 async function startServer() {
+  let viteReady: Promise<any> | null = null;
+  let viteInstance: any = null;
+
   if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
+    viteReady = createViteServer({
       server: {
         middlewareMode: true,
         hmr: false,
+        ws: false,
         watch: null,
       },
       appType: 'spa',
+    })
+      .then((v) => {
+        viteInstance = v;
+        return v;
+      })
+      .catch((err) => {
+        console.error('[Vite Dev Middleware] Failed to initialize:', err);
+        throw err;
+      });
+
+    app.use(async (req, res, next) => {
+      try {
+        const vite = viteInstance || (await viteReady);
+        if (!vite) return next();
+        return vite.middlewares(req, res, next);
+      } catch (err) {
+        return next(err);
+      }
     });
-    app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(process.cwd(), 'dist');
     const indexPath = path.join(distPath, 'index.html');
@@ -5336,14 +6624,16 @@ async function startServer() {
   const server = app.listen(port, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${port}`);
 
-    // Synchronously initialize and seed permanent SQLite SQL users database
-    try {
-      const diskUsers = getCachedUsersBackup();
-      initAndSyncSqlUsers(diskUsers);
-      console.log(`[SQLite SQL] Unified and saved ${diskUsers.length} users into permanent SQLite database.`);
-    } catch (sqliteInitErr) {
-      console.warn('[SQLite SQL] User sync warning:', sqliteInitErr);
-    }
+    // Initialize SQLite users asynchronously right after HTTP port binds
+    setTimeout(() => {
+      try {
+        const diskUsers = getCachedUsersBackup();
+        initAndSyncSqlUsers(diskUsers);
+        console.log(`[SQLite SQL] Unified and saved ${diskUsers.length} users into permanent SQLite database.`);
+      } catch (sqliteInitErr) {
+        console.warn('[SQLite SQL] User sync warning:', sqliteInitErr);
+      }
+    }, 50);
 
     // Reconcile and guarantee referral stats and uncredited commissions for all users
     setTimeout(async () => {

@@ -62,8 +62,13 @@ import {
   Pause,
   RotateCcw,
   Database,
+  ArrowLeftRight,
+  ArrowUpRight,
+  ArrowDownLeft,
+  ArrowRight,
 } from 'lucide-react';
 import { useApp, normalizeRedirectUrl, deduplicateTransactions } from '../context/AppContext';
+import { dbService } from '../services/dbService';
 import { User, Transaction, InvestmentProduct, InvestmentOrder, NoticeItem, CustomPromoCode, PlatformSettings, SpinPrizeConfig, OtpLogItem, HelpCenterLinkItem } from '../types';
 import { getOrderClaimStatus, formatCountdown, formatCountdownHuman } from '../utils/dividendUtils';
 import { AdminBannerManager } from './AdminBannerManager';
@@ -114,7 +119,7 @@ export const AdminPanel: React.FC = () => {
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<
-    'users' | 'orders' | 'recharges' | 'withdrawals' | 'products' | 'banners' | 'settings' | 'notices' | 'promos' | 'otp' | 'helpcenter'
+    'users' | 'orders' | 'recharges' | 'withdrawals' | 'p2p' | 'products' | 'banners' | 'settings' | 'notices' | 'promos' | 'otp' | 'helpcenter'
   >('users');
 
   // User Investment Orders Management States
@@ -771,9 +776,54 @@ export const AdminPanel: React.FC = () => {
     }
   };
 
+  // Admin P2P History & Execution States
+  const [p2pTransfers, setP2pTransfers] = useState<any[]>([]);
+  const [p2pLedger, setP2pLedger] = useState<Transaction[]>([]);
+  const [p2pStats, setP2pStats] = useState({
+    totalTransfers: 0,
+    totalVolume: 0,
+    chargedSourceVolume: 0,
+    withdrawalSourceVolume: 0,
+    chargedSourceCount: 0,
+    withdrawalSourceCount: 0,
+  });
+  const [isLoadingP2P, setIsLoadingP2P] = useState(false);
+  const [p2pSearchQuery, setP2pSearchQuery] = useState('');
+  const [p2pWalletFilter, setP2pWalletFilter] = useState<'all' | 'rechargeBalance' | 'withdrawalBalance'>('all');
+  const [p2pViewMode, setP2pViewMode] = useState<'paired' | 'ledger'>('paired');
+  const [isSavingP2PSettings, setIsSavingP2PSettings] = useState(false);
+
+  const [showAdminP2PModal, setShowAdminP2PModal] = useState(false);
+  const [adminP2PSenderQuery, setAdminP2PSenderQuery] = useState('');
+  const [adminP2PRecipientQuery, setAdminP2PRecipientQuery] = useState('');
+  const [adminP2PAmount, setAdminP2PAmount] = useState('10');
+  const [adminP2PSourceWallet, setAdminP2PSourceWallet] = useState<'rechargeBalance' | 'withdrawalBalance'>('rechargeBalance');
+  const [adminP2PTargetWallet, setAdminP2PTargetWallet] = useState<'rechargeBalance' | 'withdrawalBalance'>('rechargeBalance');
+  const [adminP2PNote, setAdminP2PNote] = useState('');
+  const [isExecutingAdminP2P, setIsExecutingAdminP2P] = useState(false);
+
+  const loadAdminP2PHistory = async () => {
+    setIsLoadingP2P(true);
+    try {
+      const res = await dbService.getAdminP2PHistory();
+      if (res.success) {
+        setP2pTransfers(res.transfers || []);
+        setP2pLedger(res.ledger || []);
+        if (res.stats) setP2pStats(res.stats);
+      }
+    } catch (err) {
+      console.warn('Failed to load Admin P2P history:', err);
+    } finally {
+      setIsLoadingP2P(false);
+    }
+  };
+
   useEffect(() => {
     if (activeTab === 'settings') {
       checkSqlDbStatus();
+    }
+    if (activeTab === 'p2p') {
+      loadAdminP2PHistory();
     }
   }, [activeTab]);
 
@@ -848,6 +898,9 @@ export const AdminPanel: React.FC = () => {
 
   const rechargeTxs = uniqueAdminTransactions.filter((tx) => tx.type === 'recharge');
   const withdrawTxs = uniqueAdminTransactions.filter((tx) => tx.type === 'withdraw');
+  const p2pAdminTxs = uniqueAdminTransactions.filter(
+    (tx) => tx.type === 'p2p_send' || tx.type === 'p2p_receive'
+  );
 
   const pendingRecharges = rechargeTxs.filter((tx) => tx.status === 'processing');
   const pendingWithdrawals = withdrawTxs.filter((tx) => tx.status === 'processing');
@@ -1972,6 +2025,24 @@ export const AdminPanel: React.FC = () => {
 
           <button
             type="button"
+            onClick={() => {
+              setActiveTab('p2p');
+              loadAdminP2PHistory();
+            }}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+              activeTab === 'p2p'
+                ? 'bg-gradient-to-r from-cyan-600 to-teal-600 text-white shadow-md shadow-cyan-900/30 ring-1 ring-white/20'
+                : 'text-cyan-300 hover:text-white hover:bg-slate-900'
+            }`}
+          >
+            <ArrowLeftRight className="w-3.5 h-3.5 text-cyan-300" />
+            <span>
+              P2P Transfers & History ({p2pStats.totalTransfers || Math.ceil(p2pAdminTxs.length / 2)})
+            </span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setActiveTab('products')}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
               activeTab === 'products'
@@ -2345,6 +2416,19 @@ export const AdminPanel: React.FC = () => {
                                 >
                                   <Eye className="w-3.5 h-3.5" />
                                   <span>Full Details</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setP2pSearchQuery(u.id || u.phone || '');
+                                    setActiveTab('p2p');
+                                    loadAdminP2PHistory();
+                                  }}
+                                  className="px-2.5 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 font-bold text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
+                                  title={`View P2P history for ${u.nickname || u.phone}`}
+                                >
+                                  <ArrowLeftRight className="w-3.5 h-3.5 text-cyan-400" />
+                                  <span>P2P</span>
                                 </button>
                                 <button
                                   type="button"
@@ -3151,6 +3235,11 @@ export const AdminPanel: React.FC = () => {
                               <div className="text-[11px] text-slate-400 font-mono">
                                 Ref: {tx.referenceNo} {targetUser ? `• ${targetUser.phone}` : ''}
                               </div>
+                              {tx.utrNumber && (
+                                <div className="text-[10px] text-emerald-400 font-mono font-bold mt-0.5">
+                                  UTR: {tx.utrNumber}
+                                </div>
+                              )}
                             </td>
                             <td className="py-3 px-3 min-w-[240px]">
                               {bank && (bank.accountNumber || bank.accountHolder) ? (
@@ -3288,6 +3377,526 @@ export const AdminPanel: React.FC = () => {
                   </tbody>
                 </table>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================= */}
+        {/* TAB 3B: P2P TRANSFERS HISTORY, AUDIT & ADMIN CONTROLS */}
+        {/* ========================================================= */}
+        {activeTab === 'p2p' && (
+          <div className="space-y-4">
+            {/* Top Action & Feature Control Header */}
+            <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-white">P2P Fund Transfer History & Controls</h3>
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                      localSettings.isP2PEnabled !== false
+                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                        : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                    }`}
+                  >
+                    {localSettings.isP2PEnabled !== false ? 'P2P Active' : 'P2P Paused'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Full audit trail of all member-to-member and admin P2P wallet transfers (Charged / Withdrawal → Charged Balance)
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAdminP2PSenderQuery('');
+                    setAdminP2PRecipientQuery('');
+                    setAdminP2PAmount('10');
+                    setAdminP2PSourceWallet('rechargeBalance');
+                    setAdminP2PTargetWallet('rechargeBalance');
+                    setAdminP2PNote('');
+                    setShowAdminP2PModal(true);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-cyan-600 to-teal-600 hover:from-cyan-500 hover:to-teal-500 text-white text-xs font-extrabold flex items-center gap-1.5 shadow-md transition-all cursor-pointer whitespace-nowrap"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>New Admin P2P Transfer</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={loadAdminP2PHistory}
+                  disabled={isLoadingP2P}
+                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoadingP2P ? 'animate-spin' : ''}`} />
+                  <span>Refresh</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (p2pTransfers.length === 0) {
+                      showToast('No P2P transfers to export yet.', 'info');
+                      return;
+                    }
+                    const headers = ['Reference', 'Sender Name', 'Sender ID', 'Sender Phone', 'Source Wallet', 'Recipient Name', 'Recipient ID', 'Recipient Phone', 'Target Wallet', 'Amount USD', 'Initiated By', 'Note', 'Timestamp'];
+                    const rows = p2pTransfers.map((tr) => [
+                      tr.referenceNo || '',
+                      tr.senderName || '',
+                      tr.senderId || '',
+                      tr.senderPhone || '',
+                      tr.sourceWallet === 'withdrawalBalance' ? 'Withdrawal Balance' : 'Charged Balance',
+                      tr.recipientName || '',
+                      tr.recipientId || '',
+                      tr.recipientPhone || '',
+                      tr.targetWallet === 'withdrawalBalance' ? 'Withdrawal Balance' : 'Charged Balance',
+                      Number(tr.amount || 0).toFixed(2),
+                      tr.initiatedBy || 'user',
+                      (tr.note || '').replace(/,/g, ';'),
+                      (tr.timestamp || '').replace(/,/g, ''),
+                    ]);
+                    const csv = [headers.join(','), ...rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))].join('\n');
+                    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `nexa_p2p_history_${new Date().toISOString().split('T')[0]}.csv`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    showToast('P2P history exported as CSV!', 'success');
+                  }}
+                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Export CSV</span>
+                </button>
+              </div>
+            </div>
+
+            {/* 4-Card P2P Summary KPI Strip */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800">
+                <div className="text-[11px] font-medium text-slate-400">Total P2P Transfers</div>
+                <div className="text-2xl font-black text-white mt-1 tabular-nums">{p2pStats.totalTransfers}</div>
+                <div className="text-[10px] text-slate-500 mt-0.5">Completed Member Transfers</div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800">
+                <div className="text-[11px] font-medium text-slate-400">Total P2P Volume</div>
+                <div className="text-2xl font-black text-cyan-400 mt-1 tabular-nums">
+                  ${p2pStats.totalVolume.toFixed(2)}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-0.5 tabular-nums">
+                  ₹{Math.round(p2pStats.totalVolume * 100).toLocaleString()} INR Equivalent
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800">
+                <div className="text-[11px] font-medium text-slate-400">From Charged Balance</div>
+                <div className="text-2xl font-black text-amber-400 mt-1 tabular-nums">
+                  ${p2pStats.chargedSourceVolume.toFixed(2)}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-0.5 tabular-nums">
+                  {p2pStats.chargedSourceCount} transfers
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800">
+                <div className="text-[11px] font-medium text-slate-400">From Withdrawal Balance</div>
+                <div className="text-2xl font-black text-emerald-400 mt-1 tabular-nums">
+                  ${p2pStats.withdrawalSourceVolume.toFixed(2)}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-0.5 tabular-nums">
+                  {p2pStats.withdrawalSourceCount} transfers
+                </div>
+              </div>
+            </div>
+
+            {/* Admin P2P Policy & Toggle Control Strip */}
+            <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <Sliders className="w-4 h-4 text-cyan-400 shrink-0" />
+                  <div>
+                    <div className="text-xs font-bold text-white">P2P Service Access & Transfer Limits</div>
+                    <div className="text-[11px] text-slate-400">
+                      Control whether users can send P2P funds and set min/max USD per transfer
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const nextEnabled = localSettings.isP2PEnabled === false;
+                    setLocalSettings((prev) => ({ ...prev, isP2PEnabled: nextEnabled }));
+                    await updatePlatformSettings({ isP2PEnabled: nextEnabled });
+                    showToast(
+                      nextEnabled ? 'P2P Fund Transfers enabled for all users.' : 'P2P Fund Transfers paused for users.',
+                      nextEnabled ? 'success' : 'info'
+                    );
+                  }}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold border flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap ${
+                    localSettings.isP2PEnabled !== false
+                      ? 'bg-emerald-600/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-600/30'
+                      : 'bg-rose-600/20 text-rose-300 border-rose-500/40 hover:bg-rose-600/30'
+                  }`}
+                >
+                  <Power className="w-3.5 h-3.5" />
+                  <span>{localSettings.isP2PEnabled !== false ? 'P2P Enabled (Click to Pause)' : 'P2P Paused (Click to Enable)'}</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 items-end pt-2 border-t border-slate-800">
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-400 mb-1">Min Transfer (USD)</label>
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.5"
+                    value={localSettings.minP2PAmount ?? 1}
+                    onChange={(e) =>
+                      setLocalSettings((prev) => ({ ...prev, minP2PAmount: Number(e.target.value) || 1 }))
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white font-mono outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-400 mb-1">Max Transfer (USD)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="100"
+                    value={localSettings.maxP2PAmount ?? 50000}
+                    onChange={(e) =>
+                      setLocalSettings((prev) => ({ ...prev, maxP2PAmount: Number(e.target.value) || 50000 }))
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white font-mono outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-400 mb-1">Pause / Banner Notice</label>
+                  <input
+                    type="text"
+                    value={localSettings.p2pNotice ?? ''}
+                    onChange={(e) =>
+                      setLocalSettings((prev) => ({ ...prev, p2pNotice: e.target.value }))
+                    }
+                    placeholder="Optional notice when P2P is paused"
+                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={isSavingP2PSettings}
+                  onClick={async () => {
+                    setIsSavingP2PSettings(true);
+                    try {
+                      await updatePlatformSettings({
+                        isP2PEnabled: localSettings.isP2PEnabled !== false,
+                        minP2PAmount: Math.max(0.01, Number(localSettings.minP2PAmount) || 1),
+                        maxP2PAmount: Math.max(1, Number(localSettings.maxP2PAmount) || 50000),
+                        p2pNotice: localSettings.p2pNotice || '',
+                      });
+                      showToast('P2P limits & rules saved permanently!', 'success');
+                    } finally {
+                      setIsSavingP2PSettings(false);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap h-[34px]"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{isSavingP2PSettings ? 'Saving...' : 'Save P2P Rules'}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Search & Filter Toolbar */}
+            <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 flex flex-wrap items-center justify-between gap-3">
+              <div className="relative flex-1 min-w-[240px]">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={p2pSearchQuery}
+                  onChange={(e) => setP2pSearchQuery(e.target.value)}
+                  placeholder="Search by Reference, Sender/Receiver Name, User ID, Phone, or Note..."
+                  className="w-full pl-9 pr-8 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-500 outline-none focus:border-cyan-500"
+                />
+                {p2pSearchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setP2pSearchQuery('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white cursor-pointer"
+                    aria-label="Clear search"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={p2pWalletFilter}
+                  onChange={(e) => setP2pWalletFilter(e.target.value as any)}
+                  className="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs text-slate-200 outline-none"
+                >
+                  <option value="all">All Payment Wallets</option>
+                  <option value="rechargeBalance">Paid via Charged Balance</option>
+                  <option value="withdrawalBalance">Paid via Withdrawal Balance</option>
+                </select>
+
+                <div className="flex items-center p-1 rounded-xl bg-slate-950 border border-slate-800 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setP2pViewMode('paired')}
+                    className={`px-3 py-1 rounded-lg font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                      p2pViewMode === 'paired'
+                        ? 'bg-cyan-600 text-white'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Paired Transfers
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setP2pViewMode('ledger')}
+                    className={`px-3 py-1 rounded-lg font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                      p2pViewMode === 'ledger'
+                        ? 'bg-cyan-600 text-white'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Full Ledger ({p2pLedger.length})
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* P2P History Data Table */}
+            <div className="rounded-2xl bg-slate-900/90 border border-slate-800 overflow-hidden shadow-xl">
+              {isLoadingP2P && p2pTransfers.length === 0 ? (
+                <div className="p-10 text-center text-xs text-slate-400">
+                  Loading P2P transfer history from database...
+                </div>
+              ) : p2pViewMode === 'paired' ? (
+                (() => {
+                  const q = p2pSearchQuery.trim().toLowerCase();
+                  const filteredPairs = p2pTransfers.filter((tr) => {
+                    if (p2pWalletFilter !== 'all' && tr.sourceWallet !== p2pWalletFilter) return false;
+                    if (!q) return true;
+                    return (
+                      String(tr.referenceNo || '').toLowerCase().includes(q) ||
+                      String(tr.senderId || '').toLowerCase().includes(q) ||
+                      String(tr.senderName || '').toLowerCase().includes(q) ||
+                      String(tr.senderPhone || '').toLowerCase().includes(q) ||
+                      String(tr.recipientId || '').toLowerCase().includes(q) ||
+                      String(tr.recipientName || '').toLowerCase().includes(q) ||
+                      String(tr.recipientPhone || '').toLowerCase().includes(q) ||
+                      String(tr.note || '').toLowerCase().includes(q)
+                    );
+                  });
+
+                  if (filteredPairs.length === 0) {
+                    return (
+                      <div className="p-10 text-center space-y-3">
+                        <div className="w-12 h-12 rounded-2xl bg-slate-800 text-cyan-400 flex items-center justify-center mx-auto">
+                          <ArrowLeftRight className="w-6 h-6" />
+                        </div>
+                        <div className="text-sm font-bold text-white">No P2P Transfers Found</div>
+                        <p className="text-xs text-slate-400 max-w-md mx-auto">
+                          {p2pSearchQuery
+                            ? 'No P2P records match your search query. Try clearing the search filter.'
+                            : 'User-to-user and admin P2P wallet transfers will appear here in real time.'}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setShowAdminP2PModal(true)}
+                          className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>Execute First Admin P2P Transfer</span>
+                        </button>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400 text-[11px] uppercase tracking-wider font-semibold">
+                            <th className="py-3 px-4">Reference & Time</th>
+                            <th className="py-3 px-3">Sender (Paid From)</th>
+                            <th className="py-3 px-3">Route</th>
+                            <th className="py-3 px-3">Receiver (Credited To)</th>
+                            <th className="py-3 px-3 text-right">Amount</th>
+                            <th className="py-3 px-3">Note / Origin</th>
+                            <th className="py-3 px-3 text-right">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/60">
+                          {filteredPairs.map((tr, idx) => (
+                            <tr key={`${tr.referenceNo}-${idx}`} className="hover:bg-slate-800/40 transition-colors">
+                              <td className="py-3 px-4 font-mono">
+                                <div className="flex items-center gap-1.5 font-bold text-cyan-300">
+                                  <span>{tr.referenceNo}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      navigator.clipboard?.writeText(tr.referenceNo);
+                                      showToast(`Copied Ref: ${tr.referenceNo}`, 'info');
+                                    }}
+                                    className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-white cursor-pointer"
+                                    title="Copy Reference Number"
+                                  >
+                                    <Copy className="w-3 h-3" />
+                                  </button>
+                                </div>
+                                <div className="text-[10px] text-slate-400 mt-0.5 tabular-nums">
+                                  {tr.timestamp || (tr.createdAt ? new Date(tr.createdAt).toLocaleString() : '—')}
+                                </div>
+                              </td>
+                              <td className="py-3 px-3">
+                                <div className="font-bold text-white">{tr.senderName || 'Member'}</div>
+                                <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                                  ID {tr.senderId || '—'} {tr.senderPhone ? `· ${tr.senderPhone}` : ''}
+                                </div>
+                              </td>
+                              <td className="py-3 px-3">
+                                <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold">
+                                  <span
+                                    className={
+                                      tr.sourceWallet === 'withdrawalBalance' ? 'text-emerald-400' : 'text-amber-300'
+                                    }
+                                  >
+                                    {tr.sourceWallet === 'withdrawalBalance' ? 'Withdrawal' : 'Charged'}
+                                  </span>
+                                  <ArrowRight className="w-3 h-3 text-slate-500 shrink-0" />
+                                  <span className="text-cyan-300">
+                                    {tr.targetWallet === 'withdrawalBalance' ? 'Withdrawal' : 'Charged'}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="py-3 px-3">
+                                <div className="font-bold text-white">{tr.recipientName || 'Member'}</div>
+                                <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                                  ID {tr.recipientId || '—'} {tr.recipientPhone ? `· ${tr.recipientPhone}` : ''}
+                                </div>
+                              </td>
+                              <td className="py-3 px-3 text-right font-mono tabular-nums">
+                                <div className="font-black text-emerald-400 text-sm">
+                                  ${Number(tr.amount || 0).toFixed(2)}
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  ₹{Math.round(Number(tr.amount || 0) * 100).toLocaleString()} INR
+                                </div>
+                              </td>
+                              <td className="py-3 px-3 max-w-[200px]">
+                                <div className="text-[11px] text-slate-300 truncate">
+                                  {tr.note || 'P2P Instant Transfer'}
+                                </div>
+                                <div className="text-[10px] text-slate-500 mt-0.5">
+                                  {tr.initiatedBy === 'admin' ? 'Admin Executed' : 'User P2P'}
+                                </div>
+                              </td>
+                              <td className="py-3 px-3 text-right">
+                                <span className="text-[11px] font-bold text-emerald-400">
+                                  Completed
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()
+              ) : (
+                (() => {
+                  const q = p2pSearchQuery.trim().toLowerCase();
+                  const filteredLedger = p2pLedger.filter((tx: any) => {
+                    if (p2pWalletFilter !== 'all' && tx.sourceWallet !== p2pWalletFilter) return false;
+                    if (!q) return true;
+                    return (
+                      String(tx.referenceNo || '').toLowerCase().includes(q) ||
+                      String(tx.userId || '').toLowerCase().includes(q) ||
+                      String(tx.counterpartyId || '').toLowerCase().includes(q) ||
+                      String(tx.counterpartyName || '').toLowerCase().includes(q) ||
+                      String(tx.title || '').toLowerCase().includes(q) ||
+                      String(tx.note || '').toLowerCase().includes(q)
+                    );
+                  });
+
+                  if (filteredLedger.length === 0) {
+                    return (
+                      <div className="p-10 text-center text-xs text-slate-400">
+                        No P2P ledger entries match the current filter.
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400 text-[11px] uppercase tracking-wider font-semibold">
+                            <th className="py-3 px-4">Type</th>
+                            <th className="py-3 px-3">Account Holder</th>
+                            <th className="py-3 px-3">Description</th>
+                            <th className="py-3 px-3">Reference</th>
+                            <th className="py-3 px-3">Date & Time</th>
+                            <th className="py-3 px-4 text-right">Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/60">
+                          {filteredLedger.map((tx: any, idx: number) => {
+                            const isSent = tx.type === 'p2p_send';
+                            return (
+                              <tr key={`${tx.id}-${idx}`} className="hover:bg-slate-800/40 transition-colors">
+                                <td className="py-3 px-4">
+                                  <span
+                                    className={`inline-flex items-center gap-1 font-bold text-[11px] ${
+                                      isSent ? 'text-amber-400' : 'text-emerald-400'
+                                    }`}
+                                  >
+                                    {isSent ? (
+                                      <ArrowUpRight className="w-3.5 h-3.5" />
+                                    ) : (
+                                      <ArrowDownLeft className="w-3.5 h-3.5" />
+                                    )}
+                                    <span>{isSent ? 'P2P Sent' : 'P2P Received'}</span>
+                                  </span>
+                                </td>
+                                <td className="py-3 px-3 font-mono text-slate-200">
+                                  ID {tx.userId}
+                                </td>
+                                <td className="py-3 px-3 text-slate-300 max-w-[260px] truncate">
+                                  {tx.title}
+                                </td>
+                                <td className="py-3 px-3 font-mono text-cyan-300 text-[11px]">
+                                  {tx.referenceNo}
+                                </td>
+                                <td className="py-3 px-3 text-slate-400 text-[11px] tabular-nums">
+                                  {tx.timestamp}
+                                </td>
+                                <td
+                                  className={`py-3 px-4 text-right font-mono font-black tabular-nums ${
+                                    isSent ? 'text-amber-400' : 'text-emerald-400'
+                                  }`}
+                                >
+                                  {isSent ? '-' : '+'}${Math.abs(Number(tx.amount) || 0).toFixed(2)}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()
+              )}
             </div>
           </div>
         )}
@@ -5138,7 +5747,7 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
                   <span className="text-purple-400 font-bold">Tier 3: {localSettings.tier3Commission ?? 1}%</span>
                   <span className="text-slate-500">•</span>
                   <span className="text-amber-300 font-bold">
-                    Total: {(Number(localSettings.tier1Commission) || 10) + (Number(localSettings.tier2Commission) || 3) + (Number(localSettings.tier3Commission) || 1)}%
+                    Total: {Number(localSettings.tier1Commission ?? 10) + Number(localSettings.tier2Commission ?? 3) + Number(localSettings.tier3Commission ?? 1)}%
                   </span>
                 </div>
               </div>
@@ -8624,6 +9233,195 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
                 )}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ADMIN EXECUTE P2P TRANSFER MODAL */}
+      {showAdminP2PModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+          <div className="w-full max-w-lg bg-slate-900 border border-cyan-500/30 rounded-3xl p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-cyan-600 text-white flex items-center justify-center">
+                  <ArrowLeftRight className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-white">Execute Admin P2P Transfer</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Move funds atomically between any two member wallets with full ledger tracking
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAdminP2PModal(false)}
+                className="p-2 rounded-full hover:bg-slate-800 text-slate-400 cursor-pointer"
+                aria-label="Close Admin P2P Modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                const amt = Number(adminP2PAmount);
+                if (!adminP2PSenderQuery.trim() || !adminP2PRecipientQuery.trim()) {
+                  showToast('Please select or enter both Sender and Receiver.', 'error');
+                  return;
+                }
+                if (!Number.isFinite(amt) || amt <= 0) {
+                  showToast('Please enter a valid positive USD amount.', 'error');
+                  return;
+                }
+
+                setIsExecutingAdminP2P(true);
+                try {
+                  const res = await dbService.executeAdminP2PTransfer({
+                    senderQuery: adminP2PSenderQuery.trim(),
+                    recipientQuery: adminP2PRecipientQuery.trim(),
+                    amount: Number(amt.toFixed(2)),
+                    sourceWallet: adminP2PSourceWallet,
+                    targetWallet: adminP2PTargetWallet,
+                    note: adminP2PNote.trim() || 'Admin P2P Transfer',
+                  });
+
+                  if (!res.success) {
+                    showToast(res.error || 'Admin P2P transfer failed.', 'error');
+                    return;
+                  }
+
+                  showToast(res.message || 'Admin P2P Transfer completed!', 'success');
+                  setShowAdminP2PModal(false);
+                  await Promise.all([loadAdminUsers(), loadAdminTransactions(), loadAdminP2PHistory()]);
+                } finally {
+                  setIsExecutingAdminP2P(false);
+                }
+              }}
+              className="space-y-3.5"
+            >
+              <div>
+                <label className="block text-xs font-bold text-slate-300 mb-1">
+                  1. Sender Account (User ID / Phone / Invite Code)
+                </label>
+                <select
+                  value={adminP2PSenderQuery}
+                  onChange={(e) => setAdminP2PSenderQuery(e.target.value)}
+                  className="w-full mb-1.5 px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-slate-200 outline-none focus:border-cyan-500"
+                >
+                  <option value="">-- Select Sender from Members --</option>
+                  {adminUsers.map((u) => (
+                    <option key={`sender-${u.id}`} value={u.id}>
+                      {u.nickname || 'User'} · ID {u.id} · {u.phone} (Charged: ${(u.rechargeBalance || 0).toFixed(2)} | Withdrawable: ${(u.withdrawalBalance || 0).toFixed(2)})
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="text"
+                  value={adminP2PSenderQuery}
+                  onChange={(e) => setAdminP2PSenderQuery(e.target.value)}
+                  placeholder="Or type Sender ID / 10-digit Mobile / Code"
+                  className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white font-mono outline-none focus:border-cyan-500"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-300 mb-1">
+                  2. Receiver Account (User ID / Phone / Invite Code)
+                </label>
+                <select
+                  value={adminP2PRecipientQuery}
+                  onChange={(e) => setAdminP2PRecipientQuery(e.target.value)}
+                  className="w-full mb-1.5 px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-slate-200 outline-none focus:border-cyan-500"
+                >
+                  <option value="">-- Select Receiver from Members --</option>
+                  {adminUsers.map((u) => (
+                    <option key={`rcpt-${u.id}`} value={u.id}>
+                      {u.nickname || 'User'} · ID {u.id} · {u.phone} (Charged: ${(u.rechargeBalance || 0).toFixed(2)})
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="text"
+                  value={adminP2PRecipientQuery}
+                  onChange={(e) => setAdminP2PRecipientQuery(e.target.value)}
+                  placeholder="Or type Receiver ID / 10-digit Mobile / Code"
+                  className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white font-mono outline-none focus:border-cyan-500"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-400 mb-1">Debit Sender Wallet</label>
+                  <select
+                    value={adminP2PSourceWallet}
+                    onChange={(e) => setAdminP2PSourceWallet(e.target.value as any)}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white outline-none focus:border-cyan-500"
+                  >
+                    <option value="rechargeBalance">Charged Balance</option>
+                    <option value="withdrawalBalance">Withdrawal Balance</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-400 mb-1">Credit Receiver Wallet</label>
+                  <select
+                    value={adminP2PTargetWallet}
+                    onChange={(e) => setAdminP2PTargetWallet(e.target.value as any)}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white outline-none focus:border-cyan-500"
+                  >
+                    <option value="rechargeBalance">Charged Balance (Default)</option>
+                    <option value="withdrawalBalance">Withdrawal Balance</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-400 mb-1">Amount (USD)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    value={adminP2PAmount}
+                    onChange={(e) => setAdminP2PAmount(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-sm font-black text-emerald-400 font-mono outline-none focus:border-cyan-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-400 mb-1">Admin Note</label>
+                  <input
+                    type="text"
+                    maxLength={80}
+                    value={adminP2PNote}
+                    onChange={(e) => setAdminP2PNote(e.target.value)}
+                    placeholder="Optional audit note"
+                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white outline-none focus:border-cyan-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAdminP2PModal(false)}
+                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isExecutingAdminP2P}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-teal-600 hover:from-cyan-500 hover:to-teal-500 disabled:opacity-50 text-white text-xs font-extrabold flex items-center gap-1.5 shadow-lg cursor-pointer"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>{isExecutingAdminP2P ? 'Executing...' : 'Execute P2P Transfer'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

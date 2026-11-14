@@ -40,7 +40,12 @@
         "timestamp": { "type": "string" },
         "status": { "type": "string" },
         "referenceNo": { "type": "string" },
-        "paymentMethod": { "type": "string" }
+        "paymentMethod": { "type": "string" },
+        "counterpartyId": { "type": "string" },
+        "counterpartyName": { "type": "string" },
+        "sourceWallet": { "type": "string" },
+        "targetWallet": { "type": "string" },
+        "note": { "type": "string" }
       },
       "required": ["id", "userId", "type", "amount", "status"]
     },
@@ -79,7 +84,11 @@
         "tier1Commission": { "type": "number" },
         "tier2Commission": { "type": "number" },
         "tier3Commission": { "type": "number" },
-        "dailyBonusBase": { "type": "number" }
+        "dailyBonusBase": { "type": "number" },
+        "isP2PEnabled": { "type": "boolean" },
+        "minP2PAmount": { "type": "number" },
+        "maxP2PAmount": { "type": "number" },
+        "p2pNotice": { "type": "string" }
       }
     }
   },

@@ -159,6 +159,12 @@ export interface PlatformSettings {
   // Help Center Direct Redirect Link & Custom Links (Admin Configurable)
   helpCenterUrl?: string;
   helpCenterLinks?: HelpCenterLinkItem[];
+
+  // Peer-to-Peer (P2P) Fund Transfer Admin Controls
+  isP2PEnabled?: boolean;
+  minP2PAmount?: number;
+  maxP2PAmount?: number;
+  p2pNotice?: string;
 }
 
 export interface HelpCenterLinkItem {
@@ -298,10 +304,19 @@ export interface InvestmentOrder {
   refundAmount?: number;
 }
 
+export interface P2PRecipientPreview {
+  id: string;
+  nickname: string;
+  phoneMasked: string;
+  invitationCode: string;
+  vipLevel: number;
+  avatar?: string;
+}
+
 export interface Transaction {
   id: string;
   userId?: string;
-  type: 'recharge' | 'withdraw' | 'earnings' | 'bonus' | 'commission' | 'spin_win';
+  type: 'recharge' | 'withdraw' | 'earnings' | 'bonus' | 'commission' | 'spin_win' | 'p2p_send' | 'p2p_receive';
   amount: number;
   title: string;
   timestamp: string;
@@ -311,6 +326,11 @@ export interface Transaction {
   paymentMethod?: string;
   feeAmount?: number;
   netAmount?: number;
+  counterpartyId?: string;
+  counterpartyName?: string;
+  sourceWallet?: 'rechargeBalance' | 'withdrawalBalance';
+  targetWallet?: 'rechargeBalance' | 'withdrawalBalance';
+  note?: string;
   bankDetails?: {
     accountHolder: string;
     accountNumber: string;

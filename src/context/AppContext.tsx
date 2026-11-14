@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import confetti from 'canvas-confetti';
-import { User, InvestmentProduct, InvestmentOrder, Transaction, TeamMember, ThemeMode, PlatformSettings, NoticeItem, CustomPromoCode, SpinPrizeConfig, ShippingAddress, EcommerceOrder, HomeBanner, ReferrerInfo, OrderSuccessData } from '../types';
+import { User, InvestmentProduct, InvestmentOrder, Transaction, TeamMember, ThemeMode, PlatformSettings, NoticeItem, CustomPromoCode, SpinPrizeConfig, ShippingAddress, EcommerceOrder, HomeBanner, ReferrerInfo, OrderSuccessData, P2PRecipientPreview } from '../types';
 import { INITIAL_NOTICES, INVESTMENT_PRODUCTS, SPIN_PRIZES, DEFAULT_HOME_BANNERS } from '../data/mockData';
-import { dbService, getTransactionTime, mergeUserSafe } from '../services/dbService';
+import { dbService, getTransactionTime, mergeUserSafe, mergeTxListsSafe } from '../services/dbService';
 import { getOrderClaimStatus, formatCountdownHuman } from '../utils/dividendUtils';
 
 interface SupportMessage {
@@ -47,6 +47,20 @@ interface AppContextType {
   recharge: (amount: number, method: string, referenceNo?: string) => Promise<{ success: boolean; message: string }>;
   submitManualRecharge: (amount: number, utrNumber: string, screenshotUrl?: string) => Promise<{ success: boolean; message: string }>;
   withdraw: (amount: number, details: NonNullable<User['bankDetails']>) => Promise<{ success: boolean; message: string }>;
+  lookupP2PRecipient: (query: string) => Promise<{ success: boolean; recipient?: P2PRecipientPreview; error?: string }>;
+  transferP2PFunds: (payload: {
+    recipientQuery: string;
+    amount: number;
+    sourceWallet: 'withdrawalBalance' | 'rechargeBalance';
+    targetWallet?: 'withdrawalBalance' | 'rechargeBalance';
+    note?: string;
+  }) => Promise<{
+    success: boolean;
+    message: string;
+    referenceNo?: string;
+    recipientPreview?: P2PRecipientPreview;
+    transaction?: Transaction;
+  }>;
   investInProduct: (product: InvestmentProduct) => Promise<{ success: boolean; message: string }>;
   claimDailyDividends: (targetOrderId?: string) => Promise<{ success: boolean; claimedAmount: number }>;
   dailyCheckIn: () => Promise<{ success: boolean; bonus: number; message: string }>;
@@ -67,8 +81,8 @@ interface AppContextType {
   setSelectedProductForCheckout: (p: InvestmentProduct | null) => void;
 
   // Modals
-  activeModal: 'recharge' | 'withdraw' | 'spin' | 'support' | 'orders' | 'team' | 'vip' | 'balance' | 'rewards' | 'auth' | 'download' | 'policies' | null;
-  openModal: (modal: 'recharge' | 'withdraw' | 'spin' | 'support' | 'orders' | 'team' | 'vip' | 'balance' | 'rewards' | 'auth' | 'download' | 'policies') => void;
+  activeModal: 'recharge' | 'withdraw' | 'p2p' | 'spin' | 'support' | 'orders' | 'team' | 'vip' | 'balance' | 'rewards' | 'auth' | 'download' | 'policies' | null;
+  openModal: (modal: 'recharge' | 'withdraw' | 'p2p' | 'spin' | 'support' | 'orders' | 'team' | 'vip' | 'balance' | 'rewards' | 'auth' | 'download' | 'policies') => void;
   closeModal: () => void;
   rewardsModalTab: 'checkin' | 'giftcard';
   setRewardsModalTab: (tab: 'checkin' | 'giftcard') => void;
@@ -196,33 +210,7 @@ const INITIAL_TXS: Transaction[] = [];
 const INITIAL_TEAM: TeamMember[] = [];
 
 export const deduplicateTransactions = (txs: Transaction[]): Transaction[] => {
-  const map = new Map<string, Transaction>();
-  const seenRefs = new Map<string, string>();
-
-  for (const t of txs) {
-    if (!t) continue;
-    const id = String(t.id || (t as any)._id || `tx-${t.createdAt || Date.now()}`);
-    const ref = t.referenceNo ? String(t.referenceNo).trim() : '';
-
-    if (ref && seenRefs.has(ref)) {
-      const targetId = seenRefs.get(ref)!;
-      const existing = map.get(targetId);
-      map.set(targetId, { ...(existing || {}), ...t, id: targetId });
-      continue;
-    }
-
-    if (map.has(id)) {
-      const existing = map.get(id);
-      map.set(id, { ...(existing || {}), ...t, id });
-      if (ref) seenRefs.set(ref, id);
-      continue;
-    }
-
-    map.set(id, { ...t, id });
-    if (ref) seenRefs.set(ref, id);
-  }
-
-  return Array.from(map.values()).sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
+  return mergeTxListsSafe([txs]);
 };
 
 export const deduplicateOrders = (ordersList: InvestmentOrder[]): InvestmentOrder[] => {
@@ -250,26 +238,7 @@ export const deduplicateOrders = (ordersList: InvestmentOrder[]): InvestmentOrde
 };
 
 export const prependTxUnique = (prev: Transaction[], newTx: Transaction): Transaction[] => {
-  const map = new Map<string, Transaction>();
-  const seenRefs = new Set<string>();
-
-  const newId = String(newTx.id || `tx-${Date.now()}`);
-  const newRef = newTx.referenceNo ? String(newTx.referenceNo).trim() : '';
-  map.set(newId, { ...newTx, id: newId });
-  if (newRef) seenRefs.add(newRef);
-
-  for (const t of prev) {
-    if (!t) continue;
-    const id = String(t.id || `tx-${t.createdAt || Math.random()}`);
-    const ref = t.referenceNo ? String(t.referenceNo).trim() : '';
-
-    if (ref && seenRefs.has(ref)) continue;
-    if (map.has(id)) continue;
-
-    map.set(id, { ...t, id });
-    if (ref) seenRefs.add(ref);
-  }
-  return Array.from(map.values());
+  return mergeTxListsSafe([[newTx], prev]);
 };
 
 export const normalizeRedirectUrl = (rawUrl?: string): string => {
@@ -551,6 +520,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     allowUserDividendClaims: true,
     helpCenterUrl: '',
     helpCenterLinks: [],
+    isP2PEnabled: true,
+    minP2PAmount: 1,
+    maxP2PAmount: 50000,
+    p2pNotice: '',
   };
 
   const [platformSettings, setPlatformSettings] = useState<PlatformSettings>(() => {
@@ -594,13 +567,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const isPoppingStateRef = useRef<boolean>(false);
   const lastExitPressRef = useRef<number>(0);
   const isWithdrawalLockRef = useRef<boolean>(false);
+  const isP2PTransferLockRef = useRef<boolean>(false);
   const isClaimingDividendRef = useRef<boolean>(false);
   const userRef = useRef<User | null>(user);
+  const ordersRef = useRef<InvestmentOrder[]>(orders);
   const lastUserActionTimestampRef = useRef<number>(0);
 
   useEffect(() => {
     userRef.current = user;
   }, [user]);
+
+  useEffect(() => {
+    ordersRef.current = orders;
+  }, [orders]);
 
   const checkIsAdminPath = (): boolean => {
     if (typeof window === 'undefined') return false;
@@ -985,14 +964,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         if (cloudSettings || serverPlatformRes?.settings || serverOtpRes?.settings) {
           setPlatformSettings((prev) => {
+            const serverTs =
+              Number((serverPlatform as any)?.updatedAtMs) ||
+              ((serverPlatform as any)?.updatedAt ? Date.parse((serverPlatform as any).updatedAt) || 0 : 0);
+            const cloudTs =
+              Number((cloudSettings as any)?.updatedAtMs) ||
+              ((cloudSettings as any)?.updatedAt ? Date.parse((cloudSettings as any).updatedAt) || 0 : 0);
+            const orderedSettings =
+              serverTs >= cloudTs
+                ? { ...(cloudSettings || {}), ...serverPlatform }
+                : { ...serverPlatform, ...(cloudSettings || {}) };
             const combined: PlatformSettings = {
               ...prev,
-              ...serverPlatform,
-              ...(cloudSettings || {}),
+              ...orderedSettings,
               ...serverOtp,
               spinPrizes:
-                cloudSettings?.spinPrizes && cloudSettings.spinPrizes.length > 0
-                  ? cloudSettings.spinPrizes
+                (orderedSettings as any)?.spinPrizes && (orderedSettings as any).spinPrizes.length > 0
+                  ? (orderedSettings as any).spinPrizes
                   : prev.spinPrizes,
             };
             try {
@@ -1117,6 +1105,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (isRecentAction && userRef.current) {
             merged.rechargeBalance = userRef.current.rechargeBalance;
             merged.withdrawalBalance = userRef.current.withdrawalBalance;
+            merged.productRevenue = Math.max(Number(userRef.current.productRevenue) || 0, Number(cloudUser.productRevenue) || 0);
             merged.totalInvested = Math.max(userRef.current.totalInvested || 0, cloudUser.totalInvested || 0);
           }
           userRef.current = merged;
@@ -1183,6 +1172,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (isRecentAction && userRef.current) {
           merged.rechargeBalance = userRef.current.rechargeBalance;
           merged.withdrawalBalance = userRef.current.withdrawalBalance;
+          merged.productRevenue = Math.max(Number(userRef.current.productRevenue) || 0, Number(updated.productRevenue) || 0);
           merged.totalInvested = Math.max(userRef.current.totalInvested || 0, updated.totalInvested || 0);
         }
         userRef.current = merged;
@@ -1197,11 +1187,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Subscribe to real-time transaction updates (deposits, payouts, commissions, bonuses)
     const unsubTxs = dbService.subscribeToUserTransactions(user.id, (updatedTxs) => {
       if (isMounted && updatedTxs) {
-        const sorted = [...updatedTxs].sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
-        setTransactions(sorted);
-        try {
-          localStorage.setItem(STORAGE_KEY_TXS, JSON.stringify(sorted));
-        } catch (e) {}
+        setTransactions((prev) => {
+          const combined = deduplicateTransactions([...updatedTxs, ...prev]);
+          try {
+            localStorage.setItem(STORAGE_KEY_TXS, JSON.stringify(combined));
+          } catch (e) {}
+          return combined;
+        });
       }
     });
 
@@ -1432,21 +1424,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const current = userRef.current;
         if (!current) return;
 
+        const isRecentAction =
+          Date.now() - lastUserActionTimestampRef.current < 30000 ||
+          lastUserActionTimestampRef.current > Date.now();
+        if (isRecentAction) return;
+
         const prevW = Number(current.withdrawalBalance) || 0;
         const newW = Number(fresh.withdrawalBalance) || 0;
         const prevR = Number(current.rechargeBalance) || 0;
         const newR = Number(fresh.rechargeBalance) || 0;
 
-        // If balances changed or new commission was added
+        // If balances changed or new commission/P2P transfer was added
         if (newW !== prevW || newR !== prevR) {
           const merged = mergeUserSafe(current, fresh);
           userRef.current = merged;
           setUser(merged);
           localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(merged));
 
-          if (newW > prevW) {
-            const diff = (newW - prevW).toFixed(2);
-            showToast(`🎉 Wallet Balance Updated! +$${diff} added to your account`, 'success');
+          const addedW = Math.max(0, newW - prevW);
+          const addedR = Math.max(0, newR - prevR);
+          const totalAdded = addedW + addedR;
+          if (totalAdded > 0) {
+            showToast(`Wallet Balance Updated! +$${totalAdded.toFixed(2)} added to your account`, 'success');
+            dbService
+              .getTransactions(user.id)
+              .then((freshTxs) => {
+                if (Array.isArray(freshTxs) && freshTxs.length > 0 && isMounted) {
+                  setTransactions(deduplicateTransactions(freshTxs));
+                }
+              })
+              .catch(() => {});
           }
         }
       } catch {}
@@ -1529,6 +1536,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // 6. Credentials fully matched! Log user in
+    userRef.current = cloudUser;
     setUser(cloudUser);
     if (typeof window !== 'undefined') {
       try {
@@ -1563,8 +1571,47 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return true;
   };
 
-  // Multi-tier referral commission distribution (Tier 1: 10%, Tier 2: 3%, Tier 3: 1%)
-  // Server-authoritative: Dispatches exactly ONCE to SQLite SQL + Disk + PostgreSQL
+  const applyCreditedCommissionsToState = (credited?: any[]) => {
+    if (!Array.isArray(credited) || credited.length === 0) return;
+    for (const item of credited) {
+      if (!item) continue;
+      if (item.updatedUser?.id) {
+        setAdminUsers((prev) =>
+          prev.map((u) =>
+            u.id === item.updatedUser.id
+              ? {
+                  ...u,
+                  withdrawalBalance: Number(item.updatedUser.withdrawalBalance) || 0,
+                  totalCommissionEarned: Number(item.updatedUser.totalCommissionEarned) || 0,
+                }
+              : u
+          )
+        );
+        if (userRef.current && String(userRef.current.id).trim() === String(item.updatedUser.id).trim()) {
+          const nextCurrent = {
+            ...userRef.current,
+            withdrawalBalance: Number(item.updatedUser.withdrawalBalance) || 0,
+            totalCommissionEarned: Number(item.updatedUser.totalCommissionEarned) || 0,
+          };
+          lastUserActionTimestampRef.current = Date.now() + 30000;
+          userRef.current = nextCurrent;
+          setUser(nextCurrent);
+          try {
+            localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(nextCurrent));
+          } catch {}
+        }
+      }
+      if (item.transaction?.id) {
+        setAdminTransactions((prev) => prependTxUnique(prev, item.transaction));
+        if (userRef.current && String(userRef.current.id).trim() === String(item.transaction.userId).trim()) {
+          setTransactions((prev) => prependTxUnique(prev, item.transaction));
+        }
+      }
+    }
+  };
+
+  // Multi-tier referral commission distribution (Uses Admin-configured Tier 1 / Tier 2 / Tier 3 %)
+  // Server-authoritative: Dispatches exactly ONCE to SQLite SQL + Disk + PostgreSQL + Firestore sync
   const distributeMultiTierCommissions = async (
     payer: User,
     amount: number,
@@ -1577,7 +1624,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     try {
       // Trigger authoritative server-side commission distribution to SQLite, disk backup, and Cloud SQL ONCE
-      await dbService.distributeCommissionOnServer(payer.id || payer.phone, amount, actionType, referenceId);
+      const distRes = await dbService.distributeCommissionOnServer(payer.id || payer.phone, amount, actionType, referenceId);
+      if (Array.isArray(distRes?.credited) && distRes.credited.length > 0) {
+        applyCreditedCommissionsToState(distRes.credited);
+      }
 
       // If the current user is an upliner (and NOT the payer who just spent money), refresh their commission balance
       const payerId = String(payer?.id || '').trim();
@@ -1673,6 +1723,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Save permanently to Cloud SQL, disk backup, and Firestore
     await dbService.saveUser(newUser, true);
+    userRef.current = newUser;
     setUser(newUser);
     setAdminUsers((prev) => {
       const filtered = prev.filter((u) => u.id !== newUser.id && u.phone !== newUser.phone);
@@ -1789,6 +1840,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.removeItem(STORAGE_KEY_ORDERS);
     localStorage.removeItem(STORAGE_KEY_TXS);
     localStorage.removeItem('hd_ecommerce_orders_v1');
+    userRef.current = null;
     setUser(null);
     setOrders([]);
     setTransactions([]);
@@ -2088,6 +2140,105 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  // Peer-to-Peer (P2P) Recipient Lookup
+  const lookupP2PRecipient = async (query: string) => {
+    const currentUser = userRef.current || user;
+    return dbService.lookupP2PRecipient(query, currentUser?.id, currentUser?.phone);
+  };
+
+  // Peer-to-Peer (P2P) Atomic Fund Transfer
+  const transferP2PFunds = async (payload: {
+    recipientQuery: string;
+    amount: number;
+    sourceWallet: 'withdrawalBalance' | 'rechargeBalance';
+    targetWallet?: 'withdrawalBalance' | 'rechargeBalance';
+    note?: string;
+  }) => {
+    const currentUser = userRef.current || user;
+    if (!currentUser) {
+      openModal('auth');
+      return { success: false, message: 'Please login first' };
+    }
+    if (isP2PTransferLockRef.current) {
+      return { success: false, message: 'A P2P transfer is already in progress. Please wait.' };
+    }
+    isP2PTransferLockRef.current = true;
+
+    try {
+      const result = await dbService.executeP2PTransfer({
+        senderId: currentUser.id,
+        recipientQuery: payload.recipientQuery,
+        amount: payload.amount,
+        sourceWallet: payload.sourceWallet,
+        targetWallet: payload.targetWallet,
+        note: payload.note,
+      });
+
+      if (!result.success || !result.sender) {
+        const errMsg = result.error || 'P2P transfer failed. Please check recipient details and balance.';
+        showToast(errMsg, 'error');
+        return { success: false, message: errMsg };
+      }
+
+      const updatedSender: User = {
+        ...currentUser,
+        ...result.sender,
+      };
+
+      userRef.current = updatedSender;
+      lastUserActionTimestampRef.current = Date.now() + 30000;
+      setUser(updatedSender);
+
+      try {
+        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(updatedSender));
+        const rawBackup = localStorage.getItem('nexa_users_backup_v2');
+        if (rawBackup) {
+          const parsed = JSON.parse(rawBackup);
+          if (Array.isArray(parsed)) {
+            const nextBackup = parsed.map((u: any) =>
+              u.id === updatedSender.id ? { ...u, ...updatedSender } : u
+            );
+            localStorage.setItem('nexa_users_backup_v2', JSON.stringify(nextBackup));
+          }
+        }
+      } catch {}
+
+      if (result.senderTransaction) {
+        setTransactions((prev) => prependTxUnique(prev, result.senderTransaction!));
+        setAdminTransactions((prev) => prependTxUnique(prev, result.senderTransaction!));
+      }
+      if (result.recipientTransaction) {
+        setAdminTransactions((prev) => prependTxUnique(prev, result.recipientTransaction!));
+      }
+
+      setAdminUsers((prev) =>
+        prev.map((u) => {
+          if (u.id === updatedSender.id) return { ...u, ...updatedSender };
+          if (result.recipientPreview && u.id === result.recipientPreview.id) {
+            return {
+              ...u,
+              rechargeBalance: Number(((Number(u.rechargeBalance) || 0) + Number(payload.amount)).toFixed(2)),
+            };
+          }
+          return u;
+        })
+      );
+
+      showToast(result.message || 'P2P fund transfer completed!', 'success');
+      return {
+        success: true,
+        message: result.message || 'P2P transfer completed!',
+        referenceNo: result.referenceNo,
+        recipientPreview: result.recipientPreview,
+        transaction: result.senderTransaction,
+      };
+    } finally {
+      setTimeout(() => {
+        isP2PTransferLockRef.current = false;
+      }, 1500);
+    }
+  };
+
   // Invest in Product
   const investInProduct = async (product: InvestmentProduct): Promise<{ success: boolean; message: string }> => {
     // Read the most up-to-date user instance synchronously so consecutive purchases within 5 seconds deduct accurately
@@ -2210,7 +2361,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       userNickname: currentUser.nickname,
       adminNote: requiresApproval ? 'Submitted for Admin Approval' : 'Direct Auto-Activation',
     };
-    await dbService.saveOrder(newOrder, currentUser.id);
+    const saveOrderRes = await dbService.saveOrder(newOrder, currentUser.id);
     setOrders((prev) => [newOrder, ...prev]);
     setAdminOrders((prev) => [newOrder, ...prev]);
 
@@ -2228,8 +2379,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setTransactions((prev) => prependTxUnique(prev, investTx));
     setAdminTransactions((prev) => prependTxUnique(prev, investTx));
 
-    // Distribute multi-tier referral commissions to uplines
-    distributeMultiTierCommissions(updatedUser, product.price, 'investment', newOrder.id);
+    // Distribute or sync multi-tier referral commissions to uplines
+    if (Array.isArray(saveOrderRes?.commissionResult?.credited) && saveOrderRes.commissionResult.credited.length > 0) {
+      applyCreditedCommissionsToState(saveOrderRes.commissionResult.credited);
+    } else {
+      distributeMultiTierCommissions(updatedUser, product.price, 'investment', newOrder.id);
+    }
 
     confetti({
       particleCount: 120,
@@ -2317,7 +2472,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         nextClaimTimestamp: nextClaimTime,
         status: 'active',
       };
-      await dbService.saveOrder(newInvOrder, user.id);
+      const saveEcomOrdRes = await dbService.saveOrder(newInvOrder, user.id);
       setOrders((prev) => [newInvOrder, ...prev]);
 
       // Add spin chance and investment tracking
@@ -2329,8 +2484,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setUser(updatedUser);
       await dbService.saveUser(updatedUser);
 
-      // Distribute multi-tier referral commissions to uplines
-      distributeMultiTierCommissions(updatedUser, product.price, 'investment', newInvOrder.id);
+      // Distribute or sync multi-tier referral commissions to uplines
+      if (Array.isArray(saveEcomOrdRes?.commissionResult?.credited) && saveEcomOrdRes.commissionResult.credited.length > 0) {
+        applyCreditedCommissionsToState(saveEcomOrdRes.commissionResult.credited);
+      } else {
+        distributeMultiTierCommissions(updatedUser, product.price, 'investment', newInvOrder.id);
+      }
     }
 
     // Save transaction
@@ -2360,7 +2519,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Claim Daily Dividends (Strict 24-Hour Cycle from Purchase & Last Claim)
   const claimDailyDividends = async (targetOrderId?: string): Promise<{ success: boolean; claimedAmount: number }> => {
-    if (!user || orders.length === 0) {
+    const activeUser = userRef.current || user;
+    const activeOrders = ordersRef.current.length > 0 ? ordersRef.current : orders;
+
+    if (!activeUser || activeOrders.length === 0) {
       showToast('No active investment contracts found', 'info');
       return { success: false, claimedAmount: 0 };
     }
@@ -2374,6 +2536,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, claimedAmount: 0 };
     }
     isClaimingDividendRef.current = true;
+    lastUserActionTimestampRef.current = Date.now() + 30000;
 
     try {
       // 1. Authoritative Server Claim: Atomic SQLite balance update, order settlement & instant senior commissions
@@ -2382,34 +2545,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            userId: user.id,
+            userId: activeUser.id,
             targetOrderId,
+            clientUser: activeUser,
+            clientOrders: activeOrders.filter((o) => o.status === 'active'),
           }),
         });
         const data = await res.json();
         if (data.success && data.user) {
+          const claimedVal = Number(data.claimedAmount || 0);
           const freshUser: User = {
-            ...user,
+            ...activeUser,
             ...data.user,
-            withdrawalBalance: Number(data.user.withdrawalBalance ?? (user.withdrawalBalance + (data.claimedAmount || 0))),
-            productRevenue: Number(data.user.productRevenue ?? (user.productRevenue + (data.claimedAmount || 0))),
+            withdrawalBalance: Number(
+              data.user.withdrawalBalance ?? Number(((Number(activeUser.withdrawalBalance) || 0) + claimedVal).toFixed(2))
+            ),
+            productRevenue: Number(
+              data.user.productRevenue ?? Number(((Number(activeUser.productRevenue) || 0) + claimedVal).toFixed(2))
+            ),
           };
+          lastUserActionTimestampRef.current = Date.now() + 30000;
           userRef.current = freshUser;
           setUser(freshUser);
+          setAdminUsers((prev) => prev.map((u) => (u.id === freshUser.id ? { ...u, ...freshUser } : u)));
           localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(freshUser));
 
           if (Array.isArray(data.orders)) {
+            ordersRef.current = data.orders;
             setOrders(data.orders);
+            setAdminOrders((prev) =>
+              prev.map((o) => {
+                const updatedOrd = data.orders.find((uOrd: InvestmentOrder) => uOrd.id === o.id);
+                return updatedOrd || o;
+              })
+            );
             localStorage.setItem(STORAGE_KEY_ORDERS, JSON.stringify(data.orders));
-            // Sync to Firestore in background so real-time listeners don't revert to stale values
-            for (const ord of data.orders) {
-              dbService.saveOrder(ord, user.id).catch(() => {});
-            }
           }
           if (data.transaction) {
             setTransactions((prev) => prependTxUnique(prev, data.transaction));
             setAdminTransactions((prev) => prependTxUnique(prev, data.transaction));
           }
+
+          // Keep Firestore and Admin state aligned with SQLite so real-time listeners never overwrite credited wallet or tx
+          if (Array.isArray(data.commissionResult?.credited) && data.commissionResult.credited.length > 0) {
+            applyCreditedCommissionsToState(data.commissionResult.credited);
+          }
+          await dbService.syncDividendClaimToFirestore({
+            user: freshUser,
+            orders: Array.isArray(data.orders) ? data.orders : undefined,
+            transaction: data.transaction,
+            credited: Array.isArray(data.commissionResult?.credited) ? data.commissionResult.credited : undefined,
+          }).catch(() => {});
 
           confetti({
             particleCount: 110,
@@ -2417,7 +2603,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             origin: { y: 0.6 },
           });
 
-          const claimedVal = Number(data.claimedAmount || 0);
           showToast(
             `Instant Claim! +$${claimedVal.toFixed(2)} added directly to your withdrawable wallet, and commissions sent to your seniors!`,
             'success'
@@ -2433,7 +2618,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       // 2. Resilient Local Fallback (in case server is temporarily unreachable)
       const now = Date.now();
-      const activeContracts = orders.filter(
+      const activeContracts = activeOrders.filter(
         (o) => o.status === 'active' && (!targetOrderId || o.id === targetOrderId)
       );
 
@@ -2467,7 +2652,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       let totalClaim = 0;
       const nextClaimTime = now + 24 * 60 * 60 * 1000;
 
-      const updatedOrders = orders.map((o) => {
+      const updatedOrders = activeOrders.map((o) => {
         const isEligible = eligibleOrders.some((el) => el.id === o.id);
         if (isEligible) {
           const dividend = o.dailyEarnings;
@@ -2487,6 +2672,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return o;
       });
 
+      ordersRef.current = updatedOrders;
       setOrders(updatedOrders);
       try {
         localStorage.setItem(STORAGE_KEY_ORDERS, JSON.stringify(updatedOrders));
@@ -2494,15 +2680,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       for (const ord of updatedOrders) {
         if (eligibleOrders.some((el) => el.id === ord.id)) {
-          await dbService.saveOrder(ord, user.id);
+          await dbService.saveOrder(ord, activeUser.id);
         }
       }
 
       const updatedUser: User = {
-        ...user,
-        withdrawalBalance: Number((user.withdrawalBalance + totalClaim).toFixed(2)),
-        productRevenue: Number((user.productRevenue + totalClaim).toFixed(2)),
+        ...activeUser,
+        withdrawalBalance: Number(((Number(activeUser.withdrawalBalance) || 0) + totalClaim).toFixed(2)),
+        productRevenue: Number(((Number(activeUser.productRevenue) || 0) + totalClaim).toFixed(2)),
       };
+      lastUserActionTimestampRef.current = Date.now() + 30000;
       userRef.current = updatedUser;
       setUser(updatedUser);
       try {
@@ -2512,7 +2699,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       const divTx: Transaction = {
         id: `tx-${Date.now()}`,
-        userId: user.id,
+        userId: activeUser.id,
         type: 'earnings',
         amount: totalClaim,
         title: `Daily 24-Hour Dividend Settled (${eligibleOrders.length} contracts)`,
@@ -2520,7 +2707,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         status: 'completed',
         referenceNo: `DIV${Date.now()}`,
       };
-      await dbService.saveTransaction(divTx, user.id);
+      await dbService.saveTransaction(divTx, activeUser.id);
       setTransactions((prev) => prependTxUnique(prev, divTx));
       setAdminTransactions((prev) => prependTxUnique(prev, divTx));
 
@@ -2993,7 +3180,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     const unsubTxs = dbService.subscribeToAllTransactions((liveTxs) => {
       if (isMounted && liveTxs.length > 0) {
-        setAdminTransactions(liveTxs);
+        setAdminTransactions((prev) => deduplicateTransactions([...prev, ...liveTxs]));
       }
     });
     return () => {
@@ -3259,7 +3446,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const list = await dbService.getAllTransactions();
       if (list.length > 0) {
-        setAdminTransactions(list);
+        setAdminTransactions((prev) => deduplicateTransactions([...prev, ...list]));
       } else {
         setAdminTransactions(transactions);
       }
@@ -3276,11 +3463,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Check if already completed in state
-    const existing = adminTransactions.find((t) => t.id === txId || t.referenceNo === txId);
+    const existing =
+      adminTransactions.find((t) => t.id === txId || t.referenceNo === txId) ||
+      transactions.find((t) => t.id === txId || t.referenceNo === txId);
     if (existing && existing.status === 'completed') {
       showToast('This deposit is already approved and credited!', 'info');
       return;
     }
+    const originalRef = existing?.referenceNo;
+    const sqlId = (existing as any)?.sqlId;
 
     activeFundOps.add(lockKey);
     try {
@@ -3288,20 +3479,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const apiRes = await dbService.adminRechargeAction({
         action: 'approve',
         txId,
+        originalReferenceNo: originalRef,
+        sqlId,
         userId,
         amount,
       });
+
+      // 2. Sync to Firestore (across all matching copies) and local state
+      await dbService.updateTransaction(txId, { status: 'completed' }, originalRef);
+      const matchesTx = (t: Transaction) =>
+        t.id === txId || t.referenceNo === txId || (Boolean(originalRef) && t.referenceNo === originalRef);
+      setAdminTransactions((prev) =>
+        prev.map((t) => (matchesTx(t) ? { ...t, status: 'completed' } : t))
+      );
+      setTransactions((prev) =>
+        prev.map((t) => (matchesTx(t) ? { ...t, status: 'completed' } : t))
+      );
 
       if (apiRes.alreadyProcessed) {
         showToast('This deposit was already approved previously.', 'info');
         return;
       }
-
-      // 2. Sync to Firestore
-      await dbService.updateTransaction(txId, { status: 'completed' });
-      setAdminTransactions((prev) =>
-        prev.map((t) => (t.id === txId || t.referenceNo === txId ? { ...t, status: 'completed' } : t))
-      );
 
       if (userId) {
         const targetUser = apiRes.user || (await dbService.getUser(userId));
@@ -3327,22 +3525,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const lockKey = `recharge-reject-${txId}`;
     if (activeFundOps.has(lockKey)) return;
 
-    const existing = adminTransactions.find((t) => t.id === txId || t.referenceNo === txId);
+    const existing =
+      adminTransactions.find((t) => t.id === txId || t.referenceNo === txId) ||
+      transactions.find((t) => t.id === txId || t.referenceNo === txId);
     if (existing && (existing.status === 'rejected' || existing.status === 'completed')) {
       showToast(`Deposit is already ${existing.status}!`, 'info');
       return;
     }
+    const originalRef = existing?.referenceNo;
+    const sqlId = (existing as any)?.sqlId;
 
     activeFundOps.add(lockKey);
     try {
       await dbService.adminRechargeAction({
         action: 'reject',
         txId,
+        originalReferenceNo: originalRef,
+        sqlId,
         reason,
       });
-      await dbService.updateTransaction(txId, { status: 'rejected' });
+      await dbService.updateTransaction(txId, { status: 'rejected' }, originalRef);
+      const matchesTx = (t: Transaction) =>
+        t.id === txId || t.referenceNo === txId || (Boolean(originalRef) && t.referenceNo === originalRef);
       setAdminTransactions((prev) =>
-        prev.map((t) => (t.id === txId || t.referenceNo === txId ? { ...t, status: 'rejected' } : t))
+        prev.map((t) => (matchesTx(t) ? { ...t, status: 'rejected' } : t))
+      );
+      setTransactions((prev) =>
+        prev.map((t) => (matchesTx(t) ? { ...t, status: 'rejected' } : t))
       );
       showToast(`Add Money rejected (${reason || 'Verification failed'})`, 'info');
     } finally {
@@ -3350,50 +3559,67 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const adminApproveWithdrawal = async (txId: string, referenceNo?: string) => {
+  const adminApproveWithdrawal = async (txId: string, utrInput?: string) => {
     const lockKey = `withdraw-approve-${txId}`;
     if (activeFundOps.has(lockKey)) {
       showToast('Withdrawal approval is already in progress.', 'info');
       return;
     }
 
-    const existing = adminTransactions.find((t) => t.id === txId || t.referenceNo === txId);
+    const existing =
+      adminTransactions.find((t) => t.id === txId || t.referenceNo === txId) ||
+      transactions.find((t) => t.id === txId || t.referenceNo === txId);
     if (existing && existing.status === 'completed') {
       showToast('This withdrawal is already approved and completed!', 'info');
       return;
     }
 
+    const originalRef = existing?.referenceNo;
+    const sqlId = (existing as any)?.sqlId;
+    const cleanUtr = utrInput ? String(utrInput).trim() : '';
+
     activeFundOps.add(lockKey);
     try {
-      const update: Partial<Transaction> = { status: 'completed' };
-      if (referenceNo) update.referenceNo = referenceNo;
+      // Keep referenceNo immutable (e.g. WTH...) and store UTR cleanly in utrNumber so keys NEVER split across DB/Firestore!
+      const update: Partial<Transaction> = {
+        status: 'completed',
+        ...(cleanUtr ? { utrNumber: cleanUtr } : {}),
+      };
 
       // 1. Sync to backend API & Cloud SQL with anti-double-click lock
       const apiRes = await dbService.adminWithdrawalAction({
         action: 'approve',
         txId,
-        referenceNo,
+        originalReferenceNo: originalRef,
+        utrNumber: cleanUtr || undefined,
+        sqlId,
+        userId: existing?.userId,
+        amount: existing?.amount,
       });
+
+      // 2. Sync to ALL matching Firestore documents (using both txId and originalReferenceNo)
+      await dbService.updateTransaction(txId, update, originalRef);
+
+      // 3. Update in-memory admin & user transactions state immediately
+      const matchesTx = (t: Transaction) =>
+        t.id === txId ||
+        t.referenceNo === txId ||
+        (Boolean(originalRef) && t.referenceNo === originalRef) ||
+        (sqlId !== undefined && (t as any).sqlId === sqlId);
+
+      setAdminTransactions((prev) =>
+        prev.map((t) => (matchesTx(t) ? { ...t, ...update } : t))
+      );
+      setTransactions((prev) =>
+        prev.map((t) => (matchesTx(t) ? { ...t, ...update } : t))
+      );
 
       if (apiRes.alreadyProcessed) {
         showToast('This withdrawal was already approved previously.', 'info');
         return;
       }
 
-      // 2. Sync to Firestore
-      await dbService.updateTransaction(txId, update);
-
-      // 3. Update in-memory admin transactions state
-      setAdminTransactions((prev) =>
-        prev.map((t) => (t.id === txId || t.referenceNo === txId ? { ...t, ...update } : t))
-      );
-
-      // 4. Update logged-in user transactions state if applicable
-      setTransactions((prev) =>
-        prev.map((t) => (t.id === txId || t.referenceNo === txId ? { ...t, ...update } : t))
-      );
-
-      showToast(`Withdrawal marked as Paid & Completed!${referenceNo ? ` (UTR: ${referenceNo})` : ''}`, 'success');
+      showToast(`Withdrawal marked as Paid & Completed!${cleanUtr ? ` (UTR: ${cleanUtr})` : ''}`, 'success');
     } finally {
       activeFundOps.delete(lockKey);
     }
@@ -3406,11 +3632,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    const existing = adminTransactions.find((t) => t.id === txId || t.referenceNo === txId);
+    const existing =
+      adminTransactions.find((t) => t.id === txId || t.referenceNo === txId) ||
+      transactions.find((t) => t.id === txId || t.referenceNo === txId);
     if (existing && (existing.status === 'rejected' || existing.status === 'completed')) {
       showToast(`This withdrawal is already ${existing.status}! Duplicate refund cannot be applied.`, 'info');
       return;
     }
+
+    const originalRef = existing?.referenceNo;
+    const sqlId = (existing as any)?.sqlId;
 
     activeFundOps.add(lockKey);
     try {
@@ -3421,26 +3652,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const apiRes = await dbService.adminWithdrawalAction({
         action: 'reject',
         txId,
+        originalReferenceNo: originalRef,
+        sqlId,
         userId,
         amount: numAmount,
         reason,
       });
 
+      // 2. Sync to ALL matching Firestore documents
+      await dbService.updateTransaction(txId, update, originalRef);
+
+      // 3. Update admin transactions and user transactions state
+      const matchesTx = (t: Transaction) =>
+        t.id === txId ||
+        t.referenceNo === txId ||
+        (Boolean(originalRef) && t.referenceNo === originalRef) ||
+        (sqlId !== undefined && (t as any).sqlId === sqlId);
+
+      setAdminTransactions((prev) =>
+        prev.map((t) => (matchesTx(t) ? { ...t, status: 'rejected' } : t))
+      );
+      setTransactions((prev) =>
+        prev.map((t) => (matchesTx(t) ? { ...t, status: 'rejected' } : t))
+      );
+
       if (apiRes.alreadyProcessed) {
         showToast('This withdrawal was already rejected previously. Duplicate refund prevented.', 'info');
         return;
       }
-
-      // 2. Sync to Firestore
-      await dbService.updateTransaction(txId, update);
-
-      // 3. Update admin transactions and user transactions state
-      setAdminTransactions((prev) =>
-        prev.map((t) => (t.id === txId || t.referenceNo === txId ? { ...t, status: 'rejected' } : t))
-      );
-      setTransactions((prev) =>
-        prev.map((t) => (t.id === txId || t.referenceNo === txId ? { ...t, status: 'rejected' } : t))
-      );
 
       // 4. Refund money back to user withdrawal balance in React state ONLY if not already processed
       if (userId && numAmount > 0) {
@@ -3498,6 +3737,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (res.success && res.order) {
       setAdminOrders((prev) => prev.map((o) => (o.id === orderId ? res.order! : o)));
       setOrders((prev) => prev.map((o) => (o.id === orderId ? res.order! : o)));
+      if (Array.isArray(res.commissionResult?.credited) && res.commissionResult.credited.length > 0) {
+        applyCreditedCommissionsToState(res.commissionResult.credited);
+      }
       showToast(`Order #${orderId} approved and activated! 24h cycle initiated.`, 'success');
     } else {
       showToast(res.message || 'Failed to approve order', 'error');
@@ -3543,11 +3785,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setAdminOrders((prev) => prev.map((o) => (o.id === orderId ? res.order! : o)));
         setOrders((prev) => prev.map((o) => (o.id === orderId ? res.order! : o)));
       }
-      await loadAdminUsers();
-      if (user && res.order?.userId === user.id) {
-        const updated = await dbService.getUser(user.id);
-        if (updated) setUser(updated);
+      if (res.transaction) {
+        setAdminTransactions((prev) => prependTxUnique(prev, res.transaction!));
+        if (user && res.transaction.userId === user.id) {
+          setTransactions((prev) => prependTxUnique(prev, res.transaction!));
+        }
       }
+      if (res.user) {
+        setAdminUsers((prev) => prev.map((u) => (u.id === res.user!.id ? { ...u, ...res.user! } : u)));
+        if (user && res.user.id === user.id) {
+          lastUserActionTimestampRef.current = Date.now() + 30000;
+          const merged = { ...user, ...res.user };
+          userRef.current = merged;
+          setUser(merged);
+          localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(merged));
+        }
+      }
+      await loadAdminUsers();
       showToast(res.message || `Order #${orderId} cancelled & refunded!`, 'success');
     } else {
       showToast(res.message || 'Failed to cancel order', 'error');
@@ -3559,11 +3813,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (res.success && res.order) {
       setAdminOrders((prev) => prev.map((o) => (o.id === orderId ? res.order! : o)));
       setOrders((prev) => prev.map((o) => (o.id === orderId ? res.order! : o)));
-      await loadAdminUsers();
-      if (user && res.order.userId === user.id) {
-        const updated = await dbService.getUser(user.id);
-        if (updated) setUser(updated);
+      if (res.transaction) {
+        setAdminTransactions((prev) => prependTxUnique(prev, res.transaction!));
+        if (user && res.transaction.userId === user.id) {
+          setTransactions((prev) => prependTxUnique(prev, res.transaction!));
+        }
       }
+      if (res.user) {
+        setAdminUsers((prev) => prev.map((u) => (u.id === res.user!.id ? { ...u, ...res.user! } : u)));
+        if (user && res.user.id === user.id) {
+          lastUserActionTimestampRef.current = Date.now() + 30000;
+          const merged = { ...user, ...res.user };
+          userRef.current = merged;
+          setUser(merged);
+          localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(merged));
+        }
+      }
+      if (Array.isArray(res.commissionResult?.credited) && res.commissionResult.credited.length > 0) {
+        applyCreditedCommissionsToState(res.commissionResult.credited);
+      }
+      await loadAdminUsers();
       showToast(res.message || `Dividend paid for Order #${orderId}!`, 'success');
     } else {
       showToast(res.message || 'Failed to payout dividend', 'error');
@@ -3611,17 +3880,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updatePlatformSettings = async (newSettings: Partial<PlatformSettings>) => {
-    const merged = { ...platformSettings, ...newSettings };
+    const merged = { ...platformSettings, ...newSettings, updatedAtMs: Date.now() } as PlatformSettings;
     setPlatformSettings(merged);
     try {
       localStorage.setItem('nexa_platform_settings', JSON.stringify(merged));
     } catch (e) {}
     await Promise.all([
-      fetch('/api/platform-settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(merged),
-      }).catch(() => {}),
+      dbService.savePlatformSettings(merged).catch(() => {}),
       fetch('/api/admin/otp-settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3640,7 +3905,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           helpCenterLinks: Array.isArray(merged.helpCenterLinks) ? merged.helpCenterLinks : [],
         }),
       }).catch(() => {}),
-      dbService.savePlatformSettings(merged).catch(() => {}),
     ]);
   };
 
@@ -3733,6 +3997,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         recharge,
         submitManualRecharge,
         withdraw,
+        lookupP2PRecipient,
+        transferP2PFunds,
         investInProduct,
         claimDailyDividends,
         dailyCheckIn,

@@ -240,16 +240,78 @@ export async function createTransaction(tx: {
   }
 }
 
-// Update transaction status in DB (by referenceNo or id)
+// Find transactions in DB matching any of the provided identifiers (numeric id or referenceNo)
+export async function findTransactionsInDbByIdentifiers(identifiers: string[]) {
+  if (!isSqlConfigured) return [];
+  try {
+    const cleanList = Array.from(
+      new Set(
+        identifiers
+          .map((x) => (x !== undefined && x !== null ? String(x).trim() : ''))
+          .filter(Boolean)
+      )
+    );
+    if (cleanList.length === 0) return [];
+
+    const conditions: any[] = [];
+    for (const clean of cleanList) {
+      conditions.push(eq(transactions.referenceNo, clean));
+      if (/^\d+$/.test(clean)) {
+        const numId = Number(clean);
+        if (Number.isSafeInteger(numId) && numId > 0) {
+          conditions.push(eq(transactions.id, numId));
+        }
+      }
+    }
+    if (conditions.length === 0) return [];
+
+    return await db
+      .select()
+      .from(transactions)
+      .where(conditions.length === 1 ? conditions[0] : or(...conditions));
+  } catch (err) {
+    console.warn('Error finding transactions in DB:', err);
+    return [];
+  }
+}
+
+// Update transaction status in DB (by referenceNo, id, or candidate identifiers)
 export async function updateTransactionStatusInDb(
   identifier: string,
   status: string,
-  extra?: { referenceNo?: string; paymentMethod?: string; reason?: string }
+  extra?: {
+    referenceNo?: string;
+    originalReferenceNo?: string;
+    paymentMethod?: string;
+    reason?: string;
+    identifiers?: string[];
+  }
 ) {
   if (!isSqlConfigured) return null;
   try {
-    const clean = String(identifier).trim();
-    const numId = !isNaN(Number(clean)) ? Number(clean) : null;
+    const candidateSet = new Set<string>();
+    if (identifier) candidateSet.add(String(identifier).trim());
+    if (extra?.originalReferenceNo) candidateSet.add(String(extra.originalReferenceNo).trim());
+    if (Array.isArray(extra?.identifiers)) {
+      for (const idItem of extra.identifiers) {
+        if (idItem !== undefined && idItem !== null && String(idItem).trim()) {
+          candidateSet.add(String(idItem).trim());
+        }
+      }
+    }
+
+    const conditions: any[] = [];
+    for (const clean of candidateSet) {
+      if (!clean) continue;
+      conditions.push(eq(transactions.referenceNo, clean));
+      if (/^\d+$/.test(clean)) {
+        const numId = Number(clean);
+        if (Number.isSafeInteger(numId) && numId > 0) {
+          conditions.push(eq(transactions.id, numId));
+        }
+      }
+    }
+    if (conditions.length === 0) return null;
 
     const updatePayload: any = { status };
     if (extra?.referenceNo) updatePayload.referenceNo = extra.referenceNo;
@@ -258,11 +320,7 @@ export async function updateTransactionStatusInDb(
     const result = await db
       .update(transactions)
       .set(updatePayload)
-      .where(
-        numId
-          ? or(eq(transactions.referenceNo, clean), eq(transactions.id, numId))
-          : eq(transactions.referenceNo, clean)
-      )
+      .where(conditions.length === 1 ? conditions[0] : or(...conditions))
       .returning();
 
     return result && result.length > 0 ? result[0] : null;
