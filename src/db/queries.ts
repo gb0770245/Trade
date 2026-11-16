@@ -200,6 +200,9 @@ export async function createTransaction(tx: {
   feeAmount?: number;
   netAmount?: number;
   bankDetails?: any;
+  balanceAfter?: number;
+  rechargeBalanceAfter?: number;
+  withdrawalBalanceAfter?: number;
 }) {
   if (!isSqlConfigured) return null;
   try {
@@ -231,6 +234,15 @@ export async function createTransaction(tx: {
         feeAmount: Number(tx.feeAmount) || 0,
         netAmount: Number(tx.netAmount) || Number(tx.amount) || 0,
         bankDetails: tx.bankDetails || null,
+        balanceAfter: tx.balanceAfter !== undefined && tx.balanceAfter !== null ? Number(tx.balanceAfter) : null,
+        rechargeBalanceAfter:
+          tx.rechargeBalanceAfter !== undefined && tx.rechargeBalanceAfter !== null
+            ? Number(tx.rechargeBalanceAfter)
+            : null,
+        withdrawalBalanceAfter:
+          tx.withdrawalBalanceAfter !== undefined && tx.withdrawalBalanceAfter !== null
+            ? Number(tx.withdrawalBalanceAfter)
+            : null,
       })
       .returning();
     return result[0];
@@ -285,6 +297,9 @@ export async function updateTransactionStatusInDb(
     paymentMethod?: string;
     reason?: string;
     identifiers?: string[];
+    balanceAfter?: number;
+    rechargeBalanceAfter?: number;
+    withdrawalBalanceAfter?: number;
   }
 ) {
   if (!isSqlConfigured) return null;
@@ -316,6 +331,15 @@ export async function updateTransactionStatusInDb(
     const updatePayload: any = { status };
     if (extra?.referenceNo) updatePayload.referenceNo = extra.referenceNo;
     if (extra?.paymentMethod) updatePayload.paymentMethod = extra.paymentMethod;
+    if (extra?.balanceAfter !== undefined && extra?.balanceAfter !== null) {
+      updatePayload.balanceAfter = Number(extra.balanceAfter);
+    }
+    if (extra?.rechargeBalanceAfter !== undefined && extra?.rechargeBalanceAfter !== null) {
+      updatePayload.rechargeBalanceAfter = Number(extra.rechargeBalanceAfter);
+    }
+    if (extra?.withdrawalBalanceAfter !== undefined && extra?.withdrawalBalanceAfter !== null) {
+      updatePayload.withdrawalBalanceAfter = Number(extra.withdrawalBalanceAfter);
+    }
 
     const result = await db
       .update(transactions)

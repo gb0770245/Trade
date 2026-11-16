@@ -2,6 +2,7 @@ import React from 'react';
 import { ChevronLeft, Bell, ShieldCheck, Sparkles, CheckCircle2 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { INITIAL_NOTICES } from '../data/mockData';
+import { AdMobBanner } from './AdMobBanner';
 
 export const NoticeView: React.FC = () => {
   const { goBack, notices } = useApp();
@@ -24,6 +25,11 @@ export const NoticeView: React.FC = () => {
 
         <div className="w-6" />
       </header>
+
+      {/* Google AdMob Adaptive Banner Slot */}
+      <div className="px-4 mt-3">
+        <AdMobBanner placement="notice" variant="inline" />
+      </div>
 
       {/* Notice List */}
       <div className="px-4 mt-3 space-y-3">

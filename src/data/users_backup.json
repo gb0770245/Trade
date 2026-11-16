@@ -24,7 +24,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:58:03.386Z",
-    "updatedAt": "2026-11-14T15:30:07.146Z"
+    "updatedAt": "2026-11-16T08:41:19.566Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "283754",
@@ -51,7 +52,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T13:41:33.192Z",
-    "updatedAt": "2026-11-14T15:30:07.149Z"
+    "updatedAt": "2026-11-16T08:41:19.567Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "104473",
@@ -78,7 +80,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T17:37:51.313Z",
-    "updatedAt": "2026-11-14T15:30:07.152Z"
+    "updatedAt": "2026-11-16T08:41:19.568Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "618717",
@@ -105,7 +108,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:40:27.922Z",
-    "updatedAt": "2026-11-14T15:30:07.154Z"
+    "updatedAt": "2026-11-16T08:41:19.569Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "684973",
@@ -132,7 +136,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:38:02.713Z",
-    "updatedAt": "2026-11-14T15:30:07.155Z"
+    "updatedAt": "2026-11-16T08:41:19.570Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "959918",
@@ -159,7 +164,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:31:25.611Z",
-    "updatedAt": "2026-11-14T15:30:07.159Z"
+    "updatedAt": "2026-11-16T08:41:19.571Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "787126",
@@ -186,7 +192,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:15:56.676Z",
-    "updatedAt": "2026-11-14T15:30:07.160Z"
+    "updatedAt": "2026-11-16T08:41:19.571Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "142988",
@@ -213,7 +220,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:20:53.407Z",
-    "updatedAt": "2026-11-14T15:30:07.161Z"
+    "updatedAt": "2026-11-16T08:41:19.572Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "109378",
@@ -240,7 +248,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:09:36.547Z",
-    "updatedAt": "2026-11-14T15:30:07.162Z"
+    "updatedAt": "2026-11-16T08:41:19.573Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "300775",
@@ -267,7 +276,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-03T10:01:42.630Z",
-    "updatedAt": "2026-11-14T15:30:07.162Z"
+    "updatedAt": "2026-11-16T08:41:19.574Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "962228",
@@ -294,7 +304,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T05:14:28.059Z",
-    "updatedAt": "2026-11-14T15:30:07.163Z"
+    "updatedAt": "2026-11-16T08:41:19.575Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "928544",
@@ -327,7 +338,8 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T20:45:33.180Z",
-    "updatedAt": "2026-11-14T15:30:07.167Z"
+    "updatedAt": "2026-11-16T08:41:19.576Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "876089",
@@ -354,7 +366,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T01:29:31.604Z",
-    "updatedAt": "2026-11-14T15:30:07.168Z"
+    "updatedAt": "2026-11-16T08:41:19.576Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "833656",
@@ -381,7 +394,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T02:30:01.775Z",
-    "updatedAt": "2026-11-14T15:30:07.170Z"
+    "updatedAt": "2026-11-16T08:41:19.577Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "617291",
@@ -414,7 +428,8 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-02T07:23:13.773Z",
-    "updatedAt": "2026-11-14T15:30:07.172Z"
+    "updatedAt": "2026-11-16T08:41:19.578Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "569973",
@@ -447,10 +462,11 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-02T09:00:48.444Z",
-    "updatedAt": "2026-11-14T15:30:07.173Z",
+    "updatedAt": "2026-11-16T08:41:19.578Z",
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
-    ]
+    ],
+    "isExplicitZeroReset": false
   },
   {
     "id": "560113",
@@ -477,10 +493,11 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T01:18:24.844Z",
-    "updatedAt": "2026-11-14T15:30:07.176Z",
+    "updatedAt": "2026-11-16T08:41:19.579Z",
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
-    ]
+    ],
+    "isExplicitZeroReset": false
   },
   {
     "id": "406332",
@@ -513,11 +530,12 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T13:23:22.426Z",
-    "updatedAt": "2026-11-14T15:30:07.178Z",
+    "updatedAt": "2026-11-16T08:41:19.580Z",
     "redeemedCodes": [
       "BSSBJJIEVJOVGYWBSK",
       "SYBYGEJEBUYIRIIR"
-    ]
+    ],
+    "isExplicitZeroReset": false
   },
   {
     "id": "325697",
@@ -544,10 +562,11 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T01:22:00.237Z",
-    "updatedAt": "2026-11-14T15:30:07.180Z",
+    "updatedAt": "2026-11-16T09:02:53.356Z",
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
-    ]
+    ],
+    "isExplicitZeroReset": false
   },
   {
     "id": "935211",
@@ -580,12 +599,13 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-02T01:28:16.884Z",
-    "updatedAt": "2026-11-14T15:30:07.181Z",
+    "updatedAt": "2026-11-16T08:41:19.582Z",
     "dailySpinsUsedToday": 1,
     "lastSpinDate": "2026-11-02",
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
-    ]
+    ],
+    "isExplicitZeroReset": false
   },
   {
     "id": "833863",
@@ -618,7 +638,7 @@
     },
     "isDeleted": false,
     "createdAt": "2026-10-31T03:08:35.291Z",
-    "updatedAt": "2026-11-14T15:30:07.183Z",
+    "updatedAt": "2026-11-16T09:02:53.357Z",
     "isExplicitZeroReset": true
   },
   {
@@ -652,7 +672,8 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T00:22:37.632Z",
-    "updatedAt": "2026-11-14T15:30:07.184Z"
+    "updatedAt": "2026-11-16T08:41:19.583Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "752520",
@@ -679,7 +700,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T00:22:37.753Z",
-    "updatedAt": "2026-11-14T15:30:07.185Z"
+    "updatedAt": "2026-11-16T09:02:53.358Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "812624",
@@ -706,7 +728,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T00:22:37.863Z",
-    "updatedAt": "2026-11-14T15:30:07.186Z"
+    "updatedAt": "2026-11-16T08:41:19.585Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "950580",
@@ -733,7 +756,8 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T02:54:15.104Z",
-    "updatedAt": "2026-11-14T15:30:07.187Z"
+    "updatedAt": "2026-11-16T08:41:19.586Z",
+    "isExplicitZeroReset": false
   },
   {
     "id": "644029",
@@ -760,10 +784,11 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T07:02:05.540Z",
-    "updatedAt": "2026-11-14T15:30:07.188Z",
+    "updatedAt": "2026-11-16T08:41:19.586Z",
     "redeemedCodes": [
       "BSSBJJIEVJOVGYWBSK"
-    ]
+    ],
+    "isExplicitZeroReset": false
   },
   {
     "id": "518604",
@@ -796,6 +821,97 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T07:33:04.366Z",
-    "updatedAt": "2026-11-14T15:30:07.189Z"
+    "updatedAt": "2026-11-16T09:02:53.358Z",
+    "isExplicitZeroReset": false
+  },
+  {
+    "id": "999993",
+    "phone": "9999930003",
+    "password": "password123",
+    "nickname": "__TEST_USER_R__",
+    "avatar": "HD",
+    "invitationCode": "TSTR93",
+    "invitedBy": null,
+    "inviterName": null,
+    "inviterId": null,
+    "rechargeBalance": 27.31,
+    "withdrawalBalance": 0,
+    "productRevenue": 0,
+    "vipLevel": 0,
+    "totalInvested": 0,
+    "checkInStreak": 0,
+    "lastCheckInDate": null,
+    "spinChances": 0,
+    "status": "active",
+    "role": "user",
+    "totalReferrals": 0,
+    "totalCommissionEarned": 0,
+    "bankDetails": null,
+    "isDeleted": false,
+    "isExplicitZeroReset": false,
+    "createdAt": "2026-11-16T08:54:03.450Z",
+    "updatedAt": "2026-11-16T08:55:03.578Z"
+  },
+  {
+    "id": "999992",
+    "phone": "9999920002",
+    "password": "password123",
+    "nickname": "__TEST_USER_B__",
+    "avatar": "HD",
+    "invitationCode": "TSTB92",
+    "invitedBy": null,
+    "inviterName": null,
+    "inviterId": null,
+    "rechargeBalance": 0,
+    "withdrawalBalance": 0,
+    "productRevenue": 0,
+    "vipLevel": 0,
+    "totalInvested": 0,
+    "checkInStreak": 0,
+    "lastCheckInDate": null,
+    "spinChances": 0,
+    "status": "active",
+    "role": "user",
+    "totalReferrals": 0,
+    "totalCommissionEarned": 0,
+    "bankDetails": null,
+    "isDeleted": false,
+    "isExplicitZeroReset": true,
+    "createdAt": "2026-11-16T08:54:03.450Z",
+    "updatedAt": "2026-11-16T08:55:03.578Z"
+  },
+  {
+    "id": "999991",
+    "phone": "9999910001",
+    "password": "password123",
+    "nickname": "__TEST_USER_A__",
+    "avatar": "HD",
+    "invitationCode": "TSTA91",
+    "invitedBy": null,
+    "inviterName": null,
+    "inviterId": null,
+    "rechargeBalance": 0,
+    "withdrawalBalance": 0,
+    "productRevenue": 0,
+    "vipLevel": 0,
+    "totalInvested": 0,
+    "checkInStreak": 0,
+    "lastCheckInDate": null,
+    "spinChances": 0,
+    "status": "active",
+    "role": "user",
+    "totalReferrals": 0,
+    "totalCommissionEarned": 0,
+    "bankDetails": {
+      "accountHolder": "Test A",
+      "bankName": "SBI",
+      "accountNumber": "1234567890",
+      "ifscCode": "SBIN0000001",
+      "upiId": ""
+    },
+    "isDeleted": false,
+    "isExplicitZeroReset": true,
+    "createdAt": "2026-11-16T08:54:03.450Z",
+    "updatedAt": "2026-11-16T08:55:03.519Z"
   }
 ]

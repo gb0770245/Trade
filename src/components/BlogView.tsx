@@ -3,6 +3,7 @@ import { ChevronLeft, BookOpen, Clock, Eye, X, ArrowRight } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { NEWS_ARTICLES } from '../data/mockData';
 import { NewsArticle } from '../types';
+import { AdMobBanner } from './AdMobBanner';
 
 export const BlogView: React.FC = () => {
   const { goBack } = useApp();
@@ -50,6 +51,11 @@ export const BlogView: React.FC = () => {
 
         <div className="w-6" />
       </header>
+
+      {/* Google AdMob Adaptive Banner Slot */}
+      <div className="px-4 mt-3">
+        <AdMobBanner placement="blog" variant="inline" />
+      </div>
 
       {/* Article feed */}
       <div className="px-4 mt-3 space-y-3.5">

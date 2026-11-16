@@ -992,6 +992,12 @@ export const AdminPanel: React.FC = () => {
         spinChances: Number(editSpinChances),
         vipLevel: Number(editVipLevel),
         status: editStatus,
+        isExplicitZeroReset:
+          Number(editCharged) === 0 ||
+          Number(editWithdrawal) === 0 ||
+          Number(editProductRevenue) === 0 ||
+          Number(editTotalInvested) === 0,
+        updatedAt: new Date().toISOString(),
         ...(hasBank
           ? {
               bankDetails: {
@@ -2194,6 +2200,7 @@ export const AdminPanel: React.FC = () => {
                       try {
                         const res = await fetch('/api/admin/users/reset-all-balances', { method: 'POST' });
                         if (res.ok) {
+                          await dbService.resetAllUsersBalancesInFirestore();
                           await loadAdminUsers();
                           showToast('सभी यूज़र्स का बैलेंस सफलतापूर्वक $0 कर दिया गया!', 'success');
                         } else {
@@ -3081,6 +3088,11 @@ export const AdminPanel: React.FC = () => {
                             <div className="text-[10px] text-teal-300 font-bold">
                               ₹{((tx.amountInr || Math.round(tx.amount * 100))).toLocaleString()} INR
                             </div>
+                            {tx.balanceAfter !== undefined && tx.balanceAfter !== null && (
+                              <div className="text-[10px] text-slate-300 mt-0.5 tabular-nums">
+                                Bal: ${Number(tx.balanceAfter).toFixed(2)}
+                              </div>
+                            )}
                           </td>
                           <td className="py-3 px-3 text-slate-400 text-[11px]">
                             {tx.timestamp}
@@ -3316,6 +3328,11 @@ export const AdminPanel: React.FC = () => {
                               <div className="text-[10px] text-teal-300 font-mono">
                                 (₹{(netAmt * 100).toFixed(0)} INR)
                               </div>
+                              {tx.balanceAfter !== undefined && tx.balanceAfter !== null && (
+                                <div className="text-[10px] text-slate-300 font-mono mt-0.5 tabular-nums">
+                                  Bal After: ${Number(tx.balanceAfter).toFixed(2)}
+                                </div>
+                              )}
                             </td>
                             <td className="py-3 px-3 text-slate-400 text-[11px]">
                               {tx.timestamp}
@@ -3886,7 +3903,12 @@ export const AdminPanel: React.FC = () => {
                                     isSent ? 'text-amber-400' : 'text-emerald-400'
                                   }`}
                                 >
-                                  {isSent ? '-' : '+'}${Math.abs(Number(tx.amount) || 0).toFixed(2)}
+                                  <div>{isSent ? '-' : '+'}${Math.abs(Number(tx.amount) || 0).toFixed(2)}</div>
+                                  {tx.balanceAfter !== undefined && tx.balanceAfter !== null && (
+                                    <div className="text-[10px] font-semibold text-slate-400 mt-0.5">
+                                      Bal: ${Number(tx.balanceAfter).toFixed(2)}
+                                    </div>
+                                  )}
                                 </td>
                               </tr>
                             );

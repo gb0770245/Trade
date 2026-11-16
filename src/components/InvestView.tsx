@@ -19,6 +19,7 @@ import {
 import { useApp } from '../context/AppContext';
 import { InvestmentProduct } from '../types';
 import { triggerOfficialPayUPayment } from '../services/payuService';
+import { AdMobBanner } from './AdMobBanner';
 
 export const InvestView: React.FC = () => {
   const {
@@ -364,6 +365,10 @@ export const InvestView: React.FC = () => {
         })}
       </div>
 
+      {/* Google AdMob Adaptive Banner Slot */}
+      <div className="px-4 mt-4">
+        <AdMobBanner placement="invest" variant="inline" />
+      </div>
 
     </div>
   );

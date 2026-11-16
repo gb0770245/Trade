@@ -104,8 +104,15 @@ export async function initPostgresSchema() {
         payment_method TEXT,
         fee_amount DOUBLE PRECISION DEFAULT 0,
         net_amount DOUBLE PRECISION DEFAULT 0,
-        bank_details JSONB
+        bank_details JSONB,
+        balance_after DOUBLE PRECISION,
+        recharge_balance_after DOUBLE PRECISION,
+        withdrawal_balance_after DOUBLE PRECISION
       );
+
+      ALTER TABLE transactions ADD COLUMN IF NOT EXISTS balance_after DOUBLE PRECISION;
+      ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recharge_balance_after DOUBLE PRECISION;
+      ALTER TABLE transactions ADD COLUMN IF NOT EXISTS withdrawal_balance_after DOUBLE PRECISION;
 
       CREATE TABLE IF NOT EXISTS investment_orders (
         id TEXT PRIMARY KEY,

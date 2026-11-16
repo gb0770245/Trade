@@ -36,6 +36,7 @@ import {
 } from 'lucide-react';
 import { useApp, normalizeRedirectUrl } from '../context/AppContext';
 import { VIP_TIERS } from '../data/mockData';
+import { AdMobBanner } from './AdMobBanner';
 
 export const AccountView: React.FC = () => {
   const {
@@ -255,31 +256,44 @@ export const AccountView: React.FC = () => {
               </button>
             </div>
 
-            {/* 3 Wallets Strip (Add Money, Withdrawal, Product Income) */}
-            <div className="mt-4 p-3 rounded-2xl bg-teal-950/60 backdrop-blur-md border border-teal-700/50 grid grid-cols-3 gap-2 text-center">
-              <div>
-                <div className="text-base font-extrabold text-white num-tabular">
-                  ${(user.rechargeBalance || 0).toFixed(2)}
-                </div>
-                <div className="text-[10px] text-teal-200/80 mt-0.5">Add Money Balance</div>
+            {/* Total Balance + 3 Wallets Strip (Add Money, Withdrawal, Product Income) */}
+            <div className="mt-4 p-3 rounded-2xl bg-teal-950/60 backdrop-blur-md border border-teal-700/50">
+              <div className="flex items-center justify-between pb-2 mb-2.5 border-b border-teal-700/50 px-1">
+                <span className="text-[11px] font-medium text-teal-200/80">Total Balance</span>
+                <span className="text-base font-extrabold text-white num-tabular">
+                  ${((Number(user.rechargeBalance) || 0) + (Number(user.withdrawalBalance) || 0)).toFixed(2)}
+                </span>
               </div>
-
-              <div className="border-x border-teal-700/60">
-                <div className="text-base font-extrabold text-emerald-300 num-tabular">
-                  ${(user.withdrawalBalance || 0).toFixed(2)}
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div>
+                  <div className="text-base font-extrabold text-white num-tabular">
+                    ${(user.rechargeBalance || 0).toFixed(2)}
+                  </div>
+                  <div className="text-[10px] text-teal-200/80 mt-0.5">Add Money Balance</div>
                 </div>
-                <div className="text-[10px] text-teal-200/80 mt-0.5">Withdrawal Balance</div>
-              </div>
 
-              <div>
-                <div className="text-base font-extrabold text-white num-tabular">
-                  ${(user.productRevenue || 0).toFixed(2)}
+                <div className="border-x border-teal-700/60">
+                  <div className="text-base font-extrabold text-emerald-300 num-tabular">
+                    ${(user.withdrawalBalance || 0).toFixed(2)}
+                  </div>
+                  <div className="text-[10px] text-teal-200/80 mt-0.5">Withdrawal Balance</div>
                 </div>
-                <div className="text-[10px] text-teal-200/80 mt-0.5">Product Income</div>
+
+                <div>
+                  <div className="text-base font-extrabold text-white num-tabular">
+                    ${(user.productRevenue || 0).toFixed(2)}
+                  </div>
+                  <div className="text-[10px] text-teal-200/80 mt-0.5">Product Income</div>
+                </div>
               </div>
             </div>
           </div>
         )}
+      </div>
+
+      {/* Google AdMob Adaptive Banner Slot */}
+      <div className="px-4 mt-3">
+        <AdMobBanner placement="account" variant="inline" />
       </div>
 
       {/* Primary Action Buttons (Core Feature Icons - Add Money, Withdraw, Check-In, Gift Card, Team, VIP, Orders, Download) */}

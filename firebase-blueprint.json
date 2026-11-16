@@ -45,7 +45,10 @@
         "counterpartyName": { "type": "string" },
         "sourceWallet": { "type": "string" },
         "targetWallet": { "type": "string" },
-        "note": { "type": "string" }
+        "note": { "type": "string" },
+        "balanceAfter": { "type": "number" },
+        "rechargeBalanceAfter": { "type": "number" },
+        "withdrawalBalanceAfter": { "type": "number" }
       },
       "required": ["id", "userId", "type", "amount", "status"]
     },

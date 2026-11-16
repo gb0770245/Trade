@@ -18,6 +18,7 @@ import {
   Users,
 } from 'lucide-react';
 import { useApp, deduplicateTransactions } from '../context/AppContext';
+import { computeUserTotalBalance, enrichTransactionsWithBalanceAfter } from '../services/dbService';
 import { P2PRecipientPreview, Transaction } from '../types';
 
 const QUICK_AMOUNTS = [5, 10, 25, 50, 100];
@@ -65,6 +66,7 @@ export const P2PTransferModal: React.FC = () => {
 
   const chargedBal = Number(user?.rechargeBalance) || 0;
   const withdrawalBal = Number(user?.withdrawalBalance) || 0;
+  const totalBal = computeUserTotalBalance(user);
   const availableBal = sourceWallet === 'rechargeBalance' ? chargedBal : withdrawalBal;
 
   const numAmount = parseFloat(amount) || 0;
@@ -73,12 +75,14 @@ export const P2PTransferModal: React.FC = () => {
     numAmount >= minP2PAmount &&
     numAmount <= Math.min(availableBal, maxP2PAmount);
 
+  const enrichedTransactions = useMemo(
+    () => enrichTransactionsWithBalanceAfter(deduplicateTransactions(transactions), user),
+    [transactions, user]
+  );
+
   const allP2PTxs = useMemo(
-    () =>
-      deduplicateTransactions(transactions).filter(
-        (tx) => tx.type === 'p2p_send' || tx.type === 'p2p_receive'
-      ),
-    [transactions]
+    () => enrichedTransactions.filter((tx) => tx.type === 'p2p_send' || tx.type === 'p2p_receive'),
+    [enrichedTransactions]
   );
 
   const sentP2PTxs = useMemo(
@@ -307,6 +311,10 @@ export const P2PTransferModal: React.FC = () => {
 
         {/* Hero Dual-Balance Summary */}
         <div className={`mt-4 p-4 rounded-2xl bg-gradient-to-br border text-white shadow-lg ${heroWalletGradient}`}>
+          <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-white/15">
+            <span className="text-[11px] font-medium text-white/75">Total Balance</span>
+            <span className="text-base font-black tabular-nums text-white">${totalBal.toFixed(2)}</span>
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="pr-2 border-r border-white/15">
               <div className="flex items-center gap-1.5 text-[11px] text-white/75 font-medium">
@@ -436,6 +444,10 @@ export const P2PTransferModal: React.FC = () => {
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-slate-400">Transfer Fee</span>
                     <span className="font-bold text-emerald-600 dark:text-emerald-400">$0.00 (Free)</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
+                    <span className="text-slate-400">New Total Balance</span>
+                    <span className="font-black tabular-nums">${totalBal.toFixed(2)}</span>
                   </div>
                 </div>
 
@@ -914,14 +926,21 @@ export const P2PTransferModal: React.FC = () => {
                         </div>
                       </div>
                     </div>
-                    <div
-                      className={`font-black tabular-nums shrink-0 ${
-                        isSent
-                          ? 'text-amber-600 dark:text-amber-400'
-                          : 'text-emerald-600 dark:text-emerald-400'
-                      }`}
-                    >
-                      {isSent ? '-' : '+'}${Math.abs(tx.amount).toFixed(2)}
+                    <div className="text-right shrink-0 tabular-nums">
+                      <div
+                        className={`font-black ${
+                          isSent
+                            ? 'text-amber-600 dark:text-amber-400'
+                            : 'text-emerald-600 dark:text-emerald-400'
+                        }`}
+                      >
+                        {isSent ? '-' : '+'}${Math.abs(tx.amount).toFixed(2)}
+                      </div>
+                      {tx.balanceAfter !== undefined && tx.balanceAfter !== null && (
+                        <div className="text-[10px] text-slate-400 font-semibold mt-0.5">
+                          Bal: ${Number(tx.balanceAfter).toFixed(2)}
+                        </div>
+                      )}
                     </div>
                   </div>
                 );

@@ -54,6 +54,9 @@ export const transactions = pgTable('transactions', {
   feeAmount: doublePrecision('fee_amount').default(0),
   netAmount: doublePrecision('net_amount').default(0),
   bankDetails: jsonb('bank_details'),
+  balanceAfter: doublePrecision('balance_after'),
+  rechargeBalanceAfter: doublePrecision('recharge_balance_after'),
+  withdrawalBalanceAfter: doublePrecision('withdrawal_balance_after'),
 });
 
 // Investment Orders table

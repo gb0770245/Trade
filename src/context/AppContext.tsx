@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import confetti from 'canvas-confetti';
 import { User, InvestmentProduct, InvestmentOrder, Transaction, TeamMember, ThemeMode, PlatformSettings, NoticeItem, CustomPromoCode, SpinPrizeConfig, ShippingAddress, EcommerceOrder, HomeBanner, ReferrerInfo, OrderSuccessData, P2PRecipientPreview } from '../types';
 import { INITIAL_NOTICES, INVESTMENT_PRODUCTS, SPIN_PRIZES, DEFAULT_HOME_BANNERS } from '../data/mockData';
-import { dbService, getTransactionTime, mergeUserSafe, mergeTxListsSafe } from '../services/dbService';
+import { dbService, getTransactionTime, mergeUserSafe, mergeTxListsSafe, buildUserBalanceSnapshot } from '../services/dbService';
 import { getOrderClaimStatus, formatCountdownHuman } from '../utils/dividendUtils';
 
 interface SupportMessage {
@@ -569,6 +569,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const isWithdrawalLockRef = useRef<boolean>(false);
   const isP2PTransferLockRef = useRef<boolean>(false);
   const isClaimingDividendRef = useRef<boolean>(false);
+  const isCheckInLockRef = useRef<boolean>(false);
+  const isSpinLockRef = useRef<boolean>(false);
+  const isRedeemLockRef = useRef<boolean>(false);
+  const isRechargeLockRef = useRef<boolean>(false);
   const userRef = useRef<User | null>(user);
   const ordersRef = useRef<InvestmentOrder[]>(orders);
   const lastUserActionTimestampRef = useRef<number>(0);
@@ -1100,7 +1104,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (needsUpdate) {
             await dbService.saveUser(cloudUser);
           }
-          const merged = mergeUserSafe(userRef.current, cloudUser);
+          const merged = mergeUserSafe(userRef.current, { ...cloudUser, isAuthoritativeServer: true } as any);
           const isRecentAction = userRef.current && (Date.now() - lastUserActionTimestampRef.current < 30000 || lastUserActionTimestampRef.current > Date.now());
           if (isRecentAction && userRef.current) {
             merged.rechargeBalance = userRef.current.rechargeBalance;
@@ -1166,7 +1170,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Subscribe to real-time user changes
     const unsubUser = dbService.subscribeToUser(user.id, (updated) => {
       if (isMounted && updated) {
-        const merged: User = mergeUserSafe(userRef.current, updated);
+        const merged: User = mergeUserSafe(userRef.current, { ...updated, isAuthoritativeServer: true } as any);
         // If a local balance change happened recently, protect local balance from stale network reversion
         const isRecentAction = userRef.current && (Date.now() - lastUserActionTimestampRef.current < 30000 || lastUserActionTimestampRef.current > Date.now());
         if (isRecentAction && userRef.current) {
@@ -1252,7 +1256,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setTeamMembers(freshTeam);
 
       if (freshUser) {
-        const merged = mergeUserSafe(userRef.current, freshUser);
+        const merged = mergeUserSafe(userRef.current, { ...freshUser, isAuthoritativeServer: true } as any);
         userRef.current = merged;
         setUser(merged);
         try {
@@ -1352,6 +1356,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           (await dbService.getUser(targetId)) ||
           (user?.phone ? await dbService.findUserByPhone(user.phone) : null);
         if (fresh && isMounted) {
+          userRef.current = fresh;
           setUser(fresh);
           if (typeof window !== 'undefined') {
             localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(fresh));
@@ -1434,9 +1439,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const prevR = Number(current.rechargeBalance) || 0;
         const newR = Number(fresh.rechargeBalance) || 0;
 
-        // If balances changed or new commission/P2P transfer was added
+        // If balances changed or new commission/P2P transfer was added (including admin zero/deduction resets)
         if (newW !== prevW || newR !== prevR) {
-          const merged = mergeUserSafe(current, fresh);
+          const merged = mergeUserSafe(current, { ...fresh, isAuthoritativeServer: true } as any);
           userRef.current = merged;
           setUser(merged);
           localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(merged));
@@ -1765,6 +1770,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           timestamp: new Date().toLocaleString(),
           status: 'completed',
           referenceNo: `INV${newUser.id}`,
+          ...buildUserBalanceSnapshot(inviterUser),
         };
         await dbService.saveTransaction(inviterTx, inviterUser.id);
       }
@@ -1832,10 +1838,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const logout = () => {
-    // Permanently save user's latest full details before ending active session
-    if (user) {
-      dbService.saveUser(user, true).catch(() => {});
-    }
     localStorage.removeItem(STORAGE_KEY_USER);
     localStorage.removeItem(STORAGE_KEY_ORDERS);
     localStorage.removeItem(STORAGE_KEY_TXS);
@@ -1880,11 +1882,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Recharge / Deposit
   const recharge = async (amount: number, method: string, referenceNo?: string): Promise<{ success: boolean; message: string }> => {
-    if (!user) {
+    const currentUser = userRef.current || user;
+    if (!currentUser) {
       openModal('auth');
       return { success: false, message: 'Please login first' };
     }
-    if (user.status === 'frozen') {
+    if (isRechargeLockRef.current) {
+      return { success: false, message: 'Deposit request is already processing. Please wait.' };
+    }
+    if (currentUser.status === 'frozen') {
       return { success: false, message: 'Your account is frozen by system administrator. Please contact support.' };
     }
     if (!platformSettings.isRechargeEnabled) {
@@ -1901,74 +1907,88 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: `Minimum add money amount is $${effectiveMin < 1 ? effectiveMin.toFixed(2) : effectiveMin} (₹${Math.max(1, Math.round(effectiveMin * 100))})` };
     }
 
-    // STRICT ADMIN VERIFICATION: If requireAdminRechargeApproval is enabled, do NOT auto-credit wallet!
-    if (platformSettings.requireAdminRechargeApproval !== false) {
-      const inrAmount = Math.round(amount * 100);
+    isRechargeLockRef.current = true;
+    try {
+      // STRICT ADMIN VERIFICATION: If requireAdminRechargeApproval is enabled, do NOT auto-credit wallet!
+      if (platformSettings.requireAdminRechargeApproval !== false) {
+        const inrAmount = Math.round(amount * 100);
+        const newTx: Transaction = {
+          id: `tx-${Date.now()}`,
+          userId: currentUser.id,
+          type: 'recharge',
+          amount,
+          amountInr: inrAmount,
+          title: `${method} Deposit ($${amount.toFixed(2)} / ₹${inrAmount.toLocaleString()})`,
+          timestamp: new Date().toLocaleString(),
+          status: 'processing', // Awaiting Admin verification & manual approval
+          referenceNo: referenceNo || `DEP${Math.floor(10000000 + Math.random() * 90000000)}`,
+          utrNumber: referenceNo || '',
+          paymentMethod: method,
+          payeeUpi: platformSettings.merchantUpiId || 'nexaai.pay@icici',
+          createdAt: Date.now(),
+          ...buildUserBalanceSnapshot(currentUser),
+        };
+        await dbService.saveTransaction(newTx, currentUser.id);
+        setTransactions((prev) => prependTxUnique(prev, newTx));
+        setAdminTransactions((prev) => prependTxUnique(prev, newTx));
+
+        showToast(`Deposit of $${amount.toFixed(2)} submitted! Under verification by Admin. Balance will be added after Admin approves.`, 'info');
+        closeModal();
+        return { success: true, message: 'Deposit submitted for admin verification' };
+      }
+
+      // Add to recharge balance and check for bonus lucky spins
+      const threshold = platformSettings.rechargeThresholdForSpin || 5;
+      const extraSpinsAwarded =
+        platformSettings.extraSpinOnRecharge && threshold > 0 ? Math.floor(amount / threshold) : 0;
+
+      lastUserActionTimestampRef.current = Date.now() + 30000;
+      const updatedUser: User = {
+        ...currentUser,
+        rechargeBalance: Number((currentUser.rechargeBalance + amount).toFixed(2)),
+        spinChances: (currentUser.spinChances || 0) + extraSpinsAwarded,
+        isExplicitZeroReset: false,
+        updatedAt: new Date().toISOString(),
+      };
+      userRef.current = updatedUser;
+      setUser(updatedUser);
+      try {
+        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(updatedUser));
+      } catch {}
+      await dbService.saveUser(updatedUser);
+
+      // Record transaction
       const newTx: Transaction = {
         id: `tx-${Date.now()}`,
-        userId: user.id,
+        userId: currentUser.id,
         type: 'recharge',
         amount,
-        amountInr: inrAmount,
-        title: `${method} Deposit ($${amount.toFixed(2)} / ₹${inrAmount.toLocaleString()})`,
+        title: `${method} Add Money${extraSpinsAwarded > 0 ? ` (+${extraSpinsAwarded} Lucky Spins)` : ''}`,
         timestamp: new Date().toLocaleString(),
-        status: 'processing', // Awaiting Admin verification & manual approval
-        referenceNo: referenceNo || `DEP${Math.floor(10000000 + Math.random() * 90000000)}`,
-        utrNumber: referenceNo || '',
+        status: 'completed',
+        referenceNo: referenceNo || `REC${Math.floor(10000000 + Math.random() * 90000000)}`,
         paymentMethod: method,
-        payeeUpi: platformSettings.merchantUpiId || 'nexaai.pay@icici',
-        createdAt: Date.now(),
+        ...buildUserBalanceSnapshot(updatedUser),
       };
-      await dbService.saveTransaction(newTx, user.id);
+      await dbService.saveTransaction(newTx, currentUser.id);
       setTransactions((prev) => prependTxUnique(prev, newTx));
       setAdminTransactions((prev) => prependTxUnique(prev, newTx));
 
-      showToast(`Deposit of $${amount.toFixed(2)} submitted! Under verification by Admin. Balance will be added after Admin approves.`, 'info');
+      confetti({
+        particleCount: 100,
+        spread: 70,
+        origin: { y: 0.6 },
+      });
+
+      const spinBonusText = extraSpinsAwarded > 0 ? ` (+${extraSpinsAwarded} Bonus Lucky Spins!)` : '';
+      showToast(`Add Money of $${amount.toFixed(2)} successful!${spinBonusText} Saved to Database.`, 'success');
       closeModal();
-      return { success: true, message: 'Deposit submitted for admin verification' };
+      return { success: true, message: 'Add Money successful' };
+    } finally {
+      setTimeout(() => {
+        isRechargeLockRef.current = false;
+      }, 2000);
     }
-
-    // Add to recharge balance and check for bonus lucky spins
-    const threshold = platformSettings.rechargeThresholdForSpin || 5;
-    const extraSpinsAwarded =
-      platformSettings.extraSpinOnRecharge && threshold > 0 ? Math.floor(amount / threshold) : 0;
-
-    const updatedUser: User = {
-      ...user,
-      rechargeBalance: Number((user.rechargeBalance + amount).toFixed(2)),
-      spinChances: (user.spinChances || 0) + extraSpinsAwarded,
-    };
-    setUser(updatedUser);
-    await dbService.saveUser(updatedUser);
-
-    // Record transaction
-    const newTx: Transaction = {
-      id: `tx-${Date.now()}`,
-      userId: user.id,
-      type: 'recharge',
-      amount,
-      title: `${method} Add Money${extraSpinsAwarded > 0 ? ` (+${extraSpinsAwarded} Lucky Spins)` : ''}`,
-      timestamp: new Date().toLocaleString(),
-      status: 'completed',
-      referenceNo: referenceNo || `REC${Math.floor(10000000 + Math.random() * 90000000)}`,
-      paymentMethod: method,
-    };
-    await dbService.saveTransaction(newTx, user.id);
-    setTransactions((prev) => prependTxUnique(prev, newTx));
-    setAdminTransactions((prev) => prependTxUnique(prev, newTx));
-
-    // Note: Referral commission is only given when user purchases a product, not on recharge.
-
-    confetti({
-      particleCount: 100,
-      spread: 70,
-      origin: { y: 0.6 },
-    });
-
-    const spinBonusText = extraSpinsAwarded > 0 ? ` (+${extraSpinsAwarded} Bonus Lucky Spins!)` : '';
-    showToast(`Add Money of $${amount.toFixed(2)} successful!${spinBonusText} Saved to Database.`, 'success');
-    closeModal();
-    return { success: true, message: 'Add Money successful' };
   };
 
   // Submit Manual UPI Deposit Request (Awaiting Admin Approval)
@@ -2019,6 +2039,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       payeeUpi: platformSettings.merchantUpiId || 'nexaai.pay@icici',
       screenshotUrl: screenshotUrl || '',
       createdAt: Date.now(),
+      ...buildUserBalanceSnapshot(user),
     };
 
     try {
@@ -2037,9 +2058,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Withdraw
+  // Withdraw (Authoritative Server Atomic Transaction)
   const withdraw = async (amount: number, details: NonNullable<User['bankDetails']>): Promise<{ success: boolean; message: string }> => {
-    if (!user) {
+    const currentUser = userRef.current || user;
+    if (!currentUser) {
       openModal('auth');
       return { success: false, message: 'Please login first' };
     }
@@ -2050,7 +2072,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     isWithdrawalLockRef.current = true;
 
     try {
-      if (user.status === 'frozen') {
+      if (currentUser.status === 'frozen') {
         return { success: false, message: 'Your account is frozen by system administrator. Please contact support.' };
       }
       if (!platformSettings.isWithdrawalEnabled) {
@@ -2063,76 +2085,67 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (amount < minWth) {
         return { success: false, message: `Minimum withdrawal amount is $${minWth.toFixed(2)}` };
       }
-      if (amount > user.withdrawalBalance) {
+      if (amount > currentUser.withdrawalBalance) {
         return { success: false, message: 'Insufficient withdrawal balance' };
       }
 
-      // Check if user already has a pending withdrawal request awaiting admin approval
-      const existingPending = transactions.find(
-        (t) => t.type === 'withdraw' && t.status === 'processing' && (t.userId === user.id || (user.phone && t.userId === user.phone))
-      );
-      if (existingPending) {
-        showToast('You already have a pending withdrawal under review. Please wait for admin approval.', 'error');
-        return { success: false, message: 'You already have a pending withdrawal request under review.' };
-      }
-
-      // Check anti-spam: if user submitted a withdrawal in the last 30 seconds, ignore duplicate
-      const now = Date.now();
-      const duplicateRecent = transactions.find(
-        (t) => t.type === 'withdraw' && t.userId === user.id && now - (t.createdAt || 0) < 30000
-      );
-      if (duplicateRecent) {
-        showToast('Withdrawal request already received. Processing payout.', 'info');
-        return { success: false, message: 'Withdrawal request already received. Processing...' };
-      }
-
-      // Admin-controlled withdrawal fee logic (defaults to platformSettings.withdrawalFeePercent or 5%)
-      const feePercent = platformSettings.withdrawalFeePercent !== undefined ? platformSettings.withdrawalFeePercent : 5;
-      const fee = Number(((amount * feePercent) / 100).toFixed(2));
-      const netPayout = Number((amount - fee).toFixed(2));
-
       const cleanBankDetails = {
-        accountHolder: (details.accountHolder || user.nickname || '').trim(),
+        accountHolder: (details.accountHolder || currentUser.nickname || '').trim(),
         accountNumber: (details.accountNumber || '').trim(),
         ifscCode: (details.ifscCode || '').trim().toUpperCase(),
         bankName: (details.bankName || 'Bank IMPS').trim(),
         upiId: '',
       };
 
-      const updatedUser: User = {
-        ...user,
-        withdrawalBalance: Number((user.withdrawalBalance - amount).toFixed(2)),
-        bankDetails: cleanBankDetails,
-      };
-      setUser(updatedUser);
-      setAdminUsers((prev) =>
-        prev.map((u) => (u.id === user.id || u.phone === user.phone ? updatedUser : u))
-      );
-      await dbService.saveUser(updatedUser, true);
-
-      const refNo = `WTH${Math.floor(10000000 + Math.random() * 90000000)}`;
-      const newTx: Transaction = {
-        id: `tx-${now}`,
-        userId: user.id,
-        type: 'withdraw',
+      const res = await dbService.submitWithdrawal({
+        userId: currentUser.id,
         amount,
-        feeAmount: fee,
-        netAmount: netPayout,
-        title: `Withdrawal: ${cleanBankDetails.accountHolder} (${cleanBankDetails.bankName})`,
-        timestamp: new Date().toLocaleString(),
-        createdAt: now,
-        status: 'processing',
-        referenceNo: refNo,
-        paymentMethod: `Bank IMPS: ${cleanBankDetails.accountNumber} • ${cleanBankDetails.ifscCode}`,
         bankDetails: cleanBankDetails,
+      });
+
+      if (!res.success || !res.user) {
+        const errMsg = res.error || 'Withdrawal request failed. Please try again.';
+        showToast(errMsg, 'error');
+        return { success: false, message: errMsg };
+      }
+
+      const updatedUser: User = {
+        ...currentUser,
+        ...res.user,
       };
-      await dbService.saveTransaction(newTx, user.id);
-      setTransactions((prev) => prependTxUnique(prev, newTx));
-      setAdminTransactions((prev) => prependTxUnique(prev, newTx));
+      lastUserActionTimestampRef.current = Date.now() + 30000;
+      userRef.current = updatedUser;
+      setUser(updatedUser);
+      try {
+        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(updatedUser));
+        const rawBackup = localStorage.getItem('nexa_users_backup_v2');
+        if (rawBackup) {
+          const parsed = JSON.parse(rawBackup);
+          if (Array.isArray(parsed)) {
+            const nextBackup = parsed.map((u: any) =>
+              u.id === updatedUser.id ? { ...u, ...updatedUser } : u
+            );
+            localStorage.setItem('nexa_users_backup_v2', JSON.stringify(nextBackup));
+          }
+        }
+      } catch {}
+
+      setAdminUsers((prev) =>
+        prev.map((u) => (u.id === updatedUser.id || u.phone === updatedUser.phone ? updatedUser : u))
+      );
+
+      if (res.transaction) {
+        setTransactions((prev) => prependTxUnique(prev, res.transaction!));
+        setAdminTransactions((prev) => prependTxUnique(prev, res.transaction!));
+      }
+
+      const feePercent = res.feePercent !== undefined ? res.feePercent : (platformSettings.withdrawalFeePercent ?? 5);
+      const fee = res.fee !== undefined ? res.fee : Number(((amount * feePercent) / 100).toFixed(2));
+      const netPayout = res.netPayout !== undefined ? res.netPayout : Number((amount - fee).toFixed(2));
 
       showToast(`Withdrawal requested: $${netPayout.toFixed(2)} (Fee: ${feePercent}% / $${fee.toFixed(2)}). Sent for admin payout.`, 'success');
       closeModal();
-      return { success: true, message: 'Withdrawal submitted' };
+      return { success: true, message: res.message || 'Withdrawal submitted' };
     } finally {
       setTimeout(() => {
         isWithdrawalLockRef.current = false;
@@ -2374,6 +2387,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       timestamp: new Date().toLocaleString(),
       status: 'completed',
       referenceNo: `INV${Math.floor(10000000 + Math.random() * 90000000)}`,
+      ...buildUserBalanceSnapshot(updatedUser),
     };
     await dbService.saveTransaction(investTx, currentUser.id);
     setTransactions((prev) => prependTxUnique(prev, investTx));
@@ -2503,6 +2517,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       status: 'completed',
       referenceNo: paymentId,
       paymentMethod: 'Razorpay E-Commerce',
+      ...buildUserBalanceSnapshot(user),
     };
     await dbService.saveTransaction(tx, user?.id || '833863');
     setTransactions((prev) => [tx, ...prev]);
@@ -2706,6 +2721,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         timestamp: new Date().toLocaleString(),
         status: 'completed',
         referenceNo: `DIV${Date.now()}`,
+        ...buildUserBalanceSnapshot(updatedUser),
       };
       await dbService.saveTransaction(divTx, activeUser.id);
       setTransactions((prev) => prependTxUnique(prev, divTx));
@@ -2731,9 +2747,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Daily Check-In
   const dailyCheckIn = async (): Promise<{ success: boolean; bonus: number; message: string }> => {
-    if (!user) {
+    const currentUser = userRef.current || user;
+    if (!currentUser) {
       openModal('auth');
       return { success: false, bonus: 0, message: 'Please login first' };
+    }
+    if (isCheckInLockRef.current) {
+      return { success: false, bonus: 0, message: 'Check-in already in progress' };
     }
 
     if (platformSettings.isBonusEnabled === false) {
@@ -2742,62 +2762,75 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const todayStr = new Date().toISOString().split('T')[0];
-    if (user.lastCheckInDate === todayStr) {
+    if (currentUser.lastCheckInDate === todayStr) {
       showToast('You have already checked in today! Come back tomorrow.', 'info');
       return { success: false, bonus: 0, message: 'Already checked in' };
     }
 
-    const newStreak = (user.checkInStreak || 0) + 1;
-    // 7-day cycle index: 0 for Day 1, up to 6 for Day 7
-    const dayIndex = ((newStreak - 1) % 7);
-    const dayNumber = dayIndex + 1;
+    isCheckInLockRef.current = true;
+    try {
+      const newStreak = (currentUser.checkInStreak || 0) + 1;
+      const dayIndex = ((newStreak - 1) % 7);
+      const dayNumber = dayIndex + 1;
 
-    // Use admin configured payout, or fallback to default [10, 12, 15, 18, 22, 26, 30]
-    const payouts =
-      platformSettings.checkInPayouts && platformSettings.checkInPayouts.length === 7
-        ? platformSettings.checkInPayouts
-        : [10, 12, 15, 18, 22, 26, 30];
+      const payouts =
+        platformSettings.checkInPayouts && platformSettings.checkInPayouts.length === 7
+          ? platformSettings.checkInPayouts
+          : [10, 12, 15, 18, 22, 26, 30];
 
-    const bonus = Number((payouts[dayIndex] ?? 10).toFixed(2));
-    const isDay7 = dayNumber === 7;
-    const extraSpinsToAdd = isDay7
-      ? (platformSettings.checkInDay7ExtraSpin !== false ? 1 : 0)
-      : platformSettings.extraSpinOnCheckIn
-      ? (platformSettings.spinsPerCheckIn || 1)
-      : 0;
+      const bonus = Number((payouts[dayIndex] ?? 10).toFixed(2));
+      const isDay7 = dayNumber === 7;
+      const extraSpinsToAdd = isDay7
+        ? (platformSettings.checkInDay7ExtraSpin !== false ? 1 : 0)
+        : platformSettings.extraSpinOnCheckIn
+        ? (platformSettings.spinsPerCheckIn || 1)
+        : 0;
 
-    const updatedUser: User = {
-      ...user,
-      withdrawalBalance: Number((user.withdrawalBalance + bonus).toFixed(2)),
-      checkInStreak: newStreak,
-      lastCheckInDate: todayStr,
-      spinChances: (user.spinChances || 0) + extraSpinsToAdd,
-    };
-    setUser(updatedUser);
-    await dbService.saveUser(updatedUser);
+      lastUserActionTimestampRef.current = Date.now() + 30000;
+      const updatedUser: User = {
+        ...currentUser,
+        withdrawalBalance: Number((currentUser.withdrawalBalance + bonus).toFixed(2)),
+        checkInStreak: newStreak,
+        lastCheckInDate: todayStr,
+        spinChances: (currentUser.spinChances || 0) + extraSpinsToAdd,
+        isExplicitZeroReset: false,
+        updatedAt: new Date().toISOString(),
+      };
+      userRef.current = updatedUser;
+      setUser(updatedUser);
+      try {
+        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(updatedUser));
+      } catch {}
+      await dbService.saveUser(updatedUser);
 
-    const checkInTx: Transaction = {
-      id: `tx-${Date.now()}`,
-      userId: user.id,
-      type: 'bonus',
-      amount: bonus,
-      title: `Daily Check-In Dividend (Day ${dayNumber} Streak) + ${extraSpinsToAdd} Free Spin`,
-      timestamp: new Date().toLocaleString(),
-      status: 'completed',
-      referenceNo: `CHK${Date.now()}`,
-    };
-    await dbService.saveTransaction(checkInTx, user.id);
-    setTransactions((prev) => prependTxUnique(prev, checkInTx));
-    setAdminTransactions((prev) => prependTxUnique(prev, checkInTx));
+      const checkInTx: Transaction = {
+        id: `tx-${Date.now()}`,
+        userId: currentUser.id,
+        type: 'bonus',
+        amount: bonus,
+        title: `Daily Check-In Dividend (Day ${dayNumber} Streak) + ${extraSpinsToAdd} Free Spin`,
+        timestamp: new Date().toLocaleString(),
+        status: 'completed',
+        referenceNo: `CHK${Date.now()}`,
+        ...buildUserBalanceSnapshot(updatedUser),
+      };
+      await dbService.saveTransaction(checkInTx, currentUser.id);
+      setTransactions((prev) => prependTxUnique(prev, checkInTx));
+      setAdminTransactions((prev) => prependTxUnique(prev, checkInTx));
 
-    confetti({
-      particleCount: 70,
-      spread: 60,
-      origin: { y: 0.6 },
-    });
+      confetti({
+        particleCount: 70,
+        spread: 60,
+        origin: { y: 0.6 },
+      });
 
-    showToast(`Check-in successful! $${bonus.toFixed(2)} credited to Withdrawal Balance + ${extraSpinsToAdd} Free Spin!`, 'success');
-    return { success: true, bonus, message: 'Checked in successfully' };
+      showToast(`Check-in successful! $${bonus.toFixed(2)} credited to Withdrawal Balance + ${extraSpinsToAdd} Free Spin!`, 'success');
+      return { success: true, bonus, message: 'Checked in successfully' };
+    } finally {
+      setTimeout(() => {
+        isCheckInLockRef.current = false;
+      }, 2000);
+    }
   };
 
   // Helper: Calculate daily available free spins and bonus spins for user
@@ -2816,9 +2849,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Buy Extra Spin with balance
   const buyExtraSpinWithBalance = async (): Promise<{ success: boolean; message: string }> => {
-    if (!user) {
+    const currentUser = userRef.current || user;
+    if (!currentUser) {
       openModal('auth');
       return { success: false, message: 'Please login first' };
+    }
+    if (isSpinLockRef.current) {
+      return { success: false, message: 'Spin request already processing. Please wait.' };
     }
     if (!platformSettings.isSpinEnabled) {
       return { success: false, message: 'Lucky spin is currently paused' };
@@ -2827,36 +2864,52 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'Purchasing extra spins with balance is disabled' };
     }
     const cost = platformSettings.spinPrice || 50;
-    if (user.rechargeBalance < cost) {
+    if (currentUser.rechargeBalance < cost) {
       return {
         success: false,
         message: `Insufficient added balance. Spin ticket cost is $${cost.toFixed(2)}`,
       };
     }
 
-    const updatedUser: User = {
-      ...user,
-      rechargeBalance: Number((user.rechargeBalance - cost).toFixed(2)),
-      spinChances: (user.spinChances || 0) + 1,
-    };
-    setUser(updatedUser);
-    await dbService.saveUser(updatedUser);
+    isSpinLockRef.current = true;
+    try {
+      const nextRecharge = Math.max(0, Number((currentUser.rechargeBalance - cost).toFixed(2)));
+      lastUserActionTimestampRef.current = Date.now() + 30000;
+      const updatedUser: User = {
+        ...currentUser,
+        rechargeBalance: nextRecharge,
+        spinChances: (currentUser.spinChances || 0) + 1,
+        isExplicitZeroReset: nextRecharge === 0,
+        updatedAt: new Date().toISOString(),
+      };
+      userRef.current = updatedUser;
+      setUser(updatedUser);
+      try {
+        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(updatedUser));
+      } catch {}
+      await dbService.saveUser(updatedUser);
 
-    const spinPurchaseTx: Transaction = {
-      id: `tx-${Date.now()}`,
-      userId: user.id,
-      type: 'recharge',
-      amount: -cost,
-      title: 'Purchased +1 Lucky Spin Ticket',
-      timestamp: new Date().toLocaleString(),
-      status: 'completed',
-      referenceNo: `SPNTKT${Date.now()}`,
-    };
-    await dbService.saveTransaction(spinPurchaseTx, user.id);
-    setTransactions((prev) => [spinPurchaseTx, ...prev]);
+      const spinPurchaseTx: Transaction = {
+        id: `tx-${Date.now()}`,
+        userId: currentUser.id,
+        type: 'recharge',
+        amount: -cost,
+        title: 'Purchased +1 Lucky Spin Ticket',
+        timestamp: new Date().toLocaleString(),
+        status: 'completed',
+        referenceNo: `SPNTKT${Date.now()}`,
+        ...buildUserBalanceSnapshot(updatedUser),
+      };
+      await dbService.saveTransaction(spinPurchaseTx, currentUser.id);
+      setTransactions((prev) => [spinPurchaseTx, ...prev]);
 
-    showToast(`Purchased +1 Lucky Spin for $${cost.toFixed(2)}!`, 'success');
-    return { success: true, message: 'Extra spin purchased' };
+      showToast(`Purchased +1 Lucky Spin for $${cost.toFixed(2)}!`, 'success');
+      return { success: true, message: 'Extra spin purchased' };
+    } finally {
+      setTimeout(() => {
+        isSpinLockRef.current = false;
+      }, 1500);
+    }
   };
 
   // Admin: Grant Extra Lucky Spins to any user
@@ -2887,6 +2940,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         timestamp: new Date().toLocaleString(),
         status: 'completed',
         referenceNo: `ADM-SPN-${Date.now()}`,
+        ...buildUserBalanceSnapshot(targetUser),
       };
       await dbService.saveTransaction(grantTx, userId);
       setAdminTransactions((prev) => [grantTx, ...prev]);
@@ -2915,115 +2969,134 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     prizeValue: number,
     type: string
   ): Promise<{ success: boolean; message: string }> => {
-    if (!user) return { success: false, message: 'Login required' };
+    const currentUser = userRef.current || user;
+    if (!currentUser) return { success: false, message: 'Login required' };
+    if (isSpinLockRef.current) {
+      return { success: false, message: 'Spin is already processing. Please wait.' };
+    }
     if (!platformSettings.isSpinEnabled) {
       showToast('Lucky spin is currently paused by administrator.', 'error');
       return { success: false, message: 'Lucky spin disabled' };
     }
 
-    const today = new Date().toISOString().split('T')[0];
-    const dailyLimit = platformSettings.dailyFreeSpins ?? 1;
-    const usedToday = user.lastSpinDate === today ? (user.dailySpinsUsedToday || 0) : 0;
-    const dailyRemaining = Math.max(0, dailyLimit - usedToday);
-    const bonus = user.spinChances || 0;
+    isSpinLockRef.current = true;
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const dailyLimit = platformSettings.dailyFreeSpins ?? 1;
+      const usedToday = currentUser.lastSpinDate === today ? (currentUser.dailySpinsUsedToday || 0) : 0;
+      const dailyRemaining = Math.max(0, dailyLimit - usedToday);
+      const bonus = currentUser.spinChances || 0;
 
-    let updatedUsedToday = usedToday;
-    let updatedBonus = bonus;
-    let deductedFromBalance = false;
+      let updatedUsedToday = usedToday;
+      let updatedBonus = bonus;
+      let deductedFromBalance = false;
 
-    if (dailyRemaining > 0) {
-      // Consume 1 daily free spin
-      updatedUsedToday += 1;
-    } else if (bonus > 0) {
-      // Consume 1 extra/bonus spin
-      updatedBonus -= 1;
-    } else if (platformSettings.isSpinPurchaseEnabled && (platformSettings.spinPrice || 0) > 0) {
-      const cost = platformSettings.spinPrice || 50;
-      if (user.rechargeBalance < cost) {
-        showToast(`No spins remaining! Recharging balance needed for $${cost.toFixed(2)} ticket.`, 'error');
-        return { success: false, message: 'Insufficient balance' };
+      if (dailyRemaining > 0) {
+        updatedUsedToday += 1;
+      } else if (bonus > 0) {
+        updatedBonus -= 1;
+      } else if (platformSettings.isSpinPurchaseEnabled && (platformSettings.spinPrice || 0) > 0) {
+        const cost = platformSettings.spinPrice || 50;
+        if (currentUser.rechargeBalance < cost) {
+          showToast(`No spins remaining! Recharging balance needed for $${cost.toFixed(2)} ticket.`, 'error');
+          return { success: false, message: 'Insufficient balance' };
+        }
+        deductedFromBalance = true;
+      } else {
+        showToast('No free or bonus spins remaining for today!', 'info');
+        return { success: false, message: 'No chances left' };
       }
-      deductedFromBalance = true;
-    } else {
-      showToast('No free or bonus spins remaining for today!', 'info');
-      return { success: false, message: 'No chances left' };
-    }
 
-    let newRechargeBalance = user.rechargeBalance;
-    if (deductedFromBalance) {
-      const cost = platformSettings.spinPrice || 50;
-      newRechargeBalance = Number((user.rechargeBalance - cost).toFixed(2));
-    }
+      let newRechargeBalance = currentUser.rechargeBalance;
+      if (deductedFromBalance) {
+        const cost = platformSettings.spinPrice || 50;
+        newRechargeBalance = Math.max(0, Number((currentUser.rechargeBalance - cost).toFixed(2)));
+      }
 
-    let newWithdrawalBalance = user.withdrawalBalance;
-    if (prizeValue > 0 && (type === 'cash' || type === 'vip_points')) {
-      newWithdrawalBalance = Number((user.withdrawalBalance + prizeValue).toFixed(2));
-    } else if (type === 'spins' && prizeValue > 0) {
-      updatedBonus += prizeValue;
-    }
+      let newWithdrawalBalance = currentUser.withdrawalBalance;
+      if (prizeValue > 0 && (type === 'cash' || type === 'vip_points')) {
+        newWithdrawalBalance = Number((currentUser.withdrawalBalance + prizeValue).toFixed(2));
+      } else if (type === 'spins' && prizeValue > 0) {
+        updatedBonus += prizeValue;
+      }
 
-    const updatedUser: User = {
-      ...user,
-      rechargeBalance: newRechargeBalance,
-      withdrawalBalance: newWithdrawalBalance,
-      spinChances: updatedBonus,
-      lastSpinDate: today,
-      dailySpinsUsedToday: updatedUsedToday,
-    };
-
-    setUser(updatedUser);
-    await dbService.saveUser(updatedUser);
-
-    // If prize won was cash, record transaction & update today's prize distribution pool in settings
-    if (prizeValue > 0 && (type === 'cash' || type === 'vip_points')) {
-      const spinTx: Transaction = {
-        id: `tx-${Date.now()}`,
-        userId: user.id,
-        type: 'spin_win',
-        amount: prizeValue,
-        title: `Lucky Wheel Prize: ${prizeLabel}`,
-        timestamp: new Date().toLocaleString(),
-        status: 'completed',
-        referenceNo: `SPN${Date.now()}`,
+      lastUserActionTimestampRef.current = Date.now() + 30000;
+      const updatedUser: User = {
+        ...currentUser,
+        rechargeBalance: newRechargeBalance,
+        withdrawalBalance: newWithdrawalBalance,
+        spinChances: updatedBonus,
+        lastSpinDate: today,
+        dailySpinsUsedToday: updatedUsedToday,
+        isExplicitZeroReset: newRechargeBalance === 0,
+        updatedAt: new Date().toISOString(),
       };
-      await dbService.saveTransaction(spinTx, user.id);
-      setTransactions((prev) => prependTxUnique(prev, spinTx));
-      setAdminTransactions((prev) => prependTxUnique(prev, spinTx));
 
-      // Update platform settings total prize pool
-      const currentResetDate = platformSettings.lastDistributionResetDate || today;
-      const todayDistributed = currentResetDate === today ? (platformSettings.totalPrizeDistributedToday || 0) : 0;
-      const updatedTotalPrize = Number((todayDistributed + prizeValue).toFixed(2));
+      userRef.current = updatedUser;
+      setUser(updatedUser);
+      try {
+        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(updatedUser));
+      } catch {}
+      await dbService.saveUser(updatedUser);
 
-      const newSettings: PlatformSettings = {
-        ...platformSettings,
-        totalPrizeDistributedToday: updatedTotalPrize,
-        lastDistributionResetDate: today,
-      };
-      setPlatformSettings(newSettings);
-      await dbService.savePlatformSettings(newSettings);
+      if (prizeValue > 0 && (type === 'cash' || type === 'vip_points')) {
+        const spinTx: Transaction = {
+          id: `tx-${Date.now()}`,
+          userId: currentUser.id,
+          type: 'spin_win',
+          amount: prizeValue,
+          title: `Lucky Wheel Prize: ${prizeLabel}`,
+          timestamp: new Date().toLocaleString(),
+          status: 'completed',
+          referenceNo: `SPN${Date.now()}`,
+          ...buildUserBalanceSnapshot(updatedUser),
+        };
+        await dbService.saveTransaction(spinTx, currentUser.id);
+        setTransactions((prev) => prependTxUnique(prev, spinTx));
+        setAdminTransactions((prev) => prependTxUnique(prev, spinTx));
 
-      confetti({
-        particleCount: 150,
-        spread: 90,
-        origin: { y: 0.5 },
-      });
+        const currentResetDate = platformSettings.lastDistributionResetDate || today;
+        const todayDistributed = currentResetDate === today ? (platformSettings.totalPrizeDistributedToday || 0) : 0;
+        const updatedTotalPrize = Number((todayDistributed + prizeValue).toFixed(2));
 
-      showToast(`Congratulations! You won ${prizeLabel}!`, 'success');
-    } else if (type === 'spins' && prizeValue > 0) {
-      showToast(`Congratulations! You won +${prizeValue} Extra Lucky Spins!`, 'success');
-    } else {
-      showToast('Better luck next time! Try again.', 'info');
+        const newSettings: PlatformSettings = {
+          ...platformSettings,
+          totalPrizeDistributedToday: updatedTotalPrize,
+          lastDistributionResetDate: today,
+        };
+        setPlatformSettings(newSettings);
+        await dbService.savePlatformSettings(newSettings);
+
+        confetti({
+          particleCount: 150,
+          spread: 90,
+          origin: { y: 0.5 },
+        });
+
+        showToast(`Congratulations! You won ${prizeLabel}!`, 'success');
+      } else if (type === 'spins' && prizeValue > 0) {
+        showToast(`Congratulations! You won +${prizeValue} Extra Lucky Spins!`, 'success');
+      } else {
+        showToast('Better luck next time! Try again.', 'info');
+      }
+
+      return { success: true, message: 'Spin processed' };
+    } finally {
+      setTimeout(() => {
+        isSpinLockRef.current = false;
+      }, 1500);
     }
-
-    return { success: true, message: 'Spin processed' };
   };
 
   // Redeem Gift Code
   const redeemGiftCode = async (code: string): Promise<{ success: boolean; amount: number; message: string }> => {
-    if (!user) {
+    const currentUser = userRef.current || user;
+    if (!currentUser) {
       openModal('auth');
       return { success: false, amount: 0, message: 'Please login' };
+    }
+    if (isRedeemLockRef.current) {
+      return { success: false, amount: 0, message: 'Redemption already in progress' };
     }
 
     const cleanCode = code.trim().toUpperCase();
@@ -3032,101 +3105,112 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, amount: 0, message: 'Empty code' };
     }
 
-    // Check if user already redeemed this promo code
-    if (user.redeemedCodes && user.redeemedCodes.includes(cleanCode)) {
+    if (currentUser.redeemedCodes && currentUser.redeemedCodes.includes(cleanCode)) {
       showToast(`You have already redeemed code "${cleanCode}"! (आप यह कोड पहले ही रिडीम कर चुके हैं)`, 'info');
       return { success: false, amount: 0, message: 'Already redeemed' };
     }
 
-    // 1. Look for admin-created custom promo code in local state or cloud
-    let matchedPromo = promoCodes.find((p) => p.code.trim().toUpperCase() === cleanCode);
-    if (!matchedPromo) {
-      try {
-        const cloudPromos = await dbService.getAllPromoCodes();
-        matchedPromo = cloudPromos.find((p) => p.code.trim().toUpperCase() === cleanCode);
-        if (cloudPromos && cloudPromos.length > 0) {
-          setPromoCodes(cloudPromos);
+    isRedeemLockRef.current = true;
+    try {
+      let matchedPromo = promoCodes.find((p) => p.code.trim().toUpperCase() === cleanCode);
+      if (!matchedPromo) {
+        try {
+          const cloudPromos = await dbService.getAllPromoCodes();
+          matchedPromo = cloudPromos.find((p) => p.code.trim().toUpperCase() === cleanCode);
+          if (cloudPromos && cloudPromos.length > 0) {
+            setPromoCodes(cloudPromos);
+          }
+        } catch (err) {
+          console.warn('Failed to query promo codes from cloud:', err);
         }
-      } catch (err) {
-        console.warn('Failed to query promo codes from cloud:', err);
       }
-    }
 
-    // Check if code was deleted by admin
-    if (dbService.getDeletedPromoKeys().has(cleanCode)) {
-      showToast(`Gift code "${cleanCode}" has been deleted by administrator. (यह कोड डिलीट किया जा चुका है)`, 'error');
-      return { success: false, amount: 0, message: 'Code deleted' };
-    }
-
-    let giftValue = 0;
-    let promoToUpdate: CustomPromoCode | null = null;
-
-    if (matchedPromo) {
-      if (matchedPromo.isActive === false) {
-        showToast(`Gift code "${cleanCode}" is currently paused or inactive. (यह कोड निष्क्रिय है)`, 'error');
-        return { success: false, amount: 0, message: 'Code inactive' };
+      if (dbService.getDeletedPromoKeys().has(cleanCode)) {
+        showToast(`Gift code "${cleanCode}" has been deleted by administrator. (यह कोड डिलीट किया जा चुका है)`, 'error');
+        return { success: false, amount: 0, message: 'Code deleted' };
       }
-      if (matchedPromo.maxUses && (matchedPromo.usedCount || 0) >= matchedPromo.maxUses) {
-        showToast(`Gift code "${cleanCode}" has reached maximum usage limit! (इस कोड की सीमा समाप्त हो चुकी है)`, 'error');
-        return { success: false, amount: 0, message: 'Limit reached' };
+
+      let giftValue = 0;
+      let promoToUpdate: CustomPromoCode | null = null;
+
+      if (matchedPromo) {
+        if (matchedPromo.isActive === false) {
+          showToast(`Gift code "${cleanCode}" is currently paused or inactive. (यह कोड निष्क्रिय है)`, 'error');
+          return { success: false, amount: 0, message: 'Code inactive' };
+        }
+        if (matchedPromo.maxUses && (matchedPromo.usedCount || 0) >= matchedPromo.maxUses) {
+          showToast(`Gift code "${cleanCode}" has reached maximum usage limit! (इस कोड की सीमा समाप्त हो चुकी है)`, 'error');
+          return { success: false, amount: 0, message: 'Limit reached' };
+        }
+        giftValue = Number(matchedPromo.amount);
+        promoToUpdate = {
+          ...matchedPromo,
+          usedCount: (matchedPromo.usedCount || 0) + 1,
+        };
+      } else {
+        showToast(`Invalid or expired gift code "${cleanCode}". Please verify code. (अमान्य या समाप्त गिफ्ट कोड)`, 'error');
+        return { success: false, amount: 0, message: 'Invalid code' };
       }
-      giftValue = Number(matchedPromo.amount);
-      promoToUpdate = {
-        ...matchedPromo,
-        usedCount: (matchedPromo.usedCount || 0) + 1,
+
+      if (giftValue <= 0) {
+        showToast('This gift code has zero value.', 'error');
+        return { success: false, amount: 0, message: 'Zero value' };
+      }
+
+      if (promoToUpdate) {
+        try {
+          await dbService.savePromoCode(promoToUpdate);
+          setPromoCodes((prev) => prev.map((p) => (p.id === promoToUpdate!.id ? promoToUpdate! : p)));
+        } catch (err) {
+          console.warn('Failed to record promo usage in cloud:', err);
+        }
+      }
+
+      const latestUser = userRef.current || currentUser;
+      const updatedRedeemed = Array.from(new Set([...(latestUser.redeemedCodes || []), cleanCode]));
+      lastUserActionTimestampRef.current = Date.now() + 30000;
+      const updatedUser: User = {
+        ...latestUser,
+        withdrawalBalance: Number((latestUser.withdrawalBalance + giftValue).toFixed(2)),
+        redeemedCodes: updatedRedeemed,
+        isExplicitZeroReset: false,
+        updatedAt: new Date().toISOString(),
       };
-    } else {
-      showToast(`Invalid or expired gift code "${cleanCode}". Please verify code. (अमान्य या समाप्त गिफ्ट कोड)`, 'error');
-      return { success: false, amount: 0, message: 'Invalid code' };
-    }
-
-    if (giftValue <= 0) {
-      showToast('This gift code has zero value.', 'error');
-      return { success: false, amount: 0, message: 'Zero value' };
-    }
-
-    // Save incremented usage count for admin-created promo code
-    if (promoToUpdate) {
+      userRef.current = updatedUser;
+      setUser(updatedUser);
       try {
-        await dbService.savePromoCode(promoToUpdate);
-        setPromoCodes((prev) => prev.map((p) => (p.id === promoToUpdate!.id ? promoToUpdate! : p)));
-      } catch (err) {
-        console.warn('Failed to record promo usage in cloud:', err);
-      }
+        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(updatedUser));
+      } catch {}
+      await dbService.saveUser(updatedUser);
+
+      const giftTx: Transaction = {
+        id: `tx-${Date.now()}`,
+        userId: latestUser.id,
+        type: 'bonus',
+        amount: giftValue,
+        title: `Redeemed Gift Card: ${cleanCode}`,
+        timestamp: new Date().toLocaleString(),
+        status: 'completed',
+        referenceNo: `GIFT${Date.now()}`,
+        ...buildUserBalanceSnapshot(updatedUser),
+      };
+      await dbService.saveTransaction(giftTx, latestUser.id);
+      setTransactions((prev) => prependTxUnique(prev, giftTx));
+      setAdminTransactions((prev) => prependTxUnique(prev, giftTx));
+
+      confetti({
+        particleCount: 80,
+        spread: 60,
+        origin: { y: 0.6 },
+      });
+
+      showToast(`Gift code "${cleanCode}" redeemed! $${giftValue.toFixed(2)} added to Withdrawal Balance!`, 'success');
+      return { success: true, amount: giftValue, message: 'Redeemed successfully' };
+    } finally {
+      setTimeout(() => {
+        isRedeemLockRef.current = false;
+      }, 2000);
     }
-
-    // Credit user's withdrawal balance and remember redeemed code
-    const updatedRedeemed = Array.from(new Set([...(user.redeemedCodes || []), cleanCode]));
-    const updatedUser: User = {
-      ...user,
-      withdrawalBalance: Number((user.withdrawalBalance + giftValue).toFixed(2)),
-      redeemedCodes: updatedRedeemed,
-    };
-    setUser(updatedUser);
-    await dbService.saveUser(updatedUser);
-
-    const giftTx: Transaction = {
-      id: `tx-${Date.now()}`,
-      userId: user.id,
-      type: 'bonus',
-      amount: giftValue,
-      title: `Redeemed Gift Card: ${cleanCode}`,
-      timestamp: new Date().toLocaleString(),
-      status: 'completed',
-      referenceNo: `GIFT${Date.now()}`,
-    };
-    await dbService.saveTransaction(giftTx, user.id);
-    setTransactions((prev) => prependTxUnique(prev, giftTx));
-    setAdminTransactions((prev) => prependTxUnique(prev, giftTx));
-
-    confetti({
-      particleCount: 80,
-      spread: 60,
-      origin: { y: 0.6 },
-    });
-
-    showToast(`Gift code "${cleanCode}" redeemed! $${giftValue.toFixed(2)} added to Withdrawal Balance!`, 'success');
-    return { success: true, amount: giftValue, message: 'Redeemed successfully' };
   };
 
   // Support Chat
@@ -3243,7 +3327,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const rechargeBal = Number(newUserData.rechargeBalance) || 0;
       const withdrawBal = Number(newUserData.withdrawalBalance) || 0;
       const prodRev = Number(newUserData.productRevenue) || 0;
-      const totalInv = Number(newUserData.totalInvested) || rechargeBal;
+      const totalInv = Number(newUserData.totalInvested) || 0;
 
       const createdUser: User = {
         id: newId,
@@ -3298,6 +3382,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           status: 'completed',
           referenceNo: `ADM-INIT-${createdUser.id}`,
           paymentMethod: 'Admin Direct Setup',
+          ...buildUserBalanceSnapshot(createdUser),
         };
         await dbService.saveTransaction(initTx, createdUser.id);
         setAdminTransactions((prev) => [initTx, ...prev]);
@@ -3314,10 +3399,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const adminUpdateUser = async (userId: string, data: Partial<User>) => {
     try {
-      await dbService.updateUser(userId, data);
-      setAdminUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, ...data } : u)));
-      if (user && user.id === userId) {
-        setUser((prev) => (prev ? { ...prev, ...data } : null));
+      const hasZero =
+        data.isExplicitZeroReset === true ||
+        data.rechargeBalance === 0 ||
+        data.withdrawalBalance === 0;
+      const payload: Partial<User> = {
+        ...data,
+        isExplicitZeroReset: hasZero,
+        updatedAt: new Date().toISOString(),
+      };
+      await dbService.updateUser(userId, payload);
+      setAdminUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, ...payload } : u)));
+      const curUser = userRef.current || user;
+      if (curUser && curUser.id === userId) {
+        lastUserActionTimestampRef.current = Date.now() + 30000;
+        const nextUser = { ...curUser, ...payload };
+        userRef.current = nextUser;
+        setUser(nextUser);
+        try {
+          localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(nextUser));
+        } catch {}
       }
       showToast('User full details saved permanently in database', 'success');
     } catch {
@@ -3409,8 +3510,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? Number(res.user[wallet])
         : Math.max(0, Number(((target[wallet] || 0) + (type === 'add' ? amount : -amount)).toFixed(2)));
 
-      // 2. Sync to Firestore
-      await dbService.updateUser(userId, { [wallet]: nextVal });
+      // 2. Sync to Firestore with explicit zero flag if 0
+      const nowIso = new Date().toISOString();
+      await dbService.updateUser(userId, {
+        [wallet]: nextVal,
+        ...(nextVal === 0 ? { isExplicitZeroReset: true } : {}),
+      });
 
       const adjTx: Transaction = res.transaction || {
         id: `tx-adj-${Date.now()}`,
@@ -3421,19 +3526,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         timestamp: new Date().toLocaleString(),
         status: 'completed',
         referenceNo: `ADM${Math.floor(100000 + Math.random() * 900000)}`,
+        ...buildUserBalanceSnapshot(
+          res.user ||
+            (() => {
+              const target = adminUsers.find((u) => u.id === userId) || (user?.id === userId ? user : null);
+              if (!target) return null;
+              return { ...target, [wallet]: nextVal };
+            })()
+        ),
       };
 
       await dbService.saveTransaction(adjTx, userId);
 
       setAdminUsers((prev) =>
-        prev.map((u) => (u.id === userId ? { ...u, [wallet]: nextVal } : u))
+        prev.map((u) =>
+          u.id === userId
+            ? { ...u, [wallet]: nextVal, ...(nextVal === 0 ? { isExplicitZeroReset: true } : {}), updatedAt: nowIso }
+            : u
+        )
       );
-      if (user && user.id === userId) {
-        setUser((prev) => (prev ? { ...prev, [wallet]: nextVal } : null));
+      const curUser = userRef.current || user;
+      if (curUser && curUser.id === userId) {
+        lastUserActionTimestampRef.current = Date.now() + 30000;
+        const nextUser = {
+          ...curUser,
+          [wallet]: nextVal,
+          ...(nextVal === 0 ? { isExplicitZeroReset: true } : {}),
+          updatedAt: nowIso,
+        };
+        userRef.current = nextUser;
+        setUser(nextUser);
+        try {
+          localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(nextUser));
+        } catch {}
       }
 
       setAdminTransactions((prev) => prependTxUnique(prev, adjTx));
-      if (user && user.id === userId) {
+      if (curUser && curUser.id === userId) {
         setTransactions((prev) => prependTxUnique(prev, adjTx));
       }
       showToast(`Adjusted ${wallet} for User ${userId}`, 'success');
@@ -3485,15 +3614,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         amount,
       });
 
+      const txBalUpdate: Partial<Transaction> =
+        apiRes.transaction?.balanceAfter !== undefined
+          ? {
+              balanceAfter: apiRes.transaction.balanceAfter,
+              rechargeBalanceAfter: apiRes.transaction.rechargeBalanceAfter,
+              withdrawalBalanceAfter: apiRes.transaction.withdrawalBalanceAfter,
+            }
+          : apiRes.user
+          ? buildUserBalanceSnapshot(apiRes.user) || {}
+          : {};
+
       // 2. Sync to Firestore (across all matching copies) and local state
-      await dbService.updateTransaction(txId, { status: 'completed' }, originalRef);
+      await dbService.updateTransaction(txId, { status: 'completed', ...txBalUpdate }, originalRef);
       const matchesTx = (t: Transaction) =>
         t.id === txId || t.referenceNo === txId || (Boolean(originalRef) && t.referenceNo === originalRef);
       setAdminTransactions((prev) =>
-        prev.map((t) => (matchesTx(t) ? { ...t, status: 'completed' } : t))
+        prev.map((t) => (matchesTx(t) ? { ...t, status: 'completed', ...txBalUpdate } : t))
       );
       setTransactions((prev) =>
-        prev.map((t) => (matchesTx(t) ? { ...t, status: 'completed' } : t))
+        prev.map((t) => (matchesTx(t) ? { ...t, status: 'completed', ...txBalUpdate } : t))
       );
 
       if (apiRes.alreadyProcessed) {
@@ -3506,13 +3646,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const newBal = targetUser && targetUser.rechargeBalance !== undefined
           ? Number(targetUser.rechargeBalance)
           : Number((((adminUsers.find(u => u.id === userId)?.rechargeBalance || 0) + amount)).toFixed(2));
+        const nowIso = new Date().toISOString();
 
         await dbService.updateUser(userId, { rechargeBalance: newBal });
         setAdminUsers((prev) =>
-          prev.map((u) => (u.id === userId ? { ...u, rechargeBalance: newBal } : u))
+          prev.map((u) => (u.id === userId ? { ...u, rechargeBalance: newBal, updatedAt: nowIso } : u))
         );
-        if (user && user.id === userId) {
-          setUser((prev) => (prev ? { ...prev, rechargeBalance: newBal } : null));
+        const curUser = userRef.current || user;
+        if (curUser && curUser.id === userId) {
+          lastUserActionTimestampRef.current = Date.now() + 30000;
+          const nextUser = { ...curUser, rechargeBalance: newBal, updatedAt: nowIso };
+          userRef.current = nextUser;
+          setUser(nextUser);
+          try {
+            localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(nextUser));
+          } catch {}
         }
       }
       showToast(`Add Money of $${amount} approved & credited to wallet!`, 'success');
@@ -3659,8 +3807,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         reason,
       });
 
+      const rejectBalUpdate: Partial<Transaction> =
+        apiRes.transaction?.balanceAfter !== undefined
+          ? {
+              balanceAfter: apiRes.transaction.balanceAfter,
+              rechargeBalanceAfter: apiRes.transaction.rechargeBalanceAfter,
+              withdrawalBalanceAfter: apiRes.transaction.withdrawalBalanceAfter,
+            }
+          : apiRes.user
+          ? buildUserBalanceSnapshot(apiRes.user) || {}
+          : {};
+      const fullRejectUpdate: Partial<Transaction> = { ...update, ...rejectBalUpdate };
+
       // 2. Sync to ALL matching Firestore documents
-      await dbService.updateTransaction(txId, update, originalRef);
+      await dbService.updateTransaction(txId, fullRejectUpdate, originalRef);
 
       // 3. Update admin transactions and user transactions state
       const matchesTx = (t: Transaction) =>
@@ -3670,10 +3830,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         (sqlId !== undefined && (t as any).sqlId === sqlId);
 
       setAdminTransactions((prev) =>
-        prev.map((t) => (matchesTx(t) ? { ...t, status: 'rejected' } : t))
+        prev.map((t) => (matchesTx(t) ? { ...t, ...fullRejectUpdate } : t))
       );
       setTransactions((prev) =>
-        prev.map((t) => (matchesTx(t) ? { ...t, status: 'rejected' } : t))
+        prev.map((t) => (matchesTx(t) ? { ...t, ...fullRejectUpdate } : t))
       );
 
       if (apiRes.alreadyProcessed) {
@@ -3692,20 +3852,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const newBal = apiRes?.user && apiRes.user.withdrawalBalance !== undefined
             ? Number(apiRes.user.withdrawalBalance)
             : Number(((targetUser.withdrawalBalance || 0) + numAmount).toFixed(2));
+          const nowIso = new Date().toISOString();
 
           await dbService.updateUser(targetUser.id, { withdrawalBalance: newBal });
           setAdminUsers((prev) =>
-            prev.map((u) => (u.id === targetUser!.id || u.phone === targetUser!.phone ? { ...u, withdrawalBalance: newBal } : u))
+            prev.map((u) => (u.id === targetUser!.id || u.phone === targetUser!.phone ? { ...u, withdrawalBalance: newBal, updatedAt: nowIso } : u))
           );
-          if (user && (user.id === targetUser.id || user.phone === targetUser.phone)) {
-            setUser((prev) => (prev ? { ...prev, withdrawalBalance: newBal } : null));
+          const curUser = userRef.current || user;
+          if (curUser && (curUser.id === targetUser.id || curUser.phone === targetUser.phone)) {
+            lastUserActionTimestampRef.current = Date.now() + 30000;
+            const nextUser = { ...curUser, withdrawalBalance: newBal, updatedAt: nowIso };
+            userRef.current = nextUser;
+            setUser(nextUser);
+            try {
+              localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(nextUser));
+            } catch {}
           }
         } else if (apiRes?.user) {
           setAdminUsers((prev) =>
             prev.map((u) => (u.id === apiRes.user.id || u.phone === apiRes.user.phone ? { ...u, ...apiRes.user } : u))
           );
-          if (user && (user.id === apiRes.user.id || user.phone === apiRes.user.phone)) {
-            setUser((prev) => (prev ? { ...prev, ...apiRes.user } : null));
+          const curUser = userRef.current || user;
+          if (curUser && (curUser.id === apiRes.user.id || curUser.phone === apiRes.user.phone)) {
+            lastUserActionTimestampRef.current = Date.now() + 30000;
+            const nextUser = { ...curUser, ...apiRes.user };
+            userRef.current = nextUser;
+            setUser(nextUser);
+            try {
+              localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(nextUser));
+            } catch {}
           }
         }
       }

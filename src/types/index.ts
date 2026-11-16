@@ -165,6 +165,26 @@ export interface PlatformSettings {
   minP2PAmount?: number;
   maxP2PAmount?: number;
   p2pNotice?: string;
+
+  // Google AdMob Banner Ads Integration Settings
+  isAdMobEnabled?: boolean;
+  adMobTestMode?: boolean;
+  adMobAppId?: string;
+  adMobBannerUnitId?: string;
+  adMobPublisherId?: string;
+  adSenseBannerSlot?: string;
+  adMobBannerSize?: 'BANNER_320x50' | 'ADAPTIVE_BANNER' | 'LARGE_BANNER_320x100';
+  adMobPosition?: 'inline' | 'top' | 'bottom';
+  adMobPlacements?: AdMobPlacementConfig;
+  adMobRefreshSeconds?: number;
+}
+
+export interface AdMobPlacementConfig {
+  home: boolean;
+  invest: boolean;
+  notice: boolean;
+  blog: boolean;
+  account: boolean;
 }
 
 export interface HelpCenterLinkItem {
@@ -343,6 +363,9 @@ export interface Transaction {
   payeeUpi?: string;
   amountInr?: number;
   adminNote?: string;
+  balanceAfter?: number; // User's Total Balance (rechargeBalance + withdrawalBalance) after this transaction
+  rechargeBalanceAfter?: number;
+  withdrawalBalanceAfter?: number;
 }
 
 export interface TeamMember {

@@ -1169,23 +1169,60 @@ function saveUsersBackup(users: any[]): boolean {
   }
 }
 
+function parseTimestampMs(val: any): number {
+  if (!val) return 0;
+  if (typeof val === 'number' && !Number.isNaN(val)) return val;
+  let s = String(val).trim();
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
+    s = s.replace(' ', 'T') + 'Z';
+  }
+  const ms = Date.parse(s);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
 function mergeTwoUsers(existing: any, incoming: any): any {
-  if (!existing) return { ...incoming };
-  if (!incoming) return { ...existing };
+  if (!existing) {
+    const clean = { ...incoming };
+    delete clean.isAuthoritativeServer;
+    return clean;
+  }
+  if (!incoming) {
+    const clean = { ...existing };
+    delete clean.isAuthoritativeServer;
+    return clean;
+  }
+
+  const isAuthIncoming = Boolean(incoming.isAuthoritativeServer);
+  const existingTs = parseTimestampMs(existing.updatedAt);
+  const incomingTs = parseTimestampMs(incoming.updatedAt);
+  const existingStrictlyNewer =
+    !isAuthIncoming &&
+    existingTs > 0 &&
+    incomingTs > 0 &&
+    existingTs > incomingTs + 1000;
+  const incomingIsNewerOrEqual =
+    isAuthIncoming ||
+    (incomingTs > 0 && (existingTs === 0 || incomingTs >= existingTs)) ||
+    (Boolean(incoming.isExplicitZeroReset) && (incomingTs === 0 || existingTs === 0 || incomingTs >= existingTs - 1000));
+
   const merged: any = { ...existing };
   for (const [k, v] of Object.entries(incoming)) {
-    // Prevent accidental undefined or null or NaN or stale 0 overwriting of financial balances & streaks
+    if (k === 'isAuthoritativeServer') continue;
+    // Prevent stale snapshots or null/undefined/NaN from overwriting newer balances
     if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'vipLevel', 'spinChances', 'totalReferrals', 'totalCommissionEarned', 'checkInStreak'].includes(k)) {
       const existingNum = Number(existing[k]) || 0;
       const incomingNum = Number(v) || 0;
 
-      // CRITICAL SAFEGUARD: If existing user record already has a positive balance (e.g. admin credited rechargeBalance > 0),
-      // NEVER let stale background fetches or default 0s wipe that positive balance to 0!
-      if (existingNum > 0 && incomingNum === 0 && !incoming.isExplicitZeroReset) {
+      if (merged[k] !== undefined && (v === null || v === undefined || Number.isNaN(Number(v)))) {
         continue;
       }
 
-      if (merged[k] !== undefined && (v === null || v === undefined || Number.isNaN(Number(v)))) {
+      if (existingStrictlyNewer) {
+        continue;
+      }
+
+      // Only block a 0 financial value when incoming is NOT newer/authoritative (protects against incomplete legacy payloads)
+      if (existingNum > 0 && incomingNum === 0 && !incomingIsNewerOrEqual) {
         continue;
       }
     }
@@ -1204,8 +1241,8 @@ function mergeTwoUsers(existing: any, incoming: any): any {
         merged[k] = v;
       }
     } else if (((v as any) === 0 || (v as any) === false) && typeof v === typeof existing[k]) {
-      if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested'].includes(k)) {
-        if ((Number(existing[k]) || 0) > 0 && !incoming.isExplicitZeroReset) {
+      if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'totalCommissionEarned'].includes(k)) {
+        if ((Number(existing[k]) || 0) > 0 && !incomingIsNewerOrEqual) {
           continue;
         }
       }
@@ -1254,21 +1291,23 @@ function mergeTwoUsers(existing: any, incoming: any): any {
     merged.inviterId = '406332';
   }
 
-  // Preserve highest stats & protect withdrawalBalance/productRevenue from stale pre-commission/pre-dividend snapshots
-  const existingComm = Number(existing.totalCommissionEarned) || 0;
-  const incomingComm = Number(incoming.totalCommissionEarned) || 0;
-  const existingRev = Number(existing.productRevenue) || 0;
-  const incomingRev = Number(incoming.productRevenue) || 0;
-  if (!incoming.isExplicitZeroReset && (existingComm > incomingComm || existingRev > incomingRev)) {
-    merged.withdrawalBalance = Math.max(Number(existing.withdrawalBalance) || 0, Number(merged.withdrawalBalance) || 0);
-    merged.productRevenue = Math.max(existingRev, Number(merged.productRevenue) || 0);
-  }
   merged.totalReferrals = Math.max(Number(merged.totalReferrals) || 0, Number(existing.totalReferrals) || 0);
-  merged.totalCommissionEarned = Math.max(existingComm, Number(merged.totalCommissionEarned) || 0);
+  if (isAuthIncoming || (incoming.isExplicitZeroReset && !existingStrictlyNewer)) {
+    merged.totalCommissionEarned = Number(incoming.totalCommissionEarned ?? merged.totalCommissionEarned) || 0;
+  } else if (!existingStrictlyNewer) {
+    merged.totalCommissionEarned = Math.max(Number(existing.totalCommissionEarned) || 0, Number(merged.totalCommissionEarned) || 0);
+  }
+
+  if (existingTs > incomingTs && !isAuthIncoming) {
+    merged.updatedAt = existing.updatedAt;
+  } else {
+    merged.updatedAt = incoming.updatedAt || existing.updatedAt || new Date().toISOString();
+  }
 
   if (!merged.createdAt) {
     merged.createdAt = existing.createdAt || incoming.createdAt || new Date().toISOString();
   }
+  delete merged.isAuthoritativeServer;
   return merged;
 }
 
@@ -1347,10 +1386,10 @@ async function getCombinedServerUsers(): Promise<any[]> {
     console.warn('getCombinedServerUsers cloud fetch note:', err?.message || err);
   }
 
-  // Merge SQL users with disk users and Cloud SQL users
-  // SQLite is authoritative: sqlUsers takes precedence over disk and cloud
-  const merged1 = deduplicateAndMergeUsers(diskUsers, sqlUsers);
-  const mergedAll = deduplicateAndMergeUsers(cloudUsers, merged1);
+  // Merge Cloud SQL -> disk users -> authoritative SQLite users (SQLite always wins on wallet balances)
+  const merged1 = deduplicateAndMergeUsers(cloudUsers, diskUsers);
+  const authSqlUsers = sqlUsers.map((u) => ({ ...u, isAuthoritativeServer: true }));
+  const mergedAll = deduplicateAndMergeUsers(merged1, authSqlUsers);
 
   // Filter one more time through deletedSet to be 1000% certain
   const finalCleanUsers = mergedAll.filter((u) => {
@@ -1359,9 +1398,17 @@ async function getCombinedServerUsers(): Promise<any[]> {
     return !deletedSet.has(uId) && (!uPhone || !deletedSet.has(uPhone));
   });
 
-  // Guarantee only clean, non-deleted users are upserted in SQLite table
+  // Only insert users into SQLite that do NOT exist yet in SQLite (never overwrite existing SQLite balances with stale disk/cloud records)
+  const existingSqlIds = new Set(sqlUsers.map((u) => String(u.id || '').trim()));
+  const existingSqlPhones = new Set(
+    sqlUsers.map((u) => String(u.phone || '').replace(/\D/g, '').slice(-10)).filter((p) => p.length === 10)
+  );
   for (const u of finalCleanUsers) {
-    upsertUserInSql(u);
+    const uId = String(u.id || '').trim();
+    const uPhone = String(u.phone || '').replace(/\D/g, '').slice(-10);
+    if (!existingSqlIds.has(uId) && (!uPhone || !existingSqlPhones.has(uPhone))) {
+      upsertUserInSql(u);
+    }
   }
   saveUsersBackup(finalCleanUsers);
 
@@ -1422,22 +1469,46 @@ app.post('/api/unblacklist-user', (req, res) => {
   }
 });
 
-// API Route: Save or Update single user permanently into SQLite SQL + Backup
+// API Route: Save or Update single user permanently into SQLite SQL + Backup (with strict stale-timestamp guard)
 app.post(['/api/user/save', '/api/user/update'], async (req, res) => {
   try {
-    const userData = req.body.user || req.body;
-    if (!userData || (!userData.id && !userData.phone)) {
+    const rawUserData = req.body.user || req.body;
+    if (!rawUserData || (!rawUserData.id && !rawUserData.phone)) {
       return res.status(400).json({ success: false, error: 'User data with id or phone required' });
     }
+    const userData = { ...rawUserData };
+    delete userData.isAuthoritativeServer;
+
     // Remove from blacklist if previously deleted
     unblacklistUser(userData.phone, userData.id);
 
+    const existingSql =
+      (userData.id ? getUserByIdOrPhoneFromSql(String(userData.id).trim()) : null) ||
+      (userData.phone ? getUserByIdOrPhoneFromSql(String(userData.phone).replace(/\D/g, '').slice(-10)) : null);
+
+    let payloadToSave = userData;
+    if (existingSql) {
+      const existingTs = parseTimestampMs(existingSql.updatedAt);
+      const incomingTs = parseTimestampMs(userData.updatedAt);
+
+      // CRITICAL GUARD: Reject stale snapshots whose updatedAt is strictly older than SQLite
+      if (existingTs > 0 && incomingTs > 0 && existingTs > incomingTs + 1000) {
+        return res.json({
+          success: true,
+          staleIgnored: true,
+          message: 'Ignored stale user payload; returning authoritative SQLite state.',
+          user: existingSql,
+        });
+      }
+      payloadToSave = mergeTwoUsers(existingSql, userData);
+    }
+
     // 1. Upsert directly into SQLite
-    const saved = upsertUserInSql(userData);
+    const saved = upsertUserInSql(payloadToSave);
 
     // 2. Sync to disk backup
     const diskUsers = getCachedUsersBackup();
-    const updatedDisk = deduplicateAndMergeUsers(diskUsers, [saved]);
+    const updatedDisk = deduplicateAndMergeUsers(diskUsers, [{ ...saved, isAuthoritativeServer: true }]);
     saveUsersBackup(updatedDisk);
 
     // 3. Sync to Cloud SQL in background
@@ -1473,6 +1544,241 @@ app.post(['/api/user/save', '/api/user/update'], async (req, res) => {
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// API Route: Authoritative Atomic User Withdrawal (SQLite BEGIN IMMEDIATE + Pending Check + Persistent Ledger)
+const withdrawRequestLocks = new Set<string>();
+
+app.post('/api/user/withdraw', async (req, res) => {
+  const { userId, amount, bankDetails } = req.body || {};
+  const cleanUserId = String(userId || '').trim();
+  if (!cleanUserId) {
+    return res.status(400).json({ success: false, error: 'User ID is required' });
+  }
+
+  if (withdrawRequestLocks.has(cleanUserId)) {
+    return res.status(429).json({
+      success: false,
+      error: 'Withdrawal request is already processing. Please wait.',
+    });
+  }
+  withdrawRequestLocks.add(cleanUserId);
+
+  try {
+    const liveSettings = loadServerPlatformSettings();
+    if (liveSettings.isWithdrawalEnabled === false) {
+      return res.status(403).json({
+        success: false,
+        error: liveSettings.withdrawalNotice || 'Withdrawal service is currently undergoing routine maintenance.',
+      });
+    }
+
+    const reqAmount = Number(Number(amount).toFixed(2));
+    const minWth = Number(liveSettings.minWithdrawal) || 2;
+    if (!Number.isFinite(reqAmount) || reqAmount < minWth) {
+      return res.status(400).json({
+        success: false,
+        error: `Minimum withdrawal amount is $${minWth.toFixed(2)}`,
+      });
+    }
+
+    let user = getUserByIdOrPhoneFromSql(cleanUserId);
+    if (!user) {
+      const combined = await getCombinedServerUsers();
+      const cleanDigits = cleanUserId.replace(/\D/g, '').slice(-10);
+      const matched = combined.find(
+        (u) =>
+          String(u.id || '').trim() === cleanUserId ||
+          (cleanDigits.length === 10 && String(u.phone || '').replace(/\D/g, '').slice(-10) === cleanDigits)
+      );
+      if (matched) user = upsertUserInSql(matched);
+    }
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User account not found in database.' });
+    }
+    if (user.status === 'frozen' || user.status === 'suspended') {
+      return res.status(403).json({
+        success: false,
+        error: 'Your account is frozen by system administrator. Please contact support.',
+      });
+    }
+
+    const userPhoneDigits = String(user.phone || '').replace(/\D/g, '').slice(-10);
+    const matchesTargetUser = (tUserId: any) => {
+      const s = String(tUserId || '').trim();
+      const d = s.replace(/\D/g, '').slice(-10);
+      return s === user!.id || (userPhoneDigits.length === 10 && (s === userPhoneDigits || d === userPhoneDigits));
+    };
+
+    const serverTxs = loadServerTransactions();
+    let dbUserTxs: any[] = [];
+    try {
+      dbUserTxs = await getUserTransactions(user.id);
+    } catch {}
+
+    const allUserTxs = [...serverTxs, ...(Array.isArray(dbUserTxs) ? dbUserTxs : [])];
+    const hasPending = allUserTxs.some(
+      (t) => t && t.type === 'withdraw' && t.status === 'processing' && matchesTargetUser(t.userId)
+    );
+    if (hasPending) {
+      return res.status(400).json({
+        success: false,
+        error: 'You already have a pending withdrawal under review. Please wait for admin approval.',
+      });
+    }
+
+    const nowMs = Date.now();
+    const hasRecentSpam = allUserTxs.some(
+      (t) => t && t.type === 'withdraw' && matchesTargetUser(t.userId) && nowMs - (Number(t.createdAt) || 0) < 30000
+    );
+    if (hasRecentSpam) {
+      return res.status(429).json({
+        success: false,
+        error: 'Withdrawal request already received. Processing...',
+      });
+    }
+
+    const cleanBank = {
+      accountHolder: String(bankDetails?.accountHolder || user.bankDetails?.accountHolder || user.nickname || '').trim(),
+      accountNumber: String(bankDetails?.accountNumber || user.bankDetails?.accountNumber || '').trim(),
+      ifscCode: String(bankDetails?.ifscCode || user.bankDetails?.ifscCode || '').trim().toUpperCase(),
+      bankName: String(bankDetails?.bankName || user.bankDetails?.bankName || 'Bank IMPS').trim(),
+      upiId: String(bankDetails?.upiId || user.bankDetails?.upiId || '').trim(),
+    };
+
+    const db = getSqliteDb();
+    initSqliteUsersTable();
+    const nowIso = new Date(nowMs).toISOString();
+    let nextWithdrawal = 0;
+
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = db.prepare('SELECT * FROM platform_users WHERE id = ?').get(user.id) as any;
+      if (!row) {
+        throw new Error('USER_MISSING');
+      }
+      const dbBal = Number(row.withdrawal_balance) || 0;
+      if (dbBal + 1e-6 < reqAmount) {
+        throw new Error(`INSUFFICIENT_FUNDS:${dbBal.toFixed(2)}`);
+      }
+      nextWithdrawal = Math.max(0, Number((dbBal - reqAmount).toFixed(2)));
+
+      let rawJson: any = {};
+      try {
+        rawJson = JSON.parse(row.raw_json || '{}');
+      } catch {}
+      rawJson.withdrawalBalance = nextWithdrawal;
+      rawJson.bankDetails = cleanBank;
+      rawJson.isExplicitZeroReset = nextWithdrawal === 0;
+      rawJson.updatedAt = nowIso;
+
+      db.prepare(`
+        UPDATE platform_users
+        SET withdrawal_balance = ?,
+            bank_account_holder = ?,
+            bank_account_number = ?,
+            bank_ifsc_code = ?,
+            bank_name = ?,
+            bank_upi_id = ?,
+            bank_details_json = ?,
+            raw_json = ?,
+            updated_at = ?
+        WHERE id = ?
+      `).run(
+        nextWithdrawal,
+        cleanBank.accountHolder || null,
+        cleanBank.accountNumber || null,
+        cleanBank.ifscCode || null,
+        cleanBank.bankName || null,
+        cleanBank.upiId || null,
+        JSON.stringify(cleanBank),
+        JSON.stringify(rawJson),
+        nowIso,
+        user.id
+      );
+
+      db.exec('COMMIT');
+    } catch (sqlErr: any) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {}
+      if (String(sqlErr?.message || '').startsWith('INSUFFICIENT_FUNDS')) {
+        const avail = String(sqlErr.message).split(':')[1] || '0.00';
+        return res.status(400).json({
+          success: false,
+          error: `Insufficient withdrawal balance (Available: $${avail})`,
+        });
+      }
+      throw sqlErr;
+    }
+
+    const updatedUser = getUserByIdOrPhoneFromSql(user.id) || {
+      ...user,
+      withdrawalBalance: nextWithdrawal,
+      bankDetails: cleanBank,
+      isExplicitZeroReset: nextWithdrawal === 0,
+      updatedAt: nowIso,
+    };
+
+    const diskUsers = getCachedUsersBackup();
+    const updatedDisk = deduplicateAndMergeUsers(diskUsers, [{ ...updatedUser, isAuthoritativeServer: true }]);
+    saveUsersBackup(updatedDisk);
+
+    upsertUser({
+      uid: updatedUser.id,
+      phone: updatedUser.phone,
+      withdrawalBalance: updatedUser.withdrawalBalance,
+      bankDetails: updatedUser.bankDetails,
+    }).catch(() => {});
+
+    const feePercent = liveSettings.withdrawalFeePercent !== undefined ? Number(liveSettings.withdrawalFeePercent) : 5;
+    const fee = Number(((reqAmount * feePercent) / 100).toFixed(2));
+    const netPayout = Number((reqAmount - fee).toFixed(2));
+    const refNo = `WTH${Math.floor(10000000 + Math.random() * 90000000)}`;
+
+    const newTx = {
+      id: `tx-${nowMs}`,
+      userId: updatedUser.id,
+      phone: updatedUser.phone || '',
+      type: 'withdraw',
+      amount: reqAmount,
+      feeAmount: fee,
+      netAmount: netPayout,
+      title: `Withdrawal: ${cleanBank.accountHolder} (${cleanBank.bankName})`,
+      timestamp: new Date(nowMs).toLocaleString(),
+      createdAt: nowMs,
+      status: 'processing',
+      referenceNo: refNo,
+      paymentMethod: `Bank IMPS: ${cleanBank.accountNumber} • ${cleanBank.ifscCode}`,
+      bankDetails: cleanBank,
+      ...buildUserBalanceSnapshot(updatedUser),
+    };
+
+    const backupTxs = loadServerTransactions();
+    backupTxs.unshift(newTx);
+    saveServerTransactions(backupTxs);
+    await createTransaction(newTx).catch(() => {});
+
+    console.log(
+      `[Atomic Withdrawal] ✅ ${updatedUser.nickname} (${updatedUser.id}) requested $${reqAmount.toFixed(2)} -> New Withdrawal Balance: $${updatedUser.withdrawalBalance.toFixed(2)} [Ref: ${refNo}]`
+    );
+
+    return res.json({
+      success: true,
+      message: 'Withdrawal submitted',
+      feePercent,
+      fee,
+      netPayout,
+      user: updatedUser,
+      transaction: newTx,
+    });
+  } catch (err: any) {
+    console.error('[Atomic Withdrawal Error]:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Withdrawal request failed' });
+  } finally {
+    withdrawRequestLocks.delete(cleanUserId);
   }
 });
 
@@ -1713,6 +2019,7 @@ app.post('/api/user/claim-dividend', async (req, res) => {
       status: 'completed',
       referenceNo: divRef,
       paymentMethod: 'Product Daily Return',
+      ...buildUserBalanceSnapshot(freshUser),
     };
     const allTxs = loadServerTransactions();
     allTxs.unshift(divTx);
@@ -1940,15 +2247,16 @@ async function performAtomicP2PTransfer(params: {
       recipientRaw = JSON.parse(recipientRow.raw_json || '{}');
     } catch {}
     recipientRaw[targetWallet] = atomicRecipientNext;
+    recipientRaw.isExplicitZeroReset = false;
     recipientRaw.updatedAt = nowIso;
 
     db.prepare(
-      `UPDATE platform_users SET ${srcCol} = ?, raw_json = ?, updated_at = datetime('now') WHERE id = ?`
-    ).run(atomicSenderNext, JSON.stringify(senderRaw), sender.id);
+      `UPDATE platform_users SET ${srcCol} = ?, raw_json = ?, updated_at = ? WHERE id = ?`
+    ).run(atomicSenderNext, JSON.stringify(senderRaw), nowIso, sender.id);
 
     db.prepare(
-      `UPDATE platform_users SET ${dstCol} = ?, raw_json = ?, updated_at = datetime('now') WHERE id = ?`
-    ).run(atomicRecipientNext, JSON.stringify(recipientRaw), recipient.id);
+      `UPDATE platform_users SET ${dstCol} = ?, raw_json = ?, updated_at = ? WHERE id = ?`
+    ).run(atomicRecipientNext, JSON.stringify(recipientRaw), nowIso, recipient.id);
 
     db.exec('COMMIT');
   } catch (sqlErr: any) {
@@ -2017,6 +2325,7 @@ async function performAtomicP2PTransfer(params: {
     targetWallet,
     initiatedBy,
     note: cleanNote || undefined,
+    ...buildUserBalanceSnapshot(updatedSender),
   };
 
   const recipientTx = {
@@ -2043,6 +2352,7 @@ async function performAtomicP2PTransfer(params: {
     targetWallet,
     initiatedBy,
     note: cleanNote || undefined,
+    ...buildUserBalanceSnapshot(updatedRecipient),
   };
 
   const allTxs = loadServerTransactions();
@@ -2473,6 +2783,7 @@ app.post('/api/referral/register-invite', async (req, res) => {
       status: 'completed',
       referenceNo: `REF-${newUserId}`,
       paymentMethod: 'Referral Team System',
+      ...buildUserBalanceSnapshot(senior),
     };
     const allTxs = loadServerTransactions();
     allTxs.unshift(seniorTx);
@@ -2754,9 +3065,7 @@ app.get('/api/referral/team/:userId', async (req, res) => {
       } else if (sumOrders > 0) {
         realRecharge = sumOrders;
       } else {
-        const inv = Number(u.totalInvested) || 0;
-        const rec = Number(u.rechargeBalance) || 0;
-        realRecharge = inv > 0 ? inv : rec;
+        realRecharge = Number(u.totalInvested) || 0;
       }
       realRecharge = Number(realRecharge.toFixed(2));
 
@@ -3072,6 +3381,7 @@ export async function distributeReferralCommissionServer(
           status: 'completed',
           referenceNo: `COMM1-${refSuffix}`,
           paymentMethod: 'Referral Commission Wallet',
+          ...buildUserBalanceSnapshot(updated1 || tier1),
         };
         txList.unshift(tx1);
         saveServerTransactions(txList);
@@ -3114,6 +3424,7 @@ export async function distributeReferralCommissionServer(
             status: 'completed',
             referenceNo: `COMM2-${refSuffix}`,
             paymentMethod: 'Referral Commission Wallet',
+            ...buildUserBalanceSnapshot(updated2 || tier2),
           };
           txList.unshift(tx2);
           saveServerTransactions(txList);
@@ -3156,6 +3467,7 @@ export async function distributeReferralCommissionServer(
               status: 'completed',
               referenceNo: `COMM3-${refSuffix}`,
               paymentMethod: 'Referral Commission Wallet',
+              ...buildUserBalanceSnapshot(updated3 || tier3),
             };
             txList.unshift(tx3);
             saveServerTransactions(txList);
@@ -3180,10 +3492,9 @@ export async function distributeReferralCommissionServer(
   return { success: true, rates, credited };
 }
 
-// Global Referral Income Reconciliation:
-// Calculates all Tier 1, 2, 3 downlines for users,
-// verifies their direct referral counts, and reconciles any uncredited referral income
-// directly into the user's withdrawalBalance and totalCommissionEarned.
+// Global Referral Count Reconciliation:
+// Verifies direct Tier 1 referral counts WITHOUT auto-minting wallet funds.
+// Commissions are strictly awarded only upon verified product purchase or daily dividend events.
 export async function reconcileAllReferralStatsServer(targetUserId?: string): Promise<{ reconciledCount: number; details: any[] }> {
   try {
     const allUsers = await getCombinedServerUsers();
@@ -3251,110 +3562,12 @@ export async function reconcileAllReferralStatsServer(targetUserId?: string): Pr
         return Boolean(matchesInviterId || matchesInvitedBy);
       });
 
-      const tier1Ids = new Set(tier1Users.map((u) => String(u.id)));
-      const tier1Codes = new Set<string>();
-      const tier1Phones = new Set<string>();
-      tier1Users.forEach((u) => {
-        if (u.id) tier1Codes.add(String(u.id).trim().toUpperCase());
-        if (u.invitationCode) tier1Codes.add(u.invitationCode.trim().toUpperCase());
-        if (u.phone) {
-          const p = u.phone.replace(/\D/g, '').slice(-10);
-          tier1Codes.add(p);
-          tier1Phones.add(p);
-        }
-      });
-
-      // Tier 2 Downlines
-      const tier2Users = otherUsers.filter((u) => {
-        if (tier1Ids.has(String(u.id))) return false;
-        const matchesInviterId = u.inviterId && tier1Ids.has(String(u.inviterId));
-        const cleanInvitedBy = u.invitedBy ? u.invitedBy.trim().toUpperCase() : '';
-        const cleanInvitedDigits = u.invitedBy ? u.invitedBy.replace(/\D/g, '').slice(-10) : '';
-        const matchesInvitedBy = cleanInvitedBy && (tier1Codes.has(cleanInvitedBy) || (cleanInvitedDigits && tier1Phones.has(cleanInvitedDigits)));
-        return Boolean(matchesInviterId || matchesInvitedBy);
-      });
-
-      const tier2Ids = new Set(tier2Users.map((u) => String(u.id)));
-      const tier2Codes = new Set<string>();
-      const tier2Phones = new Set<string>();
-      tier2Users.forEach((u) => {
-        if (u.id) tier2Codes.add(String(u.id).trim().toUpperCase());
-        if (u.invitationCode) tier2Codes.add(u.invitationCode.trim().toUpperCase());
-        if (u.phone) {
-          const p = u.phone.replace(/\D/g, '').slice(-10);
-          tier2Codes.add(p);
-          tier2Phones.add(p);
-        }
-      });
-
-      // Tier 3 Downlines
-      const tier3Users = otherUsers.filter((u) => {
-        if (tier1Ids.has(String(u.id)) || tier2Ids.has(String(u.id))) return false;
-        const matchesInviterId = u.inviterId && tier2Ids.has(String(u.inviterId));
-        const cleanInvitedBy = u.invitedBy ? u.invitedBy.trim().toUpperCase() : '';
-        const cleanInvitedDigits = u.invitedBy ? u.invitedBy.replace(/\D/g, '').slice(-10) : '';
-        const matchesInvitedBy = cleanInvitedBy && (tier2Codes.has(cleanInvitedBy) || (cleanInvitedDigits && tier2Phones.has(cleanInvitedDigits)));
-        return Boolean(matchesInviterId || matchesInvitedBy);
-      });
-
-      // Compute Total Referral Commission Contributed using live Admin-configured rates
-      const [t1Rate, t2Rate, t3Rate] = await getEffectiveCommissionRatesServer();
-      const getRealBase = (u: any) => {
-        const inv = Number(u.totalInvested) || 0;
-        const rec = Number(u.rechargeBalance) || 0;
-        return inv > 0 ? inv : rec;
-      };
-
-      let tier1Comm = 0;
-      tier1Users.forEach((u) => {
-        tier1Comm += (getRealBase(u) * t1Rate) / 100;
-      });
-
-      let tier2Comm = 0;
-      tier2Users.forEach((u) => {
-        tier2Comm += (getRealBase(u) * t2Rate) / 100;
-      });
-
-      let tier3Comm = 0;
-      tier3Users.forEach((u) => {
-        tier3Comm += (getRealBase(u) * t3Rate) / 100;
-      });
-
-      const totalCalculatedCommission = Number((tier1Comm + tier2Comm + tier3Comm).toFixed(2));
       const directCount = tier1Users.length;
-
-      // Update total referrals count if higher
-      if (directCount > (currentUser.totalReferrals || 0)) {
+      if (directCount !== (currentUser.totalReferrals || 0)) {
         updateUserReferralsInSql(userId, directCount);
         currentUser.totalReferrals = directCount;
-      }
-
-      // Reconcile commission difference if downlines contributed more than current record
-      const currentEarned = Number(currentUser.totalCommissionEarned) || 0;
-      if (totalCalculatedCommission > currentEarned) {
-        const uncredited = Number((totalCalculatedCommission - currentEarned).toFixed(2));
-        if (uncredited > 0) {
-          const updated = creditUserCommissionInSql(userId, uncredited);
-          if (updated) {
-            saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [updated]));
-            upsertUser({
-              uid: updated.id,
-              phone: updated.phone,
-              withdrawalBalance: updated.withdrawalBalance,
-              totalCommissionEarned: updated.totalCommissionEarned,
-            }).catch(() => {});
-            reconciledCount++;
-            details.push({
-              userId,
-              nickname: currentUser.nickname,
-              uncredited,
-              newWithdrawal: updated.withdrawalBalance,
-              totalCommission: updated.totalCommissionEarned,
-              directCount,
-            });
-            console.log(`[Referral Reconciliation] User ${currentUser.nickname || userId} credited with uncredited referral income +$${uncredited} (Total: $${updated.totalCommissionEarned})`);
-          }
-        }
+        reconciledCount++;
+        details.push({ userId, nickname: currentUser.nickname, directCount });
       }
     }
 
@@ -3451,12 +3664,42 @@ app.post('/api/backup/users', async (req, res) => {
       return u;
     });
 
+    // Strip any untrusted client flags and reject stale records that are older than SQLite
+    const sqlUsersNow = getAllUsersFromSql(false);
+    const sqlById = new Map<string, any>();
+    const sqlByPhone = new Map<string, any>();
+    for (const su of sqlUsersNow) {
+      if (su?.id) sqlById.set(String(su.id).trim(), su);
+      const sp = su?.phone ? String(su.phone).replace(/\D/g, '').slice(-10) : '';
+      if (sp.length === 10) sqlByPhone.set(sp, su);
+    }
+
+    const sanitizedIncoming: any[] = [];
+    for (const rawU of cleanIncoming) {
+      const u = { ...rawU };
+      delete u.isAuthoritativeServer;
+      const rawId = String(u.id || u.uid || '').trim();
+      const cleanPhone = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
+      const existingSql = (rawId && sqlById.get(rawId)) || (cleanPhone && sqlByPhone.get(cleanPhone));
+      if (existingSql) {
+        const sqlTs = parseTimestampMs(existingSql.updatedAt);
+        const incTs = parseTimestampMs(u.updatedAt);
+        // Never let a stale client backup payload overwrite a newer SQLite state
+        if (sqlTs > 0 && (incTs === 0 || sqlTs > incTs + 1000)) {
+          continue;
+        }
+      }
+      sanitizedIncoming.push(u);
+    }
+
     const current = getCachedUsersBackup();
-    const mergedList = deduplicateAndMergeUsers(current, cleanIncoming);
+    const authSqlForMerge = sqlUsersNow.map((u) => ({ ...u, isAuthoritativeServer: true }));
+    const baseUsers = deduplicateAndMergeUsers(current, authSqlForMerge);
+    const mergedList = sanitizedIncoming.length > 0 ? deduplicateAndMergeUsers(baseUsers, sanitizedIncoming) : baseUsers;
     saveUsersBackup(mergedList);
 
-    // Concurrently persist clean users to SQLite SQL and Cloud SQL PostgreSQL
-    for (const u of cleanIncoming) {
+    // Concurrently persist ONLY truly newer/missing clean incoming users to SQLite SQL and Cloud SQL PostgreSQL
+    for (const u of sanitizedIncoming) {
       if (u && (u.id || u.phone)) {
         const rawId = String(u.id || u.uid || u.phone).trim();
         const cleanPhone = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
@@ -4324,10 +4567,11 @@ app.post(['/api/admin/orders/purge-all-orders', '/api/orders/purge-all'], async 
 // Reset all users balances to 0 permanently (Zero balances across SQLite, PostgreSQL, and disk backup)
 app.post(['/api/admin/users/reset-all-balances', '/api/users/reset-all-balances'], async (req, res) => {
   try {
+    const nowIso = new Date().toISOString();
     resetAllUsersBalancesInSql();
     await resetAllUsersBalancesInDb();
 
-    // Also zero all users in users_backup.json
+    // Also zero all users in users_backup.json with explicit zero reset & updatedAt
     try {
       const diskUsers = getCachedUsersBackup();
       diskUsers.forEach((u: any) => {
@@ -4336,6 +4580,8 @@ app.post(['/api/admin/users/reset-all-balances', '/api/users/reset-all-balances'
         u.productRevenue = 0;
         u.totalInvested = 0;
         u.totalCommissionEarned = 0;
+        u.isExplicitZeroReset = true;
+        u.updatedAt = nowIso;
       });
       saveUsersBackup(diskUsers);
     } catch {}
@@ -4658,6 +4904,7 @@ app.post('/api/orders/:id/action', async (req, res) => {
             status: 'completed',
             referenceNo: `REFUND-${currentOrder.id}`,
             paymentMethod: `Wallet Credit (${walletKey === 'withdrawalBalance' ? 'Withdrawal Balance' : 'Add Money Balance'})`,
+            ...buildUserBalanceSnapshot(updatedUserRecord),
           };
           actionTx = refundTx;
           const allTxs = loadServerTransactions();
@@ -4717,6 +4964,7 @@ app.post('/api/orders/:id/action', async (req, res) => {
             status: 'completed',
             referenceNo: `DIV-${currentOrder.id}-${now.toString().slice(-6)}`,
             paymentMethod: 'Contract Daily Settlement',
+            ...buildUserBalanceSnapshot(updatedUserRecord),
           };
           actionTx = divTx;
           const allTxs = loadServerTransactions();
@@ -4798,6 +5046,37 @@ function saveServerTransactions(txsList: any[]): void {
   }
 }
 
+function buildUserBalanceSnapshot(userOrId: any): {
+  balanceAfter?: number;
+  rechargeBalanceAfter?: number;
+  withdrawalBalanceAfter?: number;
+} {
+  try {
+    let target = userOrId;
+    if (typeof userOrId === 'string') {
+      target = getUserByIdOrPhoneFromSql(userOrId);
+      if (!target) {
+        const clean = String(userOrId).trim();
+        target = getCachedUsersBackup().find(
+          (u) => String(u.id || '').trim() === clean || String(u.phone || '').trim() === clean
+        );
+      }
+    }
+    if (!target || typeof target !== 'object') return {};
+    if (target.rechargeBalance === undefined && target.withdrawalBalance === undefined) return {};
+    const recharge = Number(target.rechargeBalance) || 0;
+    const withdrawal = Number(target.withdrawalBalance) || 0;
+    const total = Number((recharge + withdrawal).toFixed(2));
+    return {
+      balanceAfter: total,
+      rechargeBalanceAfter: Number(recharge.toFixed(2)),
+      withdrawalBalanceAfter: Number(withdrawal.toFixed(2)),
+    };
+  } catch {
+    return {};
+  }
+}
+
 // API Route: Purge all transactions permanently (Admin tool & fresh start)
 app.post(['/api/admin/transactions/purge-all', '/api/transactions/purge-all'], async (_req, res) => {
   try {
@@ -4856,6 +5135,9 @@ function mergeServerTx(existing: any, incoming: any): any {
     if (existing.utrNumber) merged.utrNumber = existing.utrNumber;
     if (existing.rejectReason) merged.rejectReason = existing.rejectReason;
     if (existing.updatedAt) merged.updatedAt = existing.updatedAt;
+    if (existing.balanceAfter !== undefined) merged.balanceAfter = existing.balanceAfter;
+    if (existing.rechargeBalanceAfter !== undefined) merged.rechargeBalanceAfter = existing.rechargeBalanceAfter;
+    if (existing.withdrawalBalanceAfter !== undefined) merged.withdrawalBalanceAfter = existing.withdrawalBalanceAfter;
   } else {
     if (!merged.utrNumber && existing.utrNumber) merged.utrNumber = existing.utrNumber;
   }
@@ -5015,19 +5297,26 @@ app.post('/api/cloudsql/transactions', async (req, res) => {
       }
     }
 
+    // Ensure every created transaction carries post-tx user balance snapshot if caller omitted it
+    const autoBalanceSnapshot =
+      tx.balanceAfter === undefined || tx.balanceAfter === null
+        ? buildUserBalanceSnapshot(cleanUserId)
+        : {};
+    const txWithSnapshot = { ...tx, ...autoBalanceSnapshot };
+
     // 1. Save to Cloud SQL
-    const createdInDb = await createTransaction(tx);
+    const createdInDb = await createTransaction(txWithSnapshot);
 
     // 2. Save to local JSON backup (preserve canonical string id and record sqlId separately)
     const backupTxs = loadServerTransactions();
-    const refKey = tx.referenceNo || tx.id || `tx-${Date.now()}`;
+    const refKey = txWithSnapshot.referenceNo || txWithSnapshot.id || `tx-${Date.now()}`;
     const payload = {
-      ...tx,
-      id: tx.id || (createdInDb ? String(createdInDb.id) : refKey),
+      ...txWithSnapshot,
+      id: txWithSnapshot.id || (createdInDb ? String(createdInDb.id) : refKey),
       ...(createdInDb?.id && isNumericOnlyId(createdInDb.id) ? { sqlId: Number(createdInDb.id) } : {}),
-      createdAt: tx.createdAt || Date.now(),
-      status: tx.status || (tx.type === 'withdraw' ? 'processing' : 'completed'),
-      referenceNo: tx.referenceNo || refKey,
+      createdAt: txWithSnapshot.createdAt || Date.now(),
+      status: txWithSnapshot.status || (txWithSnapshot.type === 'withdraw' ? 'processing' : 'completed'),
+      referenceNo: txWithSnapshot.referenceNo || refKey,
     };
 
     const existingIdx = backupTxs.findIndex(
@@ -5334,14 +5623,46 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
       const numAmount = Number(amount) || (existingTx ? Number(existingTx.amount) : 0);
       const rejectMsg = reason || 'Bank details mismatch';
 
-      // 1. Update ALL matching rows in Cloud SQL
+      // 1. Atomically refund user FIRST in SQLite, Cloud SQL & users_backup.json ONLY ONCE
+      let updatedUser: any = null;
+      const targetUserId = userId || existingTx?.userId;
+      if (targetUserId && numAmount > 0) {
+        const cleanUserId = String(targetUserId).trim();
+        await refundUserWithdrawalInDb(cleanUserId, numAmount);
+        try {
+          updatedUser = creditUserWalletDeltaInSql(cleanUserId, 'withdrawalBalance', numAmount);
+        } catch {}
+
+        const currentUsers = getCachedUsersBackup();
+        const userIdx = currentUsers.findIndex(
+          (u) => u.id === cleanUserId || u.uid === cleanUserId || u.phone === cleanUserId
+        );
+        if (userIdx >= 0) {
+          const currentBal = Number(currentUsers[userIdx].withdrawalBalance) || 0;
+          const newBal = updatedUser ? Number(updatedUser.withdrawalBalance) : Number((currentBal + numAmount).toFixed(2));
+          currentUsers[userIdx].withdrawalBalance = newBal;
+          currentUsers[userIdx].isExplicitZeroReset = false;
+          currentUsers[userIdx].updatedAt = new Date().toISOString();
+          saveUsersBackup(currentUsers);
+          updatedUser = currentUsers[userIdx];
+        }
+      }
+
+      const refundBalSnapshot = updatedUser
+        ? buildUserBalanceSnapshot(updatedUser)
+        : targetUserId
+        ? buildUserBalanceSnapshot(String(targetUserId).trim())
+        : {};
+
+      // 2. Update ALL matching rows in Cloud SQL with refunded balanceAfter snapshot
       await updateTransactionStatusInDb(cleanId, 'rejected', {
         originalReferenceNo,
         reason: rejectMsg,
         identifiers: Array.from(candidateIds),
+        ...refundBalSnapshot,
       });
 
-      // 2. Update ALL matching entries in backupTxs (no early break!)
+      // 3. Update ALL matching entries in backupTxs (no early break!)
       const targetUid = String(userId || existingTx?.userId || '').trim();
       let updatedTx: any = null;
 
@@ -5366,6 +5687,7 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
             ...t,
             status: 'rejected',
             rejectReason: rejectMsg,
+            ...refundBalSnapshot,
             updatedAt: new Date().toISOString(),
           };
           if (!updatedTx) updatedTx = backupTxs[i];
@@ -5387,31 +5709,12 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
           status: 'rejected',
           referenceNo: canonicalRef,
           rejectReason: rejectMsg,
+          ...refundBalSnapshot,
           updatedAt: new Date().toISOString(),
         };
         backupTxs.unshift(updatedTx);
       }
       saveServerTransactions(backupTxs);
-
-      // 3. Atomically refund user in Cloud SQL & users_backup.json ONLY ONCE
-      let updatedUser: any = null;
-      const targetUserId = userId || existingTx?.userId;
-      if (targetUserId && numAmount > 0) {
-        const cleanUserId = String(targetUserId).trim();
-        await refundUserWithdrawalInDb(cleanUserId, numAmount);
-
-        const currentUsers = getCachedUsersBackup();
-        const userIdx = currentUsers.findIndex(
-          (u) => u.id === cleanUserId || u.uid === cleanUserId || u.phone === cleanUserId
-        );
-        if (userIdx >= 0) {
-          const currentBal = Number(currentUsers[userIdx].withdrawalBalance) || 0;
-          const newBal = Number((currentBal + numAmount).toFixed(2));
-          currentUsers[userIdx].withdrawalBalance = newBal;
-          saveUsersBackup(currentUsers);
-          updatedUser = currentUsers[userIdx];
-        }
-      }
 
       return res.json({
         success: true,
@@ -5478,53 +5781,26 @@ app.post('/api/admin/recharges/action', async (req, res) => {
     if (action === 'approve') {
       const numAmount = Number(amount) || (existingTx ? Number(existingTx.amount) : 0);
 
-      // 1. Update ALL matching rows in Cloud SQL
-      await updateTransactionStatusInDb(cleanId, 'completed', {
-        originalReferenceNo,
-        identifiers: Array.from(candidateIds),
-      });
-
-      // 2. Update ALL matching entries in backup
-      let updatedTx: any = null;
-      for (let i = 0; i < backupTxs.length; i++) {
-        const t = backupTxs[i];
-        if (!t) continue;
-        const tId = String(t.id || '').trim();
-        const tSqlId = String(t.sqlId || '').trim();
-        const tRef = String(t.referenceNo || '').trim();
-        if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef)) {
-          backupTxs[i] = {
-            ...t,
-            status: 'completed',
-            updatedAt: new Date().toISOString(),
-          };
-          if (!updatedTx) updatedTx = backupTxs[i];
-        }
-      }
-      if (!updatedTx && existingTx) {
-        updatedTx = {
-          ...existingTx,
-          id: !isNumericOnlyId(cleanId) ? cleanId : String(existingTx.id),
-          status: 'completed',
-          updatedAt: new Date().toISOString(),
-        };
-        backupTxs.unshift(updatedTx);
-      }
-      saveServerTransactions(backupTxs);
-
-      // 3. Credit user rechargeBalance in Cloud SQL and users_backup.json ONLY ONCE
+      // 1. Credit user rechargeBalance FIRST in SQLite, Cloud SQL and users_backup.json ONLY ONCE
       let updatedUser: any = null;
       const targetUserId = userId || existingTx?.userId;
       if (targetUserId && numAmount > 0) {
         const cleanUserId = String(targetUserId).trim();
+        let sqlUpdated: any = null;
+        try {
+          sqlUpdated = creditUserWalletDeltaInSql(cleanUserId, 'rechargeBalance', numAmount);
+        } catch {}
+
         const currentUsers = getCachedUsersBackup();
         const userIdx = currentUsers.findIndex(
           (u) => u.id === cleanUserId || u.uid === cleanUserId || u.phone === cleanUserId
         );
         if (userIdx >= 0) {
           const currentBal = Number(currentUsers[userIdx].rechargeBalance) || 0;
-          const newBal = Number((currentBal + numAmount).toFixed(2));
+          const newBal = sqlUpdated ? Number(sqlUpdated.rechargeBalance) : Number((currentBal + numAmount).toFixed(2));
           currentUsers[userIdx].rechargeBalance = newBal;
+          currentUsers[userIdx].isExplicitZeroReset = false;
+          currentUsers[userIdx].updatedAt = new Date().toISOString();
           saveUsersBackup(currentUsers);
           updatedUser = currentUsers[userIdx];
 
@@ -5536,8 +5812,53 @@ app.post('/api/admin/recharges/action', async (req, res) => {
               rechargeBalance: newBal,
             });
           } catch (e) {}
+        } else if (sqlUpdated) {
+          updatedUser = sqlUpdated;
         }
       }
+
+      const creditBalSnapshot = updatedUser
+        ? buildUserBalanceSnapshot(updatedUser)
+        : targetUserId
+        ? buildUserBalanceSnapshot(String(targetUserId).trim())
+        : {};
+
+      // 2. Update ALL matching rows in Cloud SQL with credited balanceAfter snapshot
+      await updateTransactionStatusInDb(cleanId, 'completed', {
+        originalReferenceNo,
+        identifiers: Array.from(candidateIds),
+        ...creditBalSnapshot,
+      });
+
+      // 3. Update ALL matching entries in backup
+      let updatedTx: any = null;
+      for (let i = 0; i < backupTxs.length; i++) {
+        const t = backupTxs[i];
+        if (!t) continue;
+        const tId = String(t.id || '').trim();
+        const tSqlId = String(t.sqlId || '').trim();
+        const tRef = String(t.referenceNo || '').trim();
+        if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef)) {
+          backupTxs[i] = {
+            ...t,
+            status: 'completed',
+            ...creditBalSnapshot,
+            updatedAt: new Date().toISOString(),
+          };
+          if (!updatedTx) updatedTx = backupTxs[i];
+        }
+      }
+      if (!updatedTx && existingTx) {
+        updatedTx = {
+          ...existingTx,
+          id: !isNumericOnlyId(cleanId) ? cleanId : String(existingTx.id),
+          status: 'completed',
+          ...creditBalSnapshot,
+          updatedAt: new Date().toISOString(),
+        };
+        backupTxs.unshift(updatedTx);
+      }
+      saveServerTransactions(backupTxs);
 
       return res.json({
         success: true,
@@ -5645,6 +5966,7 @@ app.post('/api/admin/adjust-balance', async (req, res) => {
     const delta = type === 'add' ? numAmount : -numAmount;
     const nextVal = Math.max(0, Number((currentBal + delta).toFixed(2)));
     currentUsers[userIdx][wallet] = nextVal;
+    currentUsers[userIdx].isExplicitZeroReset = nextVal === 0;
     currentUsers[userIdx].updatedAt = new Date().toISOString();
     saveUsersBackup(currentUsers);
 
@@ -5673,13 +5995,16 @@ app.post('/api/admin/adjust-balance', async (req, res) => {
       amount: numAmount,
       title: `Admin ${type === 'add' ? 'Credit' : 'Debit'}: ${note || 'Manual adjustment'}`,
       timestamp: new Date().toLocaleString(),
+      createdAt: Date.now(),
       status: 'completed',
       referenceNo: `ADM${Math.floor(100000 + Math.random() * 900000)}`,
+      ...buildUserBalanceSnapshot(currentUsers[userIdx]),
     };
 
     const backupTxs = loadServerTransactions();
     backupTxs.unshift(adjTx);
     saveServerTransactions(backupTxs);
+    createTransaction(adjTx).catch(() => {});
 
     return res.json({
       success: true,
@@ -5703,18 +6028,31 @@ app.post(['/api/admin/user/:userId/update', '/api/users/:userId/update', '/api/u
       return res.status(400).json({ success: false, error: 'User ID is required' });
     }
 
-    const updates = req.body || {};
+    const updates = { ...(req.body || {}) };
+    delete updates.isAuthoritativeServer;
+    const hasExplicitZero =
+      updates.isExplicitZeroReset === true ||
+      updates.rechargeBalance === 0 ||
+      updates.withdrawalBalance === 0;
+    const nowIso = new Date().toISOString();
+
+    const existingSql = getUserByIdOrPhoneFromSql(cleanId);
     const currentUsers = getCachedUsersBackup();
     const userIdx = currentUsers.findIndex(
       (u) => u.id === cleanId || u.uid === cleanId || (u.phone && u.phone.includes(cleanId))
     );
 
-    let targetUser: any = null;
+    const baseUser = existingSql || (userIdx >= 0 ? currentUsers[userIdx] : { id: cleanId });
+    const targetUser: any = {
+      ...baseUser,
+      ...updates,
+      isExplicitZeroReset: hasExplicitZero,
+      updatedAt: nowIso,
+    };
+
     if (userIdx >= 0) {
-      targetUser = { ...currentUsers[userIdx], ...updates, updatedAt: new Date().toISOString() };
       currentUsers[userIdx] = targetUser;
     } else {
-      targetUser = { id: cleanId, ...updates, updatedAt: new Date().toISOString() };
       currentUsers.push(targetUser);
     }
     saveUsersBackup(currentUsers);
@@ -6070,7 +6408,10 @@ const verifyPayUResponseHash = (body: Record<string, any>, salt: string): boolea
   return calculatedHash === String(hash).toLowerCase();
 };
 
-// Helper: Securely credit user's wallet upon verified PayU payment
+// Active lock set to guard concurrent PayU credit calls per txnid
+const activePayUCreditLocks = new Set<string>();
+
+// Helper: Securely credit user's wallet upon verified PayU payment (persistent idempotency across restarts)
 const creditUserPayUDeposit = async (
   userId: string,
   usdAmount: number,
@@ -6078,82 +6419,119 @@ const creditUserPayUDeposit = async (
   payuId?: string,
   note?: string
 ) => {
-  const cleanUserId = String(userId).trim();
+  const cleanUserId = String(userId || '').trim();
+  const refKey = String(txnid || '').trim();
   const numAmount = Number(usdAmount) || 0;
-  if (!cleanUserId || numAmount <= 0) return null;
+  if (!cleanUserId || !refKey || numAmount <= 0) return null;
 
-  // 1. Update in SQLite
-  try {
-    const targetSqlUser = getUserByIdOrPhoneFromSql(cleanUserId);
-    const currentSqlBal = Number(targetSqlUser?.rechargeBalance) || 0;
-    const newSqlBal = Number((currentSqlBal + numAmount).toFixed(2));
-    updateUserWalletBalanceInSql(cleanUserId, 'rechargeBalance', newSqlBal);
-  } catch (e) {
-    console.warn('[PayU Credit] SQLite wallet update note:', e);
+  if (processedPayUTxns.has(refKey) || activePayUCreditLocks.has(refKey)) {
+    return null;
   }
+  activePayUCreditLocks.add(refKey);
 
-  // 2. Update in users_backup.json and sync to Cloud SQL
-  let updatedUser: any = null;
-  const currentUsers = getCachedUsersBackup();
-  const userIdx = currentUsers.findIndex(
-    (u) => u.id === cleanUserId || u.uid === cleanUserId || u.phone === cleanUserId
-  );
-
-  if (userIdx >= 0) {
-    const currentBal = Number(currentUsers[userIdx].rechargeBalance) || 0;
-    const newBal = Number((currentBal + numAmount).toFixed(2));
-    currentUsers[userIdx].rechargeBalance = newBal;
-    saveUsersBackup(currentUsers);
-    updatedUser = currentUsers[userIdx];
+  try {
+    // Persistent idempotency check in disk transactions & Cloud SQL before crediting
+    const existingDiskTxs = loadServerTransactions();
+    const alreadyInDisk = existingDiskTxs.some(
+      (t) =>
+        t &&
+        t.status === 'completed' &&
+        (String(t.id || '').trim() === refKey || String(t.referenceNo || '').trim() === refKey)
+    );
+    if (alreadyInDisk) {
+      processedPayUTxns.add(refKey);
+      return null;
+    }
 
     try {
-      await upsertUser({
-        uid: currentUsers[userIdx].id,
-        phone: currentUsers[userIdx].phone,
-        rechargeBalance: newBal,
-      });
+      const dbUserTxs = await getUserTransactions(cleanUserId);
+      const alreadyInDb = Array.isArray(dbUserTxs) && dbUserTxs.some(
+        (t: any) =>
+          t &&
+          t.status === 'completed' &&
+          (String(t.id || '').trim() === refKey || String(t.referenceNo || '').trim() === refKey)
+      );
+      if (alreadyInDb) {
+        processedPayUTxns.add(refKey);
+        return null;
+      }
+    } catch {}
+
+    processedPayUTxns.add(refKey);
+
+    // 1. Update atomically in SQLite
+    let sqlUpdated: any = null;
+    try {
+      sqlUpdated = creditUserWalletDeltaInSql(cleanUserId, 'rechargeBalance', numAmount);
     } catch (e) {
-      console.warn('[PayU Credit] Cloud SQL sync note:', e);
+      console.warn('[PayU Credit] SQLite wallet update note:', e);
     }
+
+    // 2. Update in users_backup.json and sync to Cloud SQL
+    let updatedUser: any = sqlUpdated;
+    const currentUsers = getCachedUsersBackup();
+    const userIdx = currentUsers.findIndex(
+      (u) => u.id === cleanUserId || u.uid === cleanUserId || u.phone === cleanUserId
+    );
+
+    if (userIdx >= 0) {
+      const currentBal = Number(currentUsers[userIdx].rechargeBalance) || 0;
+      const newBal = sqlUpdated ? Number(sqlUpdated.rechargeBalance) : Number((currentBal + numAmount).toFixed(2));
+      currentUsers[userIdx].rechargeBalance = newBal;
+      currentUsers[userIdx].isExplicitZeroReset = false;
+      currentUsers[userIdx].updatedAt = new Date().toISOString();
+      saveUsersBackup(currentUsers);
+      updatedUser = currentUsers[userIdx];
+
+      try {
+        await upsertUser({
+          uid: currentUsers[userIdx].id,
+          phone: currentUsers[userIdx].phone,
+          rechargeBalance: newBal,
+        });
+      } catch (e) {
+        console.warn('[PayU Credit] Cloud SQL sync note:', e);
+      }
+    }
+
+    // 3. Create completed recharge transaction
+    const now = Date.now();
+    const txPayload = {
+      id: refKey,
+      userId: cleanUserId,
+      type: 'recharge',
+      amount: numAmount,
+      title: 'PayU Instant Deposit',
+      timestamp: new Date(now).toISOString(),
+      method: 'PayU Instant',
+      paymentMethod: 'PayU Instant',
+      referenceNo: refKey,
+      status: 'completed',
+      createdAt: now,
+      note: note || `PayU Verified Deposit (Ref: ${payuId || refKey})`,
+      ...buildUserBalanceSnapshot(updatedUser || cleanUserId),
+    };
+
+    try {
+      await createTransaction(txPayload);
+    } catch (e) {}
+
+    const backupTxs = loadServerTransactions();
+    const existingIdx = backupTxs.findIndex(
+      (t) => t.id === refKey || t.referenceNo === refKey
+    );
+    if (existingIdx >= 0) {
+      backupTxs[existingIdx] = { ...backupTxs[existingIdx], ...txPayload };
+    } else {
+      backupTxs.unshift(txPayload);
+    }
+    saveServerTransactions(backupTxs);
+
+    console.log(`[PayU Gateway] ✅ Successfully credited $${numAmount} to User ${cleanUserId} (Txn: ${refKey})`);
+    return updatedUser;
+  } finally {
+    activePayUCreditLocks.delete(refKey);
   }
-
-  // 3. Create completed recharge transaction
-  const refKey = txnid || `payu_${Date.now()}`;
-  const now = Date.now();
-  const txPayload = {
-    id: refKey,
-    userId: cleanUserId,
-    type: 'recharge',
-    amount: numAmount,
-    title: 'PayU Instant Deposit',
-    timestamp: new Date(now).toISOString(),
-    method: 'PayU Instant',
-    paymentMethod: 'PayU Instant',
-    referenceNo: refKey,
-    status: 'completed',
-    createdAt: now,
-    note: note || `PayU Verified Deposit (Ref: ${payuId || txnid})`,
-  };
-
-  try {
-    await createTransaction(txPayload);
-  } catch (e) {}
-
-  const backupTxs = loadServerTransactions();
-  const existingIdx = backupTxs.findIndex(
-    (t) => t.id === refKey || t.referenceNo === refKey
-  );
-  if (existingIdx >= 0) {
-    backupTxs[existingIdx] = { ...backupTxs[existingIdx], ...txPayload };
-  } else {
-    backupTxs.unshift(txPayload);
-  }
-  saveServerTransactions(backupTxs);
-
-  // 4. Note: Referral commission is strictly given when user BUYS a product, not on recharge deposit.
-
-  console.log(`[PayU Gateway] ✅ Successfully credited $${numAmount} to User ${cleanUserId} (Txn: ${refKey})`);
-  return updatedUser;
 };
 
 // API Route: Get public PayU config
@@ -6285,24 +6663,22 @@ app.post('/api/payu/response', async (req, res) => {
     const isHashValid = verifyPayUResponseHash(body, salt);
 
     if (!isHashValid) {
-      console.warn(`[PayU Callback] ⚠️ Response hash mismatch for Txn ${txnid}. Proceeding with caution.`);
+      console.error(`[PayU Callback] ❌ Blocked unverified callback hash mismatch for Txn ${txnid}`);
+      return res.redirect(
+        `/?payment=failed&txnid=${encodeURIComponent(txnid || '')}&reason=${encodeURIComponent('Invalid PayU payment signature. Balance not credited.')}&gateway=payu`
+      );
     }
 
     if (status === 'success') {
-      // Prevent duplicate credit
-      if (txnid && !processedPayUTxns.has(txnid)) {
-        processedPayUTxns.add(txnid);
-
-        const usdAmount = Number(usdAmountStr) || (Number(amount) / 100);
-        if (userId && usdAmount > 0) {
-          await creditUserPayUDeposit(
-            userId,
-            usdAmount,
-            txnid,
-            mihpayid,
-            `PayU Instant Deposit (Txn: ${txnid})`
-          );
-        }
+      const usdAmount = Number(usdAmountStr) || (Number(amount) / 100);
+      if (txnid && userId && usdAmount > 0) {
+        await creditUserPayUDeposit(
+          userId,
+          usdAmount,
+          txnid,
+          mihpayid,
+          `PayU Instant Deposit (Txn: ${txnid})`
+        );
       }
 
       // Redirect user back to frontend with success parameters
@@ -6366,11 +6742,30 @@ app.get('/api/payu/webhook-info', (req, res) => {
 app.post('/api/payu/webhook', async (req, res) => {
   try {
     const body = req.body || {};
-    const { status, txnid, amount, mihpayid, udf1: userId, udf2: usdAmountStr } = body;
+    const { status, txnid, amount, mihpayid, udf1: userId, udf2: usdAmountStr, key: returnedKey } = body;
     console.log(`[PayU Webhook] Notification received: Txn ${txnid}, Status: ${status}, Amount: ₹${amount}`);
 
-    if (status === 'success' && txnid && !processedPayUTxns.has(txnid)) {
-      processedPayUTxns.add(txnid);
+    // Preserve Admin Webhook Test Ping without touching any user wallet
+    if (String(txnid || '').startsWith('PAYU_TEST_') || (!userId && body.productinfo === 'Admin Webhook Test Ping')) {
+      return res.status(200).json({
+        status: 'ok',
+        testPing: true,
+        message: 'PayU webhook active and verified (test ping acknowledged without crediting funds)',
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const { salt } = getActivePayUConfig(returnedKey);
+    const isHashValid = verifyPayUResponseHash(body, salt);
+    if (!isHashValid) {
+      console.error(`[PayU Webhook] ❌ Rejected webhook with invalid signature hash for Txn ${txnid}`);
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid PayU signature hash',
+      });
+    }
+
+    if (status === 'success' && txnid) {
       const usdAmount = Number(usdAmountStr) || (Number(amount) / 100);
       if (userId && usdAmount > 0) {
         await creditUserPayUDeposit(
@@ -6717,8 +7112,11 @@ async function startServer() {
             bankDetails: u.bankDetails,
             createdAt: u.createdAt ? new Date(u.createdAt).toISOString() : undefined,
           }));
-          saveUsersBackup(formatted);
-          console.log(`[Cloud SQL] Preserved & synced ${formatted.length} live persistent users from database.`);
+          // NEVER overwrite authoritative SQLite balances with Cloud SQL rows on startup; SQLite wins
+          const sqliteAuthoritative = getAllUsersFromSql(false).map((u) => ({ ...u, isAuthoritativeServer: true }));
+          const mergedStartupUsers = deduplicateAndMergeUsers(formatted, sqliteAuthoritative);
+          saveUsersBackup(mergedStartupUsers);
+          console.log(`[Cloud SQL] Unified ${mergedStartupUsers.length} live persistent users (SQLite authoritative).`);
         }
 
         // 2. Orders: Cloud SQL is the persistent source of truth (Strictly live orders, no demo seeding)

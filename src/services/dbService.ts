@@ -87,6 +87,9 @@ export const mergeTransactionSafe = (existing: Transaction | undefined | null, i
     if (existing.adminNote) merged.adminNote = existing.adminNote;
     if ((existing as any).rejectReason) merged.rejectReason = (existing as any).rejectReason;
     if ((existing as any).updatedAt) merged.updatedAt = (existing as any).updatedAt;
+    if (existing.balanceAfter !== undefined) merged.balanceAfter = existing.balanceAfter;
+    if (existing.rechargeBalanceAfter !== undefined) merged.rechargeBalanceAfter = existing.rechargeBalanceAfter;
+    if (existing.withdrawalBalanceAfter !== undefined) merged.withdrawalBalanceAfter = existing.withdrawalBalanceAfter;
   } else if (!merged.utrNumber && existing.utrNumber) {
     merged.utrNumber = existing.utrNumber;
   }
@@ -103,6 +106,73 @@ export const mergeTransactionSafe = (existing: Transaction | undefined | null, i
   }
 
   return merged as Transaction;
+};
+
+export const computeUserTotalBalance = (u?: Partial<User> | null): number => {
+  if (!u) return 0;
+  return Number(((Number(u.rechargeBalance) || 0) + (Number(u.withdrawalBalance) || 0)).toFixed(2));
+};
+
+export const buildUserBalanceSnapshot = (
+  u?: Partial<User> | null
+): { balanceAfter: number; rechargeBalanceAfter: number; withdrawalBalanceAfter: number } | undefined => {
+  if (!u) return undefined;
+  const r = Number((Number(u.rechargeBalance) || 0).toFixed(2));
+  const w = Number((Number(u.withdrawalBalance) || 0).toFixed(2));
+  return {
+    balanceAfter: Number((r + w).toFixed(2)),
+    rechargeBalanceAfter: r,
+    withdrawalBalanceAfter: w,
+  };
+};
+
+const getTransactionWalletDelta = (tx: Transaction): number => {
+  const amt = Number(tx.amount) || 0;
+  if (tx.status === 'rejected' || amt === 0) return 0;
+  if (tx.type === 'withdraw' || tx.type === 'p2p_send') {
+    return -Math.abs(amt);
+  }
+  if (tx.type === 'recharge') {
+    if (amt < 0) return amt;
+    if (tx.status === 'processing') return 0;
+    return Math.abs(amt);
+  }
+  if (String(tx.title || '').startsWith('Admin Debit:')) {
+    return -Math.abs(amt);
+  }
+  if (tx.status === 'processing') return 0;
+  return Math.abs(amt);
+};
+
+export const enrichTransactionsWithBalanceAfter = (
+  txs: Transaction[],
+  currentUser?: Partial<User> | null
+): Transaction[] => {
+  if (!Array.isArray(txs) || txs.length === 0) return [];
+  const sorted = [...txs].sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
+  let runningTotal: number | null = currentUser ? computeUserTotalBalance(currentUser) : null;
+
+  return sorted.map((tx) => {
+    const delta = getTransactionWalletDelta(tx);
+    const hasStored =
+      tx.balanceAfter !== undefined &&
+      tx.balanceAfter !== null &&
+      Number.isFinite(Number(tx.balanceAfter));
+
+    if (hasStored) {
+      const storedTotal = Number(Number(tx.balanceAfter).toFixed(2));
+      runningTotal = Math.max(0, Number((storedTotal - delta).toFixed(2)));
+      return { ...tx, balanceAfter: storedTotal };
+    }
+
+    if (runningTotal !== null) {
+      const computedBal = Math.max(0, Number(runningTotal.toFixed(2)));
+      runningTotal = Math.max(0, Number((runningTotal - delta).toFixed(2)));
+      return { ...tx, balanceAfter: computedBal };
+    }
+
+    return tx;
+  });
 };
 
 export const mergeTxListsSafe = (lists: Transaction[][]): Transaction[] => {
@@ -147,21 +217,47 @@ export const mergeTxListsSafe = (lists: Transaction[][]): Transaction[] => {
   return Array.from(mapById.values()).sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
 };
 
+const parseTimestampMs = (val: any): number => {
+  if (!val) return 0;
+  if (typeof val === 'number' && !Number.isNaN(val)) return val;
+  let s = String(val).trim();
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
+    s = s.replace(' ', 'T') + 'Z';
+  }
+  const ms = Date.parse(s);
+  return Number.isNaN(ms) ? 0 : ms;
+};
+
 export const mergeUserSafe = (existing: Partial<User> | undefined | null, incoming: Partial<User>): User => {
   const base: any = { ...(existing || {}) };
+  const isAuthIncoming = Boolean((incoming as any)?.isAuthoritativeServer);
+  const existingTs = parseTimestampMs(existing?.updatedAt);
+  const incomingTs = parseTimestampMs(incoming?.updatedAt);
+  const existingStrictlyNewer =
+    !isAuthIncoming &&
+    existingTs > 0 &&
+    incomingTs > 0 &&
+    existingTs > incomingTs + 1000;
+  const incomingIsNewerOrEqual =
+    isAuthIncoming ||
+    (incomingTs > 0 && (existingTs === 0 || incomingTs >= existingTs)) ||
+    (Boolean((incoming as any).isExplicitZeroReset) && (incomingTs === 0 || existingTs === 0 || incomingTs >= existingTs - 1000));
+
   for (const [k, v] of Object.entries(incoming)) {
-    // Prevent accidental undefined or null or NaN or stale 0 overwriting of balances & stats
+    if (k === 'isAuthoritativeServer') continue;
     if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'vipLevel', 'spinChances', 'totalReferrals', 'totalCommissionEarned', 'checkInStreak'].includes(k)) {
       const existingNum = Number(base[k]) || 0;
       const incomingNum = Number(v) || 0;
 
-      // CRITICAL SAFEGUARD: If base record already has a positive balance (e.g. admin added rechargeBalance),
-      // NEVER let stale background fetches or default 0s wipe that positive balance to 0!
-      if (existingNum > 0 && incomingNum === 0 && !(incoming as any).isExplicitZeroReset) {
+      if (base[k] !== undefined && (v === null || v === undefined || Number.isNaN(Number(v)))) {
         continue;
       }
 
-      if (base[k] !== undefined && (v === null || v === undefined || Number.isNaN(Number(v)))) {
+      if (existingStrictlyNewer) {
+        continue;
+      }
+
+      if (existingNum > 0 && incomingNum === 0 && !incomingIsNewerOrEqual) {
         continue;
       }
     }
@@ -180,8 +276,8 @@ export const mergeUserSafe = (existing: Partial<User> | undefined | null, incomi
         base[k] = v;
       }
     } else if (((v as any) === 0 || (v as any) === false) && typeof v === typeof base[k]) {
-      if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested'].includes(k)) {
-        if ((Number(base[k]) || 0) > 0 && !(incoming as any).isExplicitZeroReset) {
+      if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'totalCommissionEarned'].includes(k)) {
+        if ((Number(base[k]) || 0) > 0 && !incomingIsNewerOrEqual) {
           continue;
         }
       }
@@ -221,17 +317,12 @@ export const mergeUserSafe = (existing: Partial<User> | undefined | null, incomi
     base.inviterId = '406332';
   }
 
-  // Preserve highest stats & protect withdrawalBalance/productRevenue from stale pre-commission/pre-dividend snapshots
-  const existingComm = Number(existing?.totalCommissionEarned) || 0;
-  const incomingComm = Number(incoming.totalCommissionEarned) || 0;
-  const existingRev = Number(existing?.productRevenue) || 0;
-  const incomingRev = Number(incoming.productRevenue) || 0;
-  if (!(incoming as any).isExplicitZeroReset && (existingComm > incomingComm || existingRev > incomingRev)) {
-    base.withdrawalBalance = Math.max(Number(existing?.withdrawalBalance) || 0, Number(base.withdrawalBalance) || 0);
-    base.productRevenue = Math.max(existingRev, Number(base.productRevenue) || 0);
-  }
   base.totalReferrals = Math.max(Number(base.totalReferrals) || 0, Number(existing?.totalReferrals) || 0);
-  base.totalCommissionEarned = Math.max(existingComm, Number(base.totalCommissionEarned) || 0);
+  if (isAuthIncoming || ((incoming as any).isExplicitZeroReset && !existingStrictlyNewer)) {
+    base.totalCommissionEarned = Number(incoming.totalCommissionEarned ?? base.totalCommissionEarned) || 0;
+  } else if (!existingStrictlyNewer) {
+    base.totalCommissionEarned = Math.max(Number(existing?.totalCommissionEarned) || 0, Number(base.totalCommissionEarned) || 0);
+  }
 
   if (incoming.password && String(incoming.password).trim().length > 0) {
     base.password = String(incoming.password).trim();
@@ -243,7 +334,12 @@ export const mergeUserSafe = (existing: Partial<User> | undefined | null, incomi
   if (!base.createdAt) {
     base.createdAt = existing?.createdAt || incoming?.createdAt || new Date().toISOString();
   }
-  base.updatedAt = new Date().toISOString();
+  if (existingTs > incomingTs && !isAuthIncoming) {
+    base.updatedAt = existing?.updatedAt || new Date().toISOString();
+  } else {
+    base.updatedAt = incoming?.updatedAt || existing?.updatedAt || new Date().toISOString();
+  }
+  delete base.isAuthoritativeServer;
   return base as User;
 };
 
@@ -320,21 +416,24 @@ export const dbService = {
         }
         localStorage.setItem('nexa_users_backup_v2', JSON.stringify(mergedList));
       }
-      const res = await fetch('/api/backup/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ users: mergedList, forceSave, isNewRegistration: forceSave }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.users && Array.isArray(data.users) && typeof window !== 'undefined') {
-          const cleanServerUsers = data.users.filter((u: User) => {
-            const cleanPhone = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
-            const rawId = String(u.id || cleanPhone).trim();
-            return !deletedBlacklist.has(rawId) && (!cleanPhone || !deletedBlacklist.has(cleanPhone));
-          });
-          localStorage.setItem('nexa_users_backup_v2', JSON.stringify(cleanServerUsers));
-          return cleanServerUsers as User[];
+      // CRITICAL: Only upload the specific cleanInput user(s) to the server, NEVER re-upload stale cached records of other users from localStorage!
+      if (cleanInput.length > 0) {
+        const res = await fetch('/api/backup/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ users: cleanInput, forceSave, isNewRegistration: forceSave }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.users && Array.isArray(data.users) && typeof window !== 'undefined') {
+            const cleanServerUsers = data.users.filter((u: User) => {
+              const cleanPhone = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
+              const rawId = String(u.id || cleanPhone).trim();
+              return !deletedBlacklist.has(rawId) && (!cleanPhone || !deletedBlacklist.has(cleanPhone));
+            });
+            localStorage.setItem('nexa_users_backup_v2', JSON.stringify(cleanServerUsers));
+            return cleanServerUsers as User[];
+          }
         }
       }
     } catch (e) {
@@ -387,35 +486,45 @@ export const dbService = {
   // Save or update user permanently in SQLite SQL & persistent backup & Firestore
   async saveUser(user: User, forceSave: boolean = true): Promise<void> {
     const path = `users/${user.id}`;
+    const hasExplicitZero =
+      user.isExplicitZeroReset === true ||
+      user.rechargeBalance === 0 ||
+      user.withdrawalBalance === 0;
+    const stampedUser: User = {
+      ...user,
+      isExplicitZeroReset: hasExplicitZero,
+      updatedAt: new Date().toISOString(),
+    };
+    delete (stampedUser as any).isAuthoritativeServer;
     // Ensure we merge with any existing record so password/bankDetails/etc. are never lost
-    let completeUser = { ...user };
+    let completeUser = { ...stampedUser };
     try {
       if (typeof window !== 'undefined') {
         const local = localStorage.getItem('nexa_users_backup_v2');
         if (local) {
           const parsed = JSON.parse(local);
           if (Array.isArray(parsed)) {
-            const cleanPhone = user.phone ? String(user.phone).replace(/\D/g, '').slice(-10) : '';
+            const cleanPhone = stampedUser.phone ? String(stampedUser.phone).replace(/\D/g, '').slice(-10) : '';
             const existing = parsed.find(
-              (u: any) => u.id === user.id || (cleanPhone && String(u.phone || '').replace(/\D/g, '').slice(-10) === cleanPhone)
+              (u: any) => u.id === stampedUser.id || (cleanPhone && String(u.phone || '').replace(/\D/g, '').slice(-10) === cleanPhone)
             );
             if (existing) {
-              completeUser = mergeUserSafe(existing, user);
-              if (user.rechargeBalance !== undefined) completeUser.rechargeBalance = user.rechargeBalance;
-              if (user.withdrawalBalance !== undefined) completeUser.withdrawalBalance = user.withdrawalBalance;
-              if (user.totalInvested !== undefined) completeUser.totalInvested = user.totalInvested;
-              if (user.productRevenue !== undefined) completeUser.productRevenue = user.productRevenue;
-              if (user.isExplicitZeroReset !== undefined) completeUser.isExplicitZeroReset = user.isExplicitZeroReset;
+              completeUser = mergeUserSafe(existing, stampedUser);
+              if (stampedUser.rechargeBalance !== undefined) completeUser.rechargeBalance = stampedUser.rechargeBalance;
+              if (stampedUser.withdrawalBalance !== undefined) completeUser.withdrawalBalance = stampedUser.withdrawalBalance;
+              if (stampedUser.totalInvested !== undefined) completeUser.totalInvested = stampedUser.totalInvested;
+              if (stampedUser.productRevenue !== undefined) completeUser.productRevenue = stampedUser.productRevenue;
+              if (stampedUser.totalCommissionEarned !== undefined) completeUser.totalCommissionEarned = stampedUser.totalCommissionEarned;
+              if (stampedUser.spinChances !== undefined) completeUser.spinChances = stampedUser.spinChances;
+              completeUser.isExplicitZeroReset = stampedUser.isExplicitZeroReset;
+              completeUser.updatedAt = stampedUser.updatedAt;
             }
           }
         }
       }
     } catch {}
 
-    // 1. Permanent SQLite SQL database & disk backup
-    await this.syncUsersToBackup([completeUser], forceSave);
-
-    // Also call dedicated /api/user/save endpoint to ensure SQLite WAL commitment
+    // 1. Call dedicated /api/user/save endpoint for single-user SQLite WAL commitment
     try {
       if (typeof window !== 'undefined') {
         await fetch('/api/user/save', {
@@ -428,12 +537,15 @@ export const dbService = {
       console.warn('API user save warning:', apiErr);
     }
 
-    // 2. Firestore cloud sync (isolated to dev sandbox, never pollute or leak with production)
+    // 2. Sync only this specific user into backup (never re-uploading unrelated cached users)
+    await this.syncUsersToBackup([completeUser], forceSave);
+
+    // 3. Firestore cloud sync (isolated to dev sandbox, never pollute or leak with production)
     if (!isProductionHost()) {
       try {
         await setDoc(doc(db, 'users', completeUser.id), {
           ...completeUser,
-          updatedAt: new Date().toISOString(),
+          updatedAt: completeUser.updatedAt || new Date().toISOString(),
         }, { merge: true });
       } catch (error) {
         handleFirestoreError(error, OperationType.WRITE, path);
@@ -498,14 +610,16 @@ export const dbService = {
       return backupMatch || null;
     }
 
-    // 3. Also check Firestore to ensure latest state and merge (Dev sandbox only)
+    // 3. Also check Firestore only if SQLite/backup didn't have the user (Dev sandbox only)
     const path = `users/${backupMatch?.id || cleanId}`;
     try {
       const snap = await getDoc(doc(db, 'users', backupMatch?.id || cleanId));
       if (snap.exists()) {
         const fsUser = snap.data() as User;
-        const merged = mergeUserSafe(backupMatch, fsUser);
-        await this.syncUsersToBackup([merged], false);
+        if (!backupMatch) {
+          return fsUser;
+        }
+        const merged = mergeUserSafe(fsUser, backupMatch);
         return merged;
       }
     } catch (error) {
@@ -542,21 +656,18 @@ export const dbService = {
       doc(db, 'users', userId),
       (snap) => {
         if (snap.exists()) {
-          const u = snap.data() as User;
-          this.syncUsersToBackup([u], false)
-            .then((mergedList) => {
-              const cleanTargetId = String(userId).trim();
-              const mergedUser = Array.isArray(mergedList)
-                ? mergedList.find(
-                    (m) =>
-                      String(m.id).trim() === cleanTargetId ||
-                      (u.phone && m.phone && String(m.phone).slice(-10) === String(u.phone).slice(-10))
-                  )
-                : null;
-              onUpdate(mergedUser || u);
+          const fsUser = snap.data() as User;
+          // Always defer to authoritative SQLite/server user so stale Firestore snapshots never resurrect old balances
+          this.getUser(userId)
+            .then((sqlUser) => {
+              if (sqlUser) {
+                onUpdate({ ...sqlUser, isAuthoritativeServer: true } as any);
+              } else {
+                onUpdate(fsUser);
+              }
             })
             .catch(() => {
-              onUpdate(u);
+              onUpdate(fsUser);
             });
         }
       },
@@ -567,19 +678,24 @@ export const dbService = {
     return unsubscribe;
   },
 
-  // Admin: Get all users permanently by merging Cloud SQL / disk backup + Firestore
+  // Admin: Get all users permanently (SQLite authoritative, merged cleanly over Firestore-only extras)
   async getAllUsers(): Promise<User[]> {
     const deletedBlacklist = await this.syncDeletedBlacklistFromServer();
     const backupUsers = await this.getUsersFromBackup();
     const byId = new Map<string, User>();
     const phoneToId = new Map<string, string>();
+    const backupIdSet = new Set<string>();
+
+    backupUsers.forEach((u) => {
+      if (u?.id) backupIdSet.add(String(u.id).trim());
+      if (u?.phone) backupIdSet.add(String(u.phone).replace(/\D/g, '').slice(-10));
+    });
 
     const addOrMerge = (u: User) => {
       if (!u || (!u.id && !u.phone)) return;
       const cleanPhone = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
       const rawId = String(u.id || cleanPhone).trim();
 
-      // STRICTLY BLOCK BLACKLISTED USERS
       if (deletedBlacklist.has(rawId) || (cleanPhone && deletedBlacklist.has(cleanPhone))) {
         return;
       }
@@ -591,8 +707,7 @@ export const dbService = {
       if (cleanPhone) phoneToId.set(cleanPhone, canonicalId);
     };
 
-    backupUsers.forEach(addOrMerge);
-
+    const missingFromBackup: User[] = [];
     if (!isProductionHost()) {
       try {
         const querySnapshot = await getDocs(collection(db, 'users'));
@@ -601,18 +716,23 @@ export const dbService = {
           const uId = String(data.id || d.id || '').trim();
           const uPhone = data.phone ? String(data.phone).replace(/\D/g, '').slice(-10) : '';
 
-          // If this document belongs to a deleted user, PURGE IT FROM FIRESTORE!
           if (deletedBlacklist.has(uId) || (uPhone && deletedBlacklist.has(uPhone))) {
             deleteDoc(d.ref).catch(() => {});
             return;
           }
 
           addOrMerge(data);
+          if (!backupIdSet.has(uId) && (!uPhone || !backupIdSet.has(uPhone))) {
+            missingFromBackup.push(data);
+          }
         });
       } catch (error) {
         console.warn('Firestore read throttled/quota-exceeded, using persistent backup:', error);
       }
     }
+
+    // Apply authoritative SQLite backupUsers LAST so SQLite always overrides stale Firestore balances
+    backupUsers.forEach((u) => addOrMerge({ ...u, isAuthoritativeServer: true } as any));
 
     const combined = Array.from(byId.values()).filter((u) => {
       const cleanPhone = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
@@ -620,11 +740,13 @@ export const dbService = {
       return !deletedBlacklist.has(rawId) && (!cleanPhone || !deletedBlacklist.has(cleanPhone));
     });
 
-    if (combined.length > 0) {
-      // Return fresh authoritative users immediately to prevent Admin Panel reverting to stale server cache
-      this.syncUsersToBackup(combined, false).catch((err) =>
+    if (missingFromBackup.length > 0) {
+      this.syncUsersToBackup(missingFromBackup, false).catch((err) =>
         console.warn('Background backup sync failed:', err)
       );
+    }
+
+    if (combined.length > 0) {
       return combined;
     }
 
@@ -792,6 +914,11 @@ export const dbService = {
           });
 
           const backupUsers = await this.getUsersFromBackup();
+          const backupIdSet = new Set<string>();
+          backupUsers.forEach((u) => {
+            if (u?.id) backupIdSet.add(String(u.id).trim());
+            if (u?.phone) backupIdSet.add(String(u.phone).replace(/\D/g, '').slice(-10));
+          });
           const byId = new Map<string, User>();
           const phoneToId = new Map<string, string>();
           const addOrMerge = (u: User) => {
@@ -807,16 +934,24 @@ export const dbService = {
             byId.set(canonicalId, merged);
             if (cleanPhone) phoneToId.set(cleanPhone, canonicalId);
           };
-          backupUsers.forEach(addOrMerge);
+          // Merge Firestore first, then authoritative SQLite backupUsers LAST so stale Firestore docs never overwrite SQLite
           fsUsers.forEach(addOrMerge);
+          backupUsers.forEach((u) => addOrMerge({ ...u, isAuthoritativeServer: true } as any));
           const merged = Array.from(byId.values()).filter((u) => {
             const cleanPhone = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
             const rawId = String(u.id || cleanPhone).trim();
             return !deletedBlacklist.has(rawId) && (!cleanPhone || !deletedBlacklist.has(cleanPhone));
           });
           onUpdate(merged);
-          // Keep server backup and Cloud SQL in sync with live Firestore snapshots in background
-          this.syncUsersToBackup(merged, false).catch(() => {});
+
+          const missingFromSql = fsUsers.filter((u) => {
+            const rawId = String(u.id || '').trim();
+            const cleanP = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
+            return rawId && !backupIdSet.has(rawId) && (!cleanP || !backupIdSet.has(cleanP));
+          });
+          if (missingFromSql.length > 0) {
+            this.syncUsersToBackup(missingFromSql, false).catch(() => {});
+          }
         },
         (error) => {
           handleFirestoreError(error, OperationType.LIST, path);
@@ -832,9 +967,19 @@ export const dbService = {
   // Admin: Update user partial permanently
   async updateUser(userId: string, data: Partial<User>): Promise<void> {
     const cleanId = String(userId).trim();
+    const hasZeroBalance =
+      (data as any).isExplicitZeroReset === true ||
+      data.rechargeBalance === 0 ||
+      data.withdrawalBalance === 0;
+    const payload: Partial<User> = {
+      ...data,
+      isExplicitZeroReset: hasZeroBalance,
+      updatedAt: new Date().toISOString(),
+    };
+
     try {
       const existing = await this.getUser(cleanId);
-      const merged: User = mergeUserSafe(existing || { id: cleanId }, data);
+      const merged: User = mergeUserSafe(existing || { id: cleanId }, payload);
       await this.syncUsersToBackup([merged], true);
     } catch (e) {}
 
@@ -844,19 +989,71 @@ export const dbService = {
         await fetch(`/api/admin/user/${cleanId}/update`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(data),
+          body: JSON.stringify(payload),
         });
       }
     } catch (apiErr) {
       console.warn('API /api/admin/user/:userId/update error:', apiErr);
     }
 
-    const path = `users/${cleanId}`;
+    if (!isProductionHost()) {
+      const path = `users/${cleanId}`;
+      try {
+        await setDoc(doc(db, 'users', cleanId), payload, { merge: true });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
+    }
+  },
+
+  // Admin: Zero all Firestore & localStorage cached user balances after a server-wide balance reset
+  async resetAllUsersBalancesInFirestore(): Promise<void> {
+    const nowIso = new Date().toISOString();
+    if (typeof window !== 'undefined') {
+      try {
+        const local = localStorage.getItem('nexa_users_backup_v2');
+        if (local) {
+          const parsed = JSON.parse(local);
+          if (Array.isArray(parsed)) {
+            const zeroed = parsed.map((u: any) => ({
+              ...u,
+              rechargeBalance: 0,
+              withdrawalBalance: 0,
+              productRevenue: 0,
+              totalInvested: 0,
+              totalCommissionEarned: 0,
+              isExplicitZeroReset: true,
+              updatedAt: nowIso,
+            }));
+            localStorage.setItem('nexa_users_backup_v2', JSON.stringify(zeroed));
+          }
+        }
+      } catch {}
+    }
+
+    if (isProductionHost()) return;
+    const path = 'users';
     try {
-      await setDoc(doc(db, 'users', cleanId), {
-        ...data,
-        updatedAt: new Date().toISOString(),
-      }, { merge: true });
+      const querySnapshot = await getDocs(collection(db, 'users'));
+      const updates: Promise<void>[] = [];
+      querySnapshot.forEach((d) => {
+        updates.push(
+          setDoc(
+            d.ref,
+            {
+              rechargeBalance: 0,
+              withdrawalBalance: 0,
+              productRevenue: 0,
+              totalInvested: 0,
+              totalCommissionEarned: 0,
+              isExplicitZeroReset: true,
+              updatedAt: nowIso,
+            },
+            { merge: true }
+          )
+        );
+      });
+      await Promise.all(updates);
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, path);
     }
@@ -2737,12 +2934,25 @@ export const dbService = {
     };
   },
 
-  // Auth: Find user by mobile phone number (Cloud SQL permanent store first)
+  // Auth: Find user by mobile phone number (Direct authoritative SQLite endpoint first)
   async findUserByPhone(phone: string): Promise<User | null> {
     if (!phone) return null;
     const cleanPhone = phone.replace(/\D/g, '').slice(-10);
 
-    // 1. Primary: Cloud SQL & permanent storage (Fast, zero quota limits, complete profile)
+    // 1. Direct authoritative SQLite user lookup by phone
+    try {
+      if (typeof window !== 'undefined' && cleanPhone.length === 10) {
+        const res = await fetch(`/api/user/${encodeURIComponent(cleanPhone)}`);
+        if (res.ok) {
+          const json = await res.json();
+          if (json.success && json.user) {
+            return json.user as User;
+          }
+        }
+      }
+    } catch {}
+
+    // 2. Fallback: Cloud SQL & permanent storage
     try {
       const backupUsers = await this.getUsersFromBackup();
       const match = backupUsers.find((u) => u.phone && u.phone.replace(/\D/g, '').slice(-10) === cleanPhone);
@@ -2926,9 +3136,7 @@ export const dbService = {
         const masked = cleanP.length === 10 ? `+91 ${cleanP.slice(0, 3)}****${cleanP.slice(-3)}` : `User #${u.id}`;
         const join = (u as any).createdAt ? (u as any).createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
         const rate = level === 1 ? t1Rate : level === 2 ? t2Rate : t3Rate;
-        const inv = Number(u.totalInvested) || 0;
-        const rec = Number(u.rechargeBalance) || 0;
-        const realRecharge = inv > 0 ? inv : rec;
+        const realRecharge = Number(u.totalInvested) || 0;
         const commissionContributed = Number(((realRecharge * rate) / 100).toFixed(2));
         return {
           id: u.id,
@@ -3263,6 +3471,61 @@ export const dbService = {
       return json;
     } catch (err: any) {
       return { success: false, error: err?.message || 'Network error executing Admin P2P transfer' };
+    }
+  },
+
+  // Authoritative Atomic User Withdrawal (SQLite BEGIN IMMEDIATE + Pending/Balance Verification)
+  async submitWithdrawal(payload: {
+    userId: string;
+    amount: number;
+    bankDetails: NonNullable<User['bankDetails']>;
+  }): Promise<{
+    success: boolean;
+    message?: string;
+    error?: string;
+    feePercent?: number;
+    fee?: number;
+    netPayout?: number;
+    user?: User;
+    transaction?: Transaction;
+  }> {
+    try {
+      const res = await fetch('/api/user/withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        return { success: false, error: json.error || 'Withdrawal request failed' };
+      }
+
+      if (!isProductionHost()) {
+        const nowIso = new Date().toISOString();
+        if (json.user?.id) {
+          setDoc(
+            doc(db, 'users', String(json.user.id)),
+            {
+              withdrawalBalance: Number(json.user.withdrawalBalance) || 0,
+              bankDetails: json.user.bankDetails || payload.bankDetails,
+              isExplicitZeroReset: Number(json.user.withdrawalBalance) === 0,
+              updatedAt: json.user.updatedAt || nowIso,
+            },
+            { merge: true }
+          ).catch(() => {});
+        }
+        if (json.transaction?.id) {
+          setDoc(
+            doc(db, 'transactions', String(json.transaction.id)),
+            json.transaction,
+            { merge: true }
+          ).catch(() => {});
+        }
+      }
+
+      return json;
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Network error submitting withdrawal' };
     }
   },
 };

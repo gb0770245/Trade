@@ -73,6 +73,7 @@ export interface SqlUserRecord {
     upiId?: string;
   } | null;
   isDeleted?: boolean;
+  isExplicitZeroReset?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -123,6 +124,14 @@ export function mapSqlRowToUser(r: any): SqlUserRecord {
     inviterId = '406332';
   }
 
+  let isExplicitZeroReset = false;
+  if (r.raw_json) {
+    try {
+      const parsedRaw = JSON.parse(r.raw_json);
+      isExplicitZeroReset = Boolean(parsedRaw?.isExplicitZeroReset);
+    } catch {}
+  }
+
   return {
     id: String(r.id),
     phone: String(r.phone),
@@ -147,6 +156,7 @@ export function mapSqlRowToUser(r: any): SqlUserRecord {
     totalCommissionEarned: Number(r.total_commission_earned) || 0,
     bankDetails,
     isDeleted: Boolean(r.is_deleted === 1),
+    isExplicitZeroReset,
     createdAt: r.created_at || new Date().toISOString(),
     updatedAt: r.updated_at || new Date().toISOString(),
   };
@@ -250,10 +260,12 @@ export function upsertUserInSql(user: any): SqlUserRecord {
     Number(existingRow?.total_referrals) || 0
   );
 
-  const totalCommissionEarned = Math.max(
-    Number(user.totalCommissionEarned) || 0,
-    Number(existingRow?.total_commission_earned) || 0
-  );
+  const totalCommissionEarned = user.isExplicitZeroReset
+    ? Math.max(0, Number(user.totalCommissionEarned) || 0)
+    : Math.max(
+        Number(user.totalCommissionEarned) || 0,
+        Number(existingRow?.total_commission_earned) || 0
+      );
 
   // Resolve Bank Details: NEVER clear existing valid bank details with null or blank
   const existingBank = existingRow ? parseBankDetails(existingRow) : null;
@@ -295,6 +307,8 @@ export function upsertUserInSql(user: any): SqlUserRecord {
     withdrawalBalance,
     productRevenue,
     totalInvested,
+    totalCommissionEarned,
+    isExplicitZeroReset: Boolean(user.isExplicitZeroReset),
     updatedAt: nowIso,
   });
 
@@ -385,6 +399,7 @@ export function upsertUserInSql(user: any): SqlUserRecord {
     totalCommissionEarned,
     bankDetails: finalBank,
     isDeleted: false,
+    isExplicitZeroReset: Boolean(user.isExplicitZeroReset),
     createdAt,
     updatedAt: nowIso,
   };
@@ -529,7 +544,8 @@ export function initAndSyncSqlUsers(initialUsers: any[]): void {
     }
   } catch {}
 
-  console.log(`[SQLite Users] Initializing users table and syncing ${initialUsers.length} records...`);
+  console.log(`[SQLite Users] Initializing users table and checking ${initialUsers.length} records...`);
+  let syncedCount = 0;
   for (const u of initialUsers) {
     if (u && (u.id || u.phone)) {
       const uId = String(u.id || '').trim();
@@ -539,8 +555,34 @@ export function initAndSyncSqlUsers(initialUsers: any[]): void {
         hardDeleteUserInSql(uId, uPhone);
         continue;
       }
+
+      // Check existing SQLite row: NEVER overwrite a newer SQLite balance with an older disk backup record
+      const existingRow = db.prepare(`
+        SELECT id, updated_at, raw_json FROM platform_users
+        WHERE id = ? OR (phone = ? AND length(?) = 10)
+        LIMIT 1
+      `).get(uId, uPhone, uPhone) as any;
+
+      if (existingRow) {
+        let existingTs = existingRow.updated_at ? Date.parse(String(existingRow.updated_at).replace(' ', 'T')) : 0;
+        if (!existingTs && existingRow.raw_json) {
+          try {
+            const parsedRaw = JSON.parse(existingRow.raw_json);
+            if (parsedRaw?.updatedAt) existingTs = Date.parse(String(parsedRaw.updatedAt)) || 0;
+          } catch {}
+        }
+        const incomingTs = u.updatedAt ? Date.parse(String(u.updatedAt)) || 0 : 0;
+        if (existingTs > 0 && (incomingTs === 0 || existingTs >= incomingTs)) {
+          continue; // SQLite already has authoritative newer or equal record
+        }
+      }
+
       upsertUserInSql(u);
+      syncedCount++;
     }
+  }
+  if (syncedCount > 0) {
+    console.log(`[SQLite Users] Synced ${syncedCount} missing/newer user record(s) into SQLite.`);
   }
 }
 
@@ -568,6 +610,7 @@ export function relinkUserUplineInSql(
   const code = uplineCode ? uplineCode.trim().toUpperCase() : null;
   const name = uplineName ? uplineName.trim() : null;
   const id = uplineId ? uplineId.trim() : null;
+  const nowIso = new Date().toISOString();
 
   // Direct SQL update
   db.prepare(`
@@ -575,9 +618,9 @@ export function relinkUserUplineInSql(
     SET invited_by = ?,
         inviter_name = ?,
         inviter_id = ?,
-        updated_at = datetime('now')
+        updated_at = ?
     WHERE id = ?
-  `).run(code, name, id, target.id);
+  `).run(code, name, id, nowIso, target.id);
 
   // Also update raw_json payload to keep embedded JSON synchronized
   try {
@@ -585,7 +628,7 @@ export function relinkUserUplineInSql(
     parsed.invitedBy = code;
     parsed.inviterName = name;
     parsed.inviterId = id;
-    parsed.updatedAt = new Date().toISOString();
+    parsed.updatedAt = nowIso;
     db.prepare(`UPDATE platform_users SET raw_json = ? WHERE id = ?`).run(
       JSON.stringify(parsed),
       target.id
@@ -620,20 +663,22 @@ export function creditUserCommissionInSql(
 
   const newWithdrawal = Number((Number(target.withdrawal_balance || 0) + amount).toFixed(2));
   const newComm = Number((Number(target.total_commission_earned || 0) + amount).toFixed(2));
+  const nowIso = new Date().toISOString();
 
   db.prepare(`
     UPDATE platform_users
     SET withdrawal_balance = ?,
         total_commission_earned = ?,
-        updated_at = datetime('now')
+        updated_at = ?
     WHERE id = ?
-  `).run(newWithdrawal, newComm, target.id);
+  `).run(newWithdrawal, newComm, nowIso, target.id);
 
   try {
     const parsed = JSON.parse(target.raw_json || '{}');
     parsed.withdrawalBalance = newWithdrawal;
     parsed.totalCommissionEarned = newComm;
-    parsed.updatedAt = new Date().toISOString();
+    parsed.isExplicitZeroReset = false;
+    parsed.updatedAt = nowIso;
     db.prepare(`UPDATE platform_users SET raw_json = ? WHERE id = ?`).run(
       JSON.stringify(parsed),
       target.id
@@ -671,17 +716,19 @@ export function updateUserWalletBalanceInSql(
 
   if (!target) return null;
 
+  const nowIso = new Date().toISOString();
   db.prepare(`
     UPDATE platform_users
     SET ${col} = ?,
-        updated_at = datetime('now')
+        updated_at = ?
     WHERE id = ?
-  `).run(finalVal, target.id);
+  `).run(finalVal, nowIso, target.id);
 
   try {
     const parsed = JSON.parse(target.raw_json || '{}');
     parsed[wallet] = finalVal;
-    parsed.updatedAt = new Date().toISOString();
+    parsed.isExplicitZeroReset = finalVal === 0;
+    parsed.updatedAt = nowIso;
     db.prepare(`UPDATE platform_users SET raw_json = ? WHERE id = ?`).run(
       JSON.stringify(parsed),
       target.id
@@ -798,6 +845,9 @@ export function creditUserWalletDeltaInSql(
   if (extraUpdates?.totalInvestedDelta) {
     parsed.totalInvested = nextInvested;
   }
+  if (wallet === 'withdrawalBalance' || wallet === 'rechargeBalance') {
+    parsed.isExplicitZeroReset = nextVal === 0;
+  }
   parsed.updatedAt = nowIso;
 
   db.prepare(`
@@ -823,19 +873,21 @@ export function updateUserReferralsInSql(
   const raw = String(userIdOrPhone || '').trim();
   const cleanPhone = raw.replace(/\D/g, '').slice(-10);
   const count = Math.max(0, Number(referralCount) || 0);
+  const nowIso = new Date().toISOString();
 
   db.prepare(`
     UPDATE platform_users
     SET total_referrals = ?,
-        updated_at = datetime('now')
+        updated_at = ?
     WHERE id = ? OR (phone = ? AND length(?) = 10)
-  `).run(count, raw, cleanPhone, cleanPhone);
+  `).run(count, nowIso, raw, cleanPhone, cleanPhone);
 }
 
 // Reset all users' balances to 0 in SQLite
 export function resetAllUsersBalancesInSql(): void {
   const db = getSqliteDb();
   initSqliteUsersTable();
+  const nowIso = new Date().toISOString();
   db.prepare(`
     UPDATE platform_users
     SET recharge_balance = 0,
@@ -843,6 +895,22 @@ export function resetAllUsersBalancesInSql(): void {
         product_revenue = 0,
         total_invested = 0,
         total_commission_earned = 0,
-        updated_at = datetime('now')
-  `).run();
+        updated_at = ?
+  `).run(nowIso);
+
+  const rows = db.prepare('SELECT id, raw_json FROM platform_users').all() as any[];
+  const updateRawStmt = db.prepare('UPDATE platform_users SET raw_json = ? WHERE id = ?');
+  for (const r of rows) {
+    try {
+      const parsed = JSON.parse(r.raw_json || '{}');
+      parsed.rechargeBalance = 0;
+      parsed.withdrawalBalance = 0;
+      parsed.productRevenue = 0;
+      parsed.totalInvested = 0;
+      parsed.totalCommissionEarned = 0;
+      parsed.isExplicitZeroReset = true;
+      parsed.updatedAt = nowIso;
+      updateRawStmt.run(JSON.stringify(parsed), r.id);
+    } catch {}
+  }
 }

@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { useApp, normalizeRedirectUrl } from '../context/AppContext';
 import { HomeBannerSlider } from './HomeBannerSlider';
+import { AdMobBanner } from './AdMobBanner';
 import { InvestmentProduct } from '../types';
 import { getOrderClaimStatus, formatCountdown } from '../utils/dividendUtils';
 
@@ -395,6 +396,11 @@ export const HomeView: React.FC = () => {
           </button>
         </div>
 
+        {/* Google AdMob Adaptive Banner Slot */}
+        <div className="mt-3">
+          <AdMobBanner placement="home" variant="inline" />
+        </div>
+
         {/* Dedicated Official Gift Card & Promo Voucher Zone */}
         <div className="mt-3">
           <div className="p-4 rounded-3xl bg-gradient-to-r from-amber-950/40 via-slate-900 to-orange-950/40 border border-amber-500/30 shadow-lg relative overflow-hidden">
@@ -650,26 +656,33 @@ export const HomeView: React.FC = () => {
       </div>
 
       {/* Floating 24/7 Support Trigger Button */}
-      {primaryHelpUrl ? (
-        <a
-          href={primaryHelpUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="fixed bottom-20 right-4 z-40 w-12 h-12 rounded-full bg-gradient-to-tr from-teal-700 to-emerald-500 text-white flex items-center justify-center shadow-xl hover:scale-105 active:scale-95 transition-transform"
-          aria-label="24/7 Live Support"
-        >
-          <Headphones className="w-6 h-6" />
-        </a>
-      ) : (
-        <button
-          type="button"
-          onClick={() => openModal('support')}
-          className="fixed bottom-20 right-4 z-40 w-12 h-12 rounded-full bg-gradient-to-tr from-teal-700 to-emerald-500 text-white flex items-center justify-center shadow-xl hover:scale-105 active:scale-95 transition-transform"
-          aria-label="24/7 Live Support"
-        >
-          <Headphones className="w-6 h-6" />
-        </button>
-      )}
+      {(() => {
+        const hasBottomAdBanner =
+          platformSettings?.isAdMobEnabled !== false &&
+          platformSettings?.adMobPosition === 'bottom' &&
+          platformSettings?.adMobPlacements?.home !== false;
+        const bottomPosClass = hasBottomAdBanner ? 'bottom-36' : 'bottom-20';
+        return primaryHelpUrl ? (
+          <a
+            href={primaryHelpUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`fixed ${bottomPosClass} right-4 z-40 w-12 h-12 rounded-full bg-gradient-to-tr from-teal-700 to-emerald-500 text-white flex items-center justify-center shadow-xl hover:scale-105 active:scale-95 transition-transform`}
+            aria-label="24/7 Live Support"
+          >
+            <Headphones className="w-6 h-6" />
+          </a>
+        ) : (
+          <button
+            type="button"
+            onClick={() => openModal('support')}
+            className={`fixed ${bottomPosClass} right-4 z-40 w-12 h-12 rounded-full bg-gradient-to-tr from-teal-700 to-emerald-500 text-white flex items-center justify-center shadow-xl hover:scale-105 active:scale-95 transition-transform`}
+            aria-label="24/7 Live Support"
+          >
+            <Headphones className="w-6 h-6" />
+          </button>
+        );
+      })()}
     </div>
   );
 };

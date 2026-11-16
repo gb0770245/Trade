@@ -26,6 +26,7 @@ import { ProductPurchaseModal } from './components/ProductPurchaseModal';
 import { PaymentFailedModal } from './components/PaymentFailedModal';
 import { OrderSuccessModal } from './components/OrderSuccessModal';
 import { AdminPanel } from './components/AdminPanel';
+import { AdMobBanner, AdMobScreenPlacement } from './components/AdMobBanner';
 import { CheckCircle2, AlertCircle, Info } from 'lucide-react';
 
 const MainContent: React.FC = () => {
@@ -40,6 +41,7 @@ const MainContent: React.FC = () => {
     showToast,
     isAdminView,
     paymentFailedData,
+    platformSettings,
   } = useApp();
 
   // Listen for PayU gateway return query params (e.g. /?payment=success&txnid=... or payment=failed)
@@ -219,10 +221,24 @@ const MainContent: React.FC = () => {
 
       {/* Unified Mobile App Container (Same sleek mobile presentation for everyone, outer clutter removed) */}
       <div className="w-full max-w-md min-h-screen bg-white dark:bg-slate-900 shadow-2xl relative flex flex-col mx-auto overflow-x-hidden border-x border-slate-200/40 dark:border-slate-800/60 z-10">
+        {/* Docked Top AdMob Banner (when configured as Top) */}
+        <AdMobBanner placement={activeTab as AdMobScreenPlacement} variant="docked-top" />
+
         {/* Main Content Stage */}
-        <main className="flex-1 w-full relative flex flex-col">
+        <main
+          className={`flex-1 w-full relative flex flex-col ${
+            platformSettings?.isAdMobEnabled !== false &&
+            platformSettings?.adMobPosition === 'bottom' &&
+            platformSettings?.adMobPlacements?.[activeTab as AdMobScreenPlacement] !== false
+              ? 'pb-16'
+              : ''
+          }`}
+        >
           {renderActiveView()}
         </main>
+
+        {/* Docked Bottom AdMob Banner above Navigation Bar (when configured as Bottom) */}
+        <AdMobBanner placement={activeTab as AdMobScreenPlacement} variant="docked-bottom" />
 
         {/* Bottom App Navigation Bar (Home, Store, Notice, Blog, Account) */}
         <Navigation />

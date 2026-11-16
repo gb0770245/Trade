@@ -17,7 +17,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useApp, deduplicateTransactions } from '../context/AppContext';
-import { getTransactionTime } from '../services/dbService';
+import { computeUserTotalBalance, enrichTransactionsWithBalanceAfter } from '../services/dbService';
 import { Transaction } from '../types';
 
 export const BalanceLedgerModal: React.FC = () => {
@@ -25,8 +25,9 @@ export const BalanceLedgerModal: React.FC = () => {
   const [filter, setFilter] = useState<'all' | 'recharge' | 'withdraw' | 'p2p' | 'earnings'>('all');
   const [copiedRef, setCopiedRef] = useState<string | null>(null);
 
-  // Guarantee strict line-by-line chronological descending order & reference deduplication
-  const sortedTxs = deduplicateTransactions(transactions);
+  // Guarantee strict line-by-line chronological descending order, deduplication & post-transaction total balance
+  const totalUserBalance = computeUserTotalBalance(user);
+  const sortedTxs = enrichTransactionsWithBalanceAfter(deduplicateTransactions(transactions), user);
 
   const filteredTxs = sortedTxs.filter((tx) => {
     if (filter === 'all') return true;
@@ -119,33 +120,41 @@ export const BalanceLedgerModal: React.FC = () => {
           </button>
         </div>
 
-        {/* 3 Wallets Strip */}
-        <div className="grid grid-cols-3 gap-2 my-3 p-3 rounded-2xl bg-gradient-to-r from-teal-900 via-teal-800 to-emerald-900 text-white shrink-0 shadow-md text-center">
-          <div>
-            <div className="text-[10px] opacity-80 flex items-center justify-center gap-1">
-              <Coins className="w-3 h-3 text-amber-300" />
-              Add Money
-            </div>
-            <div className="text-sm font-black num-tabular mt-0.5">
-              ${(user?.rechargeBalance || 0).toFixed(2)}
-            </div>
+        {/* Total Balance + 3 Wallets Strip */}
+        <div className="my-3 p-3.5 rounded-2xl bg-gradient-to-r from-teal-900 via-teal-800 to-emerald-900 text-white shrink-0 shadow-md">
+          <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-white/15">
+            <span className="text-[11px] font-semibold text-white/80">Total Available Balance</span>
+            <span className="text-lg font-black tabular-nums text-white">
+              ${totalUserBalance.toFixed(2)}
+            </span>
           </div>
-          <div className="border-x border-white/20">
-            <div className="text-[10px] opacity-80 flex items-center justify-center gap-1">
-              <Wallet className="w-3 h-3 text-emerald-300" />
-              Withdrawal
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div>
+              <div className="text-[10px] opacity-80 flex items-center justify-center gap-1">
+                <Coins className="w-3 h-3 text-amber-300" />
+                Add Money
+              </div>
+              <div className="text-sm font-black num-tabular mt-0.5">
+                ${(user?.rechargeBalance || 0).toFixed(2)}
+              </div>
             </div>
-            <div className="text-sm font-black num-tabular text-emerald-300 mt-0.5">
-              ${(user?.withdrawalBalance || 0).toFixed(2)}
+            <div className="border-x border-white/20">
+              <div className="text-[10px] opacity-80 flex items-center justify-center gap-1">
+                <Wallet className="w-3 h-3 text-emerald-300" />
+                Withdrawal
+              </div>
+              <div className="text-sm font-black num-tabular text-emerald-300 mt-0.5">
+                ${(user?.withdrawalBalance || 0).toFixed(2)}
+              </div>
             </div>
-          </div>
-          <div>
-            <div className="text-[10px] opacity-80 flex items-center justify-center gap-1">
-              <TrendingUp className="w-3 h-3 text-cyan-300" />
-              Product Income
-            </div>
-            <div className="text-sm font-black num-tabular mt-0.5">
-              ${(user?.productRevenue || 0).toFixed(2)}
+            <div>
+              <div className="text-[10px] opacity-80 flex items-center justify-center gap-1">
+                <TrendingUp className="w-3 h-3 text-cyan-300" />
+                Product Income
+              </div>
+              <div className="text-sm font-black num-tabular mt-0.5">
+                ${(user?.productRevenue || 0).toFixed(2)}
+              </div>
             </div>
           </div>
         </div>
@@ -286,6 +295,25 @@ export const BalanceLedgerModal: React.FC = () => {
                       </span>
                     )}
                   </div>
+
+                  {/* Post-Transaction Total Balance Row */}
+                  {tx.balanceAfter !== undefined && tx.balanceAfter !== null && (
+                    <div className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-slate-200/50 dark:border-slate-700/50 text-[11px]">
+                      <span className="text-slate-500 dark:text-slate-400 font-medium">
+                        Total Balance After
+                      </span>
+                      <div className="text-right tabular-nums">
+                        <span className="font-extrabold text-slate-900 dark:text-white">
+                          ${Number(tx.balanceAfter).toFixed(2)}
+                        </span>
+                        {tx.rechargeBalanceAfter !== undefined && tx.withdrawalBalanceAfter !== undefined && (
+                          <span className="text-[10px] text-slate-400 ml-1.5">
+                            (Add ${Number(tx.rechargeBalanceAfter).toFixed(2)} · Wth ${Number(tx.withdrawalBalanceAfter).toFixed(2)})
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Withdrawal Specific Detail Breakdown (Fee, Net Payout, Bank A/C) */}
                   {isWithdraw && tx.bankDetails && (
