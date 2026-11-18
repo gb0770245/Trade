@@ -270,13 +270,20 @@ export const mergeTxListsSafe = (lists: Transaction[][]): Transaction[] => {
       const rawId = String(t.id || (t as any)._id || `tx-${t.createdAt || Date.now()}`).trim();
       const rawSqlId = (t as any).sqlId ? String((t as any).sqlId).trim() : '';
       const rawRef = t.referenceNo ? String(t.referenceNo).trim() : '';
+      const rawUtr = t.utrNumber ? String(t.utrNumber).trim() : '';
       const withdrawBucket =
         t.type === 'withdraw' && t.userId
           ? `w:${String(t.userId).trim()}_${Number(t.amount || 0).toFixed(2)}_${Math.floor(getTransactionTime(t) / 45000)}`
           : '';
+      const rechargeBucket =
+        t.type === 'recharge' && t.userId && (rawUtr || rawRef).length >= 6
+          ? `r:${String(t.userId).trim()}_${rawUtr || rawRef}`
+          : '';
 
       const targetId =
+        (rechargeBucket && keyLookup.get(rechargeBucket)) ||
         (rawRef && keyLookup.get(`ref:${rawRef}`)) ||
+        (rawUtr && keyLookup.get(`utr:${rawUtr}`)) ||
         keyLookup.get(`id:${rawId}`) ||
         (rawSqlId && keyLookup.get(`id:${rawSqlId}`)) ||
         (withdrawBucket && keyLookup.get(withdrawBucket)) ||
@@ -294,8 +301,11 @@ export const mergeTxListsSafe = (lists: Transaction[][]): Transaction[] => {
       keyLookup.set(`id:${finalId}`, finalId);
       if (rawSqlId) keyLookup.set(`id:${rawSqlId}`, finalId);
       if (rawRef) keyLookup.set(`ref:${rawRef}`, finalId);
+      if (rawUtr) keyLookup.set(`utr:${rawUtr}`, finalId);
       if (merged.referenceNo) keyLookup.set(`ref:${String(merged.referenceNo).trim()}`, finalId);
+      if (merged.utrNumber) keyLookup.set(`utr:${String(merged.utrNumber).trim()}`, finalId);
       if (withdrawBucket) keyLookup.set(withdrawBucket, finalId);
+      if (rechargeBucket) keyLookup.set(rechargeBucket, finalId);
     }
   }
 
@@ -1650,11 +1660,17 @@ export const dbService = {
   },
 
   // Admin: Update transaction status (Cloud SQL + ALL matching Firestore documents)
-  async updateTransaction(txId: string, data: Partial<Transaction>, originalReferenceNo?: string): Promise<void> {
+  async updateTransaction(
+    txId: string,
+    data: Partial<Transaction>,
+    originalReferenceNo?: string,
+    extraUtr?: string
+  ): Promise<void> {
     const cleanId = String(txId || '').trim();
     const cleanOrigRef = originalReferenceNo ? String(originalReferenceNo).trim() : '';
+    const cleanUtr = extraUtr ? String(extraUtr).trim() : data.utrNumber ? String(data.utrNumber).trim() : '';
 
-    // 1. Update in Cloud SQL backend
+    // 1. Update in Cloud SQL & SQLite backend
     try {
       await fetch('/api/cloudsql/transactions/status', {
         method: 'POST',
@@ -1664,7 +1680,7 @@ export const dbService = {
           originalReferenceNo: cleanOrigRef || undefined,
           status: data.status,
           referenceNo: data.referenceNo,
-          utrNumber: data.utrNumber,
+          utrNumber: cleanUtr || data.utrNumber,
           paymentMethod: data.paymentMethod,
         }),
       });
@@ -1682,14 +1698,20 @@ export const dbService = {
       try {
         const docIdsToUpdate = new Set<string>();
 
-        // Query by id and referenceNo so numeric SQL IDs or reference-keyed calls still update the canonical doc ("tx-...")
+        // Query by id, referenceNo, and utrNumber so EVERY copy in Firestore settles cleanly
         const searchQueries = [];
         if (cleanId) {
           searchQueries.push(query(collection(db, 'transactions'), where('id', '==', cleanId)));
           searchQueries.push(query(collection(db, 'transactions'), where('referenceNo', '==', cleanId)));
+          searchQueries.push(query(collection(db, 'transactions'), where('utrNumber', '==', cleanId)));
         }
         if (cleanOrigRef && cleanOrigRef !== cleanId) {
           searchQueries.push(query(collection(db, 'transactions'), where('referenceNo', '==', cleanOrigRef)));
+          searchQueries.push(query(collection(db, 'transactions'), where('utrNumber', '==', cleanOrigRef)));
+        }
+        if (cleanUtr && cleanUtr !== cleanId && cleanUtr !== cleanOrigRef) {
+          searchQueries.push(query(collection(db, 'transactions'), where('utrNumber', '==', cleanUtr)));
+          searchQueries.push(query(collection(db, 'transactions'), where('referenceNo', '==', cleanUtr)));
         }
 
         const snapshots = await Promise.all(searchQueries.map((sq) => getDocs(sq).catch(() => null)));
@@ -1773,6 +1795,8 @@ export const dbService = {
     action: 'approve' | 'reject';
     txId: string;
     originalReferenceNo?: string;
+    referenceNo?: string;
+    utrNumber?: string;
     sqlId?: number;
     userId?: string;
     amount?: number;
@@ -1784,9 +1808,14 @@ export const dbService = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      if (res.ok) {
-        return await res.json();
+      const json = await res.json().catch(() => null);
+      if (res.ok && json) {
+        return json;
       }
+      return {
+        success: false,
+        message: json?.error || json?.message || `Server error (${res.status})`,
+      };
     } catch (err) {
       console.warn('API adminRechargeAction error:', err);
     }

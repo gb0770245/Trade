@@ -3758,28 +3758,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    // Check if already completed in state
+    // Check if already completed or rejected in state
     const existing =
-      adminTransactions.find((t) => t.id === txId || t.referenceNo === txId) ||
-      transactions.find((t) => t.id === txId || t.referenceNo === txId);
-    if (existing && existing.status === 'completed') {
-      showToast('This deposit is already approved and credited!', 'info');
+      adminTransactions.find(
+        (t) =>
+          t.id === txId ||
+          String((t as any).sqlId || '') === txId ||
+          t.referenceNo === txId ||
+          t.utrNumber === txId
+      ) ||
+      transactions.find(
+        (t) =>
+          t.id === txId ||
+          String((t as any).sqlId || '') === txId ||
+          t.referenceNo === txId ||
+          t.utrNumber === txId
+      );
+    if (existing && (existing.status === 'completed' || existing.status === 'rejected')) {
+      showToast(`This deposit is already ${existing.status}!`, 'info');
       return;
     }
     const originalRef = existing?.referenceNo;
+    const existingUtr = existing?.utrNumber;
     const sqlId = (existing as any)?.sqlId;
 
     activeFundOps.add(lockKey);
     try {
-      // 1. Backend atomic approval & wallet credit with anti-double-click deduplication
+      // 1. Backend atomic approval & wallet credit with SQLite + Cloud SQL + backup idempotency
       const apiRes = await dbService.adminRechargeAction({
         action: 'approve',
         txId,
         originalReferenceNo: originalRef,
+        referenceNo: originalRef,
+        utrNumber: existingUtr,
         sqlId,
         userId,
         amount,
       });
+
+      if (!apiRes || !apiRes.success) {
+        showToast(apiRes?.message || 'Failed to approve deposit. Please try again.', 'error');
+        return;
+      }
+
+      const settledStatus =
+        apiRes.transaction?.status === 'rejected' ? 'rejected' : 'completed';
 
       const txBalUpdate: Partial<Transaction> =
         apiRes.transaction?.balanceAfter !== undefined
@@ -3792,19 +3815,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? buildUserBalanceSnapshot(apiRes.user) || {}
           : {};
 
-      // 2. Sync to Firestore (across all matching copies) and local state
-      await dbService.updateTransaction(txId, { status: 'completed', ...txBalUpdate }, originalRef);
+      // 2. Sync to Firestore (across all matching copies by id, referenceNo, and utrNumber)
+      try {
+        await dbService.updateTransaction(
+          txId,
+          { status: settledStatus, ...txBalUpdate },
+          originalRef,
+          existingUtr
+        );
+      } catch (fsErr) {
+        console.warn('Firestore recharge status sync warning:', fsErr);
+      }
+
       const matchesTx = (t: Transaction) =>
-        t.id === txId || t.referenceNo === txId || (Boolean(originalRef) && t.referenceNo === originalRef);
+        t.id === txId ||
+        t.referenceNo === txId ||
+        t.utrNumber === txId ||
+        (Boolean(sqlId) && (String((t as any).sqlId || '') === String(sqlId) || t.id === String(sqlId))) ||
+        (Boolean(originalRef) && (t.referenceNo === originalRef || t.utrNumber === originalRef)) ||
+        (Boolean(existingUtr) && (t.utrNumber === existingUtr || t.referenceNo === existingUtr));
+
       setAdminTransactions((prev) =>
-        prev.map((t) => (matchesTx(t) ? { ...t, status: 'completed', ...txBalUpdate } : t))
+        deduplicateTransactions(
+          prev.map((t) => (matchesTx(t) ? { ...t, status: settledStatus, ...txBalUpdate } : t))
+        )
       );
-      setTransactions((prev) =>
-        prev.map((t) => (matchesTx(t) ? { ...t, status: 'completed', ...txBalUpdate } : t))
-      );
+      setTransactions((prev) => {
+        const next = deduplicateTransactions(
+          prev.map((t) => (matchesTx(t) ? { ...t, status: settledStatus, ...txBalUpdate } : t))
+        );
+        try {
+          localStorage.setItem(STORAGE_KEY_TXS, JSON.stringify(next));
+        } catch {}
+        return next;
+      });
 
       if (apiRes.alreadyProcessed) {
-        showToast('This deposit was already approved previously.', 'info');
+        showToast('This deposit was already approved previously (stale row synced).', 'info');
         return;
       }
 
@@ -3815,7 +3862,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           : Number((((adminUsers.find(u => u.id === userId)?.rechargeBalance || 0) + amount)).toFixed(2));
         const nowIso = new Date().toISOString();
 
-        await dbService.updateUser(userId, { rechargeBalance: newBal });
+        try {
+          await dbService.updateUser(userId, { rechargeBalance: newBal });
+        } catch {}
         setAdminUsers((prev) =>
           prev.map((u) => (u.id === userId ? { ...u, rechargeBalance: newBal, updatedAt: nowIso } : u))
         );
@@ -3841,33 +3890,69 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (activeFundOps.has(lockKey)) return;
 
     const existing =
-      adminTransactions.find((t) => t.id === txId || t.referenceNo === txId) ||
-      transactions.find((t) => t.id === txId || t.referenceNo === txId);
+      adminTransactions.find(
+        (t) =>
+          t.id === txId ||
+          String((t as any).sqlId || '') === txId ||
+          t.referenceNo === txId ||
+          t.utrNumber === txId
+      ) ||
+      transactions.find(
+        (t) =>
+          t.id === txId ||
+          String((t as any).sqlId || '') === txId ||
+          t.referenceNo === txId ||
+          t.utrNumber === txId
+      );
     if (existing && (existing.status === 'rejected' || existing.status === 'completed')) {
       showToast(`Deposit is already ${existing.status}!`, 'info');
       return;
     }
     const originalRef = existing?.referenceNo;
+    const existingUtr = existing?.utrNumber;
     const sqlId = (existing as any)?.sqlId;
 
     activeFundOps.add(lockKey);
     try {
-      await dbService.adminRechargeAction({
+      const apiRes = await dbService.adminRechargeAction({
         action: 'reject',
         txId,
         originalReferenceNo: originalRef,
+        referenceNo: originalRef,
+        utrNumber: existingUtr,
         sqlId,
+        userId: existing?.userId,
+        amount: existing?.amount,
         reason,
       });
-      await dbService.updateTransaction(txId, { status: 'rejected' }, originalRef);
+      if (!apiRes || !apiRes.success) {
+        showToast(apiRes?.message || 'Failed to reject deposit.', 'error');
+        return;
+      }
+      try {
+        await dbService.updateTransaction(txId, { status: 'rejected' }, originalRef, existingUtr);
+      } catch {}
       const matchesTx = (t: Transaction) =>
-        t.id === txId || t.referenceNo === txId || (Boolean(originalRef) && t.referenceNo === originalRef);
+        t.id === txId ||
+        t.referenceNo === txId ||
+        t.utrNumber === txId ||
+        (Boolean(sqlId) && (String((t as any).sqlId || '') === String(sqlId) || t.id === String(sqlId))) ||
+        (Boolean(originalRef) && (t.referenceNo === originalRef || t.utrNumber === originalRef)) ||
+        (Boolean(existingUtr) && (t.utrNumber === existingUtr || t.referenceNo === existingUtr));
       setAdminTransactions((prev) =>
-        prev.map((t) => (matchesTx(t) ? { ...t, status: 'rejected' } : t))
+        deduplicateTransactions(
+          prev.map((t) => (matchesTx(t) ? { ...t, status: 'rejected' } : t))
+        )
       );
-      setTransactions((prev) =>
-        prev.map((t) => (matchesTx(t) ? { ...t, status: 'rejected' } : t))
-      );
+      setTransactions((prev) => {
+        const next = deduplicateTransactions(
+          prev.map((t) => (matchesTx(t) ? { ...t, status: 'rejected' } : t))
+        );
+        try {
+          localStorage.setItem(STORAGE_KEY_TXS, JSON.stringify(next));
+        } catch {}
+        return next;
+      });
       showToast(`Add Money rejected (${reason || 'Verification failed'})`, 'info');
     } finally {
       activeFundOps.delete(lockKey);

@@ -74,6 +74,18 @@ import {
   resetAllUsersBalancesInSql,
 } from './src/db/sqliteUsers.ts';
 import { isSqlConfigured, createPool } from './src/db/index.ts';
+import {
+  initSqliteTransactionsTable,
+  upsertTransactionInSql,
+  getAllTransactionsFromSql,
+  getTransactionsForUserFromSql,
+  findTransactionsInSqlByIdentifiers,
+  findSettledRechargeGuard,
+  markRechargeSettledInSql,
+  updateTransactionStatusInSql,
+  buildRechargeGuardKeys,
+  purgeAllTransactionsFromSql,
+} from './src/db/sqliteTransactions.ts';
 
 dotenv.config();
 
@@ -5708,8 +5720,9 @@ function buildUserBalanceSnapshot(userOrId: any): {
 app.post(['/api/admin/transactions/purge-all', '/api/transactions/purge-all'], async (_req, res) => {
   try {
     await purgeAllTransactionsFromDb();
+    purgeAllTransactionsFromSql();
     saveServerTransactions([]);
-    console.log('[Admin Transactions] All transaction history completely purged from PostgreSQL and disk.');
+    console.log('[Admin Transactions] All transaction history completely purged from PostgreSQL, SQLite and disk.');
     return res.json({ success: true, message: 'All transaction history purged permanently.' });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
@@ -5792,9 +5805,16 @@ function mergeTxListsForRead(backupTxs: any[], dbTxs: any[]): any[] {
     const rawId = tx.id !== undefined && tx.id !== null ? String(tx.id).trim() : '';
     const rawSqlId = tx.sqlId !== undefined && tx.sqlId !== null ? String(tx.sqlId).trim() : '';
     const rawRef = tx.referenceNo ? String(tx.referenceNo).trim() : '';
+    const rawUtr = tx.utrNumber ? String(tx.utrNumber).trim() : '';
+    const rechargeUtrKey =
+      tx.type === 'recharge' && tx.userId && (rawUtr || rawRef) && String(rawUtr || rawRef).length >= 6
+        ? `rec_utr:${String(tx.userId).trim()}_${rawUtr || rawRef}`
+        : '';
 
     let primaryKey =
+      (rechargeUtrKey && keyLookup.get(rechargeUtrKey)) ||
       (rawRef && keyLookup.get(`ref:${rawRef}`)) ||
+      (rawUtr && keyLookup.get(`utr:${rawUtr}`)) ||
       (rawId && keyLookup.get(`id:${rawId}`)) ||
       (rawSqlId && keyLookup.get(`id:${rawSqlId}`)) ||
       rawRef ||
@@ -5804,10 +5824,13 @@ function mergeTxListsForRead(backupTxs: any[], dbTxs: any[]): any[] {
     const merged = map.has(primaryKey) ? mergeServerTx(map.get(primaryKey), tx) : { ...tx };
     map.set(primaryKey, merged);
 
+    if (rechargeUtrKey) keyLookup.set(rechargeUtrKey, primaryKey);
     if (rawRef) keyLookup.set(`ref:${rawRef}`, primaryKey);
+    if (rawUtr) keyLookup.set(`utr:${rawUtr}`, primaryKey);
     if (rawId) keyLookup.set(`id:${rawId}`, primaryKey);
     if (rawSqlId) keyLookup.set(`id:${rawSqlId}`, primaryKey);
     if (merged.referenceNo) keyLookup.set(`ref:${String(merged.referenceNo).trim()}`, primaryKey);
+    if (merged.utrNumber) keyLookup.set(`utr:${String(merged.utrNumber).trim()}`, primaryKey);
     if (merged.id) keyLookup.set(`id:${String(merged.id).trim()}`, primaryKey);
     if (merged.sqlId) keyLookup.set(`id:${String(merged.sqlId).trim()}`, primaryKey);
   };
@@ -5815,8 +5838,9 @@ function mergeTxListsForRead(backupTxs: any[], dbTxs: any[]): any[] {
   for (const tx of backupTxs) ingest(tx);
   for (const tx of dbTxs) ingest(tx);
 
-  // Secondary strict deduplication for withdrawals: merge any duplicate records for the same request regardless of status
+  // Secondary strict deduplication for withdrawals & recharges: merge duplicate records regardless of status
   const withdrawMap = new Map<string, any>();
+  const rechargeMap = new Map<string, any>();
   const otherTxs: any[] = [];
 
   for (const tx of map.values()) {
@@ -5825,7 +5849,6 @@ function mergeTxListsForRead(backupTxs: any[], dbTxs: any[]): any[] {
       const amt = Number(tx.amount || 0).toFixed(2);
       const ref = String(tx.referenceNo || '').trim();
       const timeBucket = Math.floor((Number(tx.createdAt) || Date.now()) / 45000);
-      // Do NOT include tx.status in dedupeKey so completed/rejected merges cleanly over stale processing
       const dedupeKey = ref || `${uId}_${amt}_${timeBucket}`;
 
       if (withdrawMap.has(dedupeKey)) {
@@ -5833,22 +5856,37 @@ function mergeTxListsForRead(backupTxs: any[], dbTxs: any[]): any[] {
       } else {
         withdrawMap.set(dedupeKey, tx);
       }
+    } else if (tx.type === 'recharge') {
+      const uId = String(tx.userId || '').trim();
+      const utrOrRef = String(tx.utrNumber || tx.referenceNo || '').trim();
+      const dedupeKey =
+        uId && utrOrRef && utrOrRef.length >= 6
+          ? `rec:${uId}:${utrOrRef}`
+          : String(tx.id || `${uId}:${tx.amount}:${tx.createdAt || Date.now()}`);
+
+      if (rechargeMap.has(dedupeKey)) {
+        rechargeMap.set(dedupeKey, mergeServerTx(rechargeMap.get(dedupeKey), tx));
+      } else {
+        rechargeMap.set(dedupeKey, tx);
+      }
     } else {
       otherTxs.push(tx);
     }
   }
 
-  return [...otherTxs, ...withdrawMap.values()]
+  return [...otherTxs, ...withdrawMap.values(), ...rechargeMap.values()]
     .map((tx: any) => normalizeTxTimestampIST(tx))
     .sort((a: any, b: any) => extractTxEpochMs(b) - extractTxEpochMs(a));
 }
 
-// API Route: Get all transactions (for Admin) from Cloud SQL & backup
+// API Route: Get all transactions (for Admin) from Cloud SQL, SQLite & backup
 app.get(['/api/cloudsql/transactions', '/api/admin/transactions'], async (_req, res) => {
   try {
+    initSqliteTransactionsTable();
     const dbTxs = await getAllTransactionsFromDb();
+    const sqlTxs = getAllTransactionsFromSql();
     const backupTxs = loadServerTransactions();
-    const merged = mergeTxListsForRead(backupTxs, dbTxs);
+    const merged = mergeTxListsForRead(backupTxs, [...sqlTxs, ...dbTxs]);
 
     return res.json({ success: true, count: merged.length, transactions: merged });
   } catch (err: any) {
@@ -5859,13 +5897,15 @@ app.get(['/api/cloudsql/transactions', '/api/admin/transactions'], async (_req, 
 // API Route: Transactions history for a specific user
 app.get('/api/cloudsql/transactions/:userId', async (req, res) => {
   try {
+    initSqliteTransactionsTable();
     const { userId } = req.params;
     const cleanId = String(userId).trim();
     const dbTxs = await getUserTransactions(cleanId);
+    const sqlTxs = getTransactionsForUserFromSql(cleanId);
     const backupTxs = loadServerTransactions().filter(
       (tx) => String(tx.userId).trim() === cleanId
     );
-    const userTxs = mergeTxListsForRead(backupTxs, dbTxs);
+    const userTxs = mergeTxListsForRead(backupTxs, [...sqlTxs, ...dbTxs]);
 
     return res.json({ success: true, count: userTxs.length, transactions: userTxs });
   } catch (err: any) {
@@ -5922,6 +5962,31 @@ app.post('/api/cloudsql/transactions', async (req, res) => {
       }
     }
 
+    // Anti-duplicate guard for manual recharges with same UTR / reference
+    if (tx.type === 'recharge' && cleanUserId) {
+      const cleanRefOrUtr = String(tx.utrNumber || tx.referenceNo || '').trim();
+      const backupTxs = loadServerTransactions();
+      const sqlTxs = getTransactionsForUserFromSql(cleanUserId);
+      const combinedUserTxs = [...backupTxs, ...sqlTxs];
+      const existingSameRecharge = combinedUserTxs.find(
+        (t) =>
+          t.type === 'recharge' &&
+          String(t.userId || '').trim() === cleanUserId &&
+          ((tx.id && String(t.id || '').trim() === String(tx.id).trim()) ||
+            (cleanRefOrUtr.length >= 6 &&
+              (String(t.referenceNo || '').trim() === cleanRefOrUtr ||
+                String(t.utrNumber || '').trim() === cleanRefOrUtr)))
+      );
+      if (existingSameRecharge) {
+        return res.json({
+          success: true,
+          transaction: existingSameRecharge,
+          alreadyExists: true,
+          message: 'Existing deposit request returned (anti-duplicate)',
+        });
+      }
+    }
+
     // Ensure every created transaction carries post-tx user balance snapshot if caller omitted it
     const autoBalanceSnapshot =
       tx.balanceAfter === undefined || tx.balanceAfter === null
@@ -5939,7 +6004,7 @@ app.post('/api/cloudsql/transactions', async (req, res) => {
     // 1. Save to Cloud SQL
     const createdInDb = await createTransaction(normalizedSnapshot);
 
-    // 2. Save to local JSON backup (preserve canonical string id and record sqlId separately)
+    // 2. Save to local JSON backup & persistent SQLite ledger
     const backupTxs = loadServerTransactions();
     const refKey = normalizedSnapshot.referenceNo || normalizedSnapshot.id || `tx-${resolvedCreatedAt}`;
     const payload = {
@@ -5961,6 +6026,9 @@ app.post('/api/cloudsql/transactions', async (req, res) => {
       backupTxs.unshift(payload);
     }
     saveServerTransactions(backupTxs);
+    try {
+      upsertTransactionInSql(payload);
+    } catch {}
 
     return res.json({ success: true, transaction: payload || createdInDb });
   } catch (err: any) {
@@ -5968,11 +6036,11 @@ app.post('/api/cloudsql/transactions', async (req, res) => {
   }
 });
 
-// Helper: Collect all identifiers (backupTxs + PostgreSQL) matching a transaction update request
+// Helper: Collect all identifiers (backupTxs + SQLite + PostgreSQL) matching a transaction update request
 async function resolveAllTxIdentifiers(
   backupTxs: any[],
-  params: { txId?: string; originalReferenceNo?: string; sqlId?: number | string; referenceNo?: string }
-): Promise<{ candidateIds: Set<string>; dbMatches: any[]; backupMatches: any[] }> {
+  params: { txId?: string; originalReferenceNo?: string; sqlId?: number | string; referenceNo?: string; utrNumber?: string }
+): Promise<{ candidateIds: Set<string>; dbMatches: any[]; sqlMatches: any[]; backupMatches: any[] }> {
   const candidateIds = new Set<string>();
   const addId = (v: any) => {
     if (v !== undefined && v !== null) {
@@ -5984,41 +6052,63 @@ async function resolveAllTxIdentifiers(
   addId(params.txId);
   addId(params.originalReferenceNo);
   addId(params.sqlId);
-  // Only use referenceNo as a lookup seed if we don't already have originalReferenceNo (avoids confusing new UTR with lookup key)
+  addId(params.utrNumber);
   if (!params.originalReferenceNo) {
     addId(params.referenceNo);
   }
 
-  // Pass 1: find matching records in backupTxs to expand known ids/refs
+  // Pass 1: find matching records in backupTxs to expand known ids/refs/UTRs
   for (const t of backupTxs) {
     if (!t) continue;
     const tId = t.id !== undefined && t.id !== null ? String(t.id).trim() : '';
     const tSqlId = t.sqlId !== undefined && t.sqlId !== null ? String(t.sqlId).trim() : '';
     const tRef = t.referenceNo ? String(t.referenceNo).trim() : '';
-    if ((tId && candidateIds.has(tId)) || (tSqlId && candidateIds.has(tSqlId)) || (tRef && candidateIds.has(tRef))) {
+    const tUtr = t.utrNumber ? String(t.utrNumber).trim() : '';
+    if (
+      (tId && candidateIds.has(tId)) ||
+      (tSqlId && candidateIds.has(tSqlId)) ||
+      (tRef && candidateIds.has(tRef)) ||
+      (tUtr && candidateIds.has(tUtr))
+    ) {
       addId(tId);
       addId(tSqlId);
       addId(tRef);
+      addId(tUtr);
     }
   }
 
-  // Pass 2: query PostgreSQL across all known identifiers
+  // Pass 2: query SQLite ledger
+  const sqlMatches = findTransactionsInSqlByIdentifiers(Array.from(candidateIds));
+  for (const st of sqlMatches) {
+    addId(st.id);
+    addId(st.sqlId);
+    addId(st.referenceNo);
+    addId(st.utrNumber);
+  }
+
+  // Pass 3: query PostgreSQL across all expanded identifiers
   const dbMatches = await findTransactionsInDbByIdentifiers(Array.from(candidateIds));
   for (const dt of dbMatches) {
     addId(dt.id);
     addId(dt.referenceNo);
   }
 
-  // Pass 3: collect all matching backupTxs using expanded candidateIds
+  // Pass 4: collect all matching backupTxs using expanded candidateIds
   const backupMatches = backupTxs.filter((t) => {
     if (!t) return false;
     const tId = t.id !== undefined && t.id !== null ? String(t.id).trim() : '';
     const tSqlId = t.sqlId !== undefined && t.sqlId !== null ? String(t.sqlId).trim() : '';
     const tRef = t.referenceNo ? String(t.referenceNo).trim() : '';
-    return (tId && candidateIds.has(tId)) || (tSqlId && candidateIds.has(tSqlId)) || (tRef && candidateIds.has(tRef));
+    const tUtr = t.utrNumber ? String(t.utrNumber).trim() : '';
+    return (
+      (tId && candidateIds.has(tId)) ||
+      (tSqlId && candidateIds.has(tSqlId)) ||
+      (tRef && candidateIds.has(tRef)) ||
+      (tUtr && candidateIds.has(tUtr))
+    );
   });
 
-  return { candidateIds, dbMatches, backupMatches };
+  return { candidateIds, dbMatches, sqlMatches, backupMatches };
 }
 
 // API Route: Update transaction status (for admin approvals, rejections, or status updates)
@@ -6031,16 +6121,17 @@ app.post(['/api/cloudsql/transactions/status', '/api/admin/transactions/status']
 
     const cleanId = String(txId).trim();
     const backupTxs = loadServerTransactions();
-    const { candidateIds, dbMatches } = await resolveAllTxIdentifiers(backupTxs, {
+    const { candidateIds, dbMatches, sqlMatches } = await resolveAllTxIdentifiers(backupTxs, {
       txId: cleanId,
       originalReferenceNo,
       sqlId,
       referenceNo,
+      utrNumber,
     });
 
     const settledUtr = String(utrNumber || '').trim();
 
-    // 1. Update ALL matching rows in Cloud SQL (keep referenceNo intact; do not clobber with UTR)
+    // 1. Update ALL matching rows in Cloud SQL
     const updatedInDb = await updateTransactionStatusInDb(cleanId, status, {
       originalReferenceNo,
       paymentMethod,
@@ -6048,7 +6139,14 @@ app.post(['/api/cloudsql/transactions/status', '/api/admin/transactions/status']
       identifiers: Array.from(candidateIds),
     });
 
-    // 2. Update ALL matching entries in backup JSON (no early break!)
+    // 2. Update ALL matching rows in SQLite ledger
+    const updatedInSql = updateTransactionStatusInSql(Array.from(candidateIds), status, {
+      ...(settledUtr ? { utrNumber: settledUtr } : {}),
+      ...(paymentMethod ? { paymentMethod } : {}),
+      ...(reason ? { rejectReason: reason } : {}),
+    });
+
+    // 3. Update ALL matching entries in backup JSON
     let foundTx: any = null;
     for (let i = 0; i < backupTxs.length; i++) {
       const t = backupTxs[i];
@@ -6056,7 +6154,8 @@ app.post(['/api/cloudsql/transactions/status', '/api/admin/transactions/status']
       const tId = t.id !== undefined && t.id !== null ? String(t.id).trim() : '';
       const tSqlId = t.sqlId !== undefined && t.sqlId !== null ? String(t.sqlId).trim() : '';
       const tRef = t.referenceNo ? String(t.referenceNo).trim() : '';
-      if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef)) {
+      const tUtr = t.utrNumber ? String(t.utrNumber).trim() : '';
+      if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef) || candidateIds.has(tUtr)) {
         backupTxs[i] = {
           ...t,
           status,
@@ -6069,9 +6168,8 @@ app.post(['/api/cloudsql/transactions/status', '/api/admin/transactions/status']
       }
     }
 
-    // If record existed only in PostgreSQL/Firestore and not in backupTxs, insert a canonical backup copy so GET stays in sync
-    if (!foundTx && (dbMatches[0] || updatedInDb)) {
-      const src = updatedInDb || dbMatches[0];
+    if (!foundTx && (sqlMatches[0] || dbMatches[0] || updatedInDb)) {
+      const src = updatedInSql[0] || sqlMatches[0] || updatedInDb || dbMatches[0];
       foundTx = {
         ...src,
         id: !isNumericOnlyId(cleanId) ? cleanId : String(src.id),
@@ -6087,9 +6185,12 @@ app.post(['/api/cloudsql/transactions/status', '/api/admin/transactions/status']
 
     if (foundTx) {
       saveServerTransactions(backupTxs);
+      try {
+        upsertTransactionInSql(foundTx);
+      } catch {}
     }
 
-    return res.json({ success: true, transaction: foundTx || updatedInDb });
+    return res.json({ success: true, transaction: foundTx || updatedInSql[0] || updatedInDb });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -6376,70 +6477,153 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
   }
 });
 
-// API Route: Admin Recharge Action (Approve with 1-click balance credit or Reject, with anti-double-click lock)
+// API Route: Admin Recharge Action (Approve with 1-click balance credit or Reject, with atomic SQLite + disk + DB idempotency)
 app.post('/api/admin/recharges/action', async (req, res) => {
-  const { action, txId, originalReferenceNo, sqlId, userId, amount, reason } = req.body;
+  const { action, txId, originalReferenceNo, referenceNo, utrNumber, sqlId, userId, amount, reason } = req.body;
   if (!action || !txId) {
     return res.status(400).json({ success: false, error: 'action and txId are required' });
   }
 
   const cleanId = String(txId).trim();
+  const cleanUserId = userId ? String(userId).trim() : '';
+  const cleanRefSeed = String(originalReferenceNo || referenceNo || utrNumber || '').trim();
 
-  // 1. Concurrency lock: Reject simultaneous double-click requests
-  if (activeRechargeLocks.has(cleanId)) {
+  // 1. Concurrency lock: Reject simultaneous double-click requests (lock by both txId and user+UTR)
+  const lockKeys = [cleanId, cleanUserId && cleanRefSeed ? `${cleanUserId}:${cleanRefSeed}` : ''].filter(Boolean);
+  if (lockKeys.some((k) => activeRechargeLocks.has(k))) {
     return res.status(409).json({ success: false, error: 'Recharge action is already in progress. Please wait.' });
   }
-  activeRechargeLocks.add(cleanId);
+  lockKeys.forEach((k) => activeRechargeLocks.add(k));
 
   try {
+    initSqliteTransactionsTable();
     const backupTxs = loadServerTransactions();
-    const { candidateIds, dbMatches, backupMatches } = await resolveAllTxIdentifiers(backupTxs, {
+    const { candidateIds, dbMatches, sqlMatches, backupMatches } = await resolveAllTxIdentifiers(backupTxs, {
       txId: cleanId,
       originalReferenceNo,
+      referenceNo,
+      utrNumber,
       sqlId,
     });
-    const allMatched = [...backupMatches, ...dbMatches];
-    const settledMatch = allMatched.find((t) => t.status === 'completed' || t.status === 'rejected');
-    const existingTx = settledMatch || backupMatches[0] || dbMatches[0];
 
-    // 2. Strict Idempotency Check: If already completed or rejected, do NOT add money twice!
-    if (settledMatch) {
-      if (action === 'approve' && settledMatch.status === 'completed') {
+    const guardKeys = buildRechargeGuardKeys({
+      id: cleanId,
+      txId: cleanId,
+      sqlId,
+      referenceNo: referenceNo || cleanRefSeed,
+      originalReferenceNo: originalReferenceNo || cleanRefSeed,
+      utrNumber: utrNumber || cleanRefSeed,
+      userId: cleanUserId,
+    });
+    for (const cid of candidateIds) {
+      guardKeys.push(`id:${cid}`, `ref:${cid}`, `utr:${cid}`);
+    }
+
+    const sqlGuardRow = findSettledRechargeGuard(guardKeys);
+    const allMatched = [...sqlMatches, ...backupMatches, ...dbMatches];
+    const settledMatch = allMatched.find((t) => t.status === 'completed' || t.status === 'rejected');
+    const existingTx = settledMatch || sqlMatches[0] || backupMatches[0] || dbMatches[0];
+
+    // 2. Strict Multi-Layer Idempotency Check: If settled in SQLite guard, SQLite ledger, PostgreSQL, or backup, NEVER credit again!
+    if (settledMatch || sqlGuardRow) {
+      const targetStatus: 'completed' | 'rejected' =
+        (settledMatch?.status as any) || (sqlGuardRow?.status as any) || 'completed';
+
+      // Force-sync any stale copies across Cloud SQL, SQLite, and disk backup to terminal status
+      await updateTransactionStatusInDb(cleanId, targetStatus, {
+        originalReferenceNo: originalReferenceNo || cleanRefSeed,
+        identifiers: Array.from(candidateIds),
+      });
+      updateTransactionStatusInSql(Array.from(candidateIds), targetStatus);
+
+      let dirty = false;
+      for (let i = 0; i < backupTxs.length; i++) {
+        const t = backupTxs[i];
+        if (!t) continue;
+        const tId = String(t.id || '').trim();
+        const tSqlId = String(t.sqlId || '').trim();
+        const tRef = String(t.referenceNo || '').trim();
+        const tUtr = String(t.utrNumber || '').trim();
+        if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef) || candidateIds.has(tUtr)) {
+          if (t.status !== targetStatus) {
+            backupTxs[i] = { ...t, status: targetStatus, updatedAt: new Date().toISOString() };
+            dirty = true;
+          }
+        }
+      }
+      if (dirty) saveServerTransactions(backupTxs);
+
+      const canonicalSettledTx = settledMatch || existingTx || {
+        id: cleanId,
+        userId: cleanUserId || sqlGuardRow?.user_id || '',
+        type: 'recharge',
+        amount: Number(amount) || Number(sqlGuardRow?.amount) || 0,
+        status: targetStatus,
+        referenceNo: cleanRefSeed || cleanId,
+        utrNumber: String(utrNumber || sqlGuardRow?.utr_number || cleanRefSeed || ''),
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (targetStatus === 'completed') {
         return res.json({
           success: true,
           message: 'Deposit has already been approved and credited previously (idempotent)',
           alreadyProcessed: true,
-          transaction: settledMatch,
+          transaction: canonicalSettledTx,
         });
       }
-      if (settledMatch.status === 'rejected') {
-        return res.json({
-          success: true,
-          message: 'Deposit was already rejected previously',
-          alreadyProcessed: true,
-          transaction: settledMatch,
-        });
-      }
+      return res.json({
+        success: true,
+        message: 'Deposit was already rejected previously',
+        alreadyProcessed: true,
+        transaction: canonicalSettledTx,
+      });
     }
 
     if (action === 'approve') {
       const numAmount = Number(amount) || (existingTx ? Number(existingTx.amount) : 0);
+      const targetUserId = String(cleanUserId || existingTx?.userId || '').trim();
+      const settledNowMs = Date.now();
+      const settledNowIso = new Date(settledNowMs).toISOString();
 
-      // 1. Credit user rechargeBalance FIRST in SQLite, Cloud SQL and users_backup.json ONLY ONCE
+      // Build canonical tx FIRST so we lock & mark it settled before/with balance credit
+      const baseTx = existingTx || {
+        id: cleanId,
+        userId: targetUserId,
+        type: 'recharge',
+        amount: numAmount,
+        amountInr: Math.round(numAmount * 100),
+        title: `UPI Fast Deposit ($${numAmount.toFixed(2)} / ₹${Math.round(numAmount * 100).toLocaleString()})`,
+        timestamp: formatISTTimestamp(settledNowMs),
+        createdAt: settledNowMs,
+        referenceNo: cleanRefSeed || cleanId,
+        utrNumber: String(utrNumber || cleanRefSeed || ''),
+        paymentMethod: 'Manual UPI (QR)',
+      };
+
+      // 1. Lock in SQLite settled_recharge_guards FIRST inside BEGIN IMMEDIATE so concurrent/repeat calls ALWAYS see it
+      markRechargeSettledInSql(guardKeys, {
+        txId: cleanId,
+        userId: targetUserId,
+        utrNumber: String(baseTx.utrNumber || baseTx.referenceNo || ''),
+        status: 'completed',
+        amount: numAmount,
+        txRecord: { ...baseTx, status: 'completed', updatedAt: settledNowIso },
+      });
+
+      // 2. Credit user rechargeBalance ONLY ONCE across SQLite, users_backup.json, and Cloud SQL
       let updatedUser: any = null;
-      const targetUserId = userId || existingTx?.userId;
       if (targetUserId && numAmount > 0) {
-        const cleanUserId = String(targetUserId).trim();
         const balNow = new Date().toISOString();
         let sqlUpdated: any = null;
         try {
-          sqlUpdated = creditUserWalletDeltaInSql(cleanUserId, 'rechargeBalance', numAmount);
+          sqlUpdated = creditUserWalletDeltaInSql(targetUserId, 'rechargeBalance', numAmount);
         } catch {}
-        markUserRuntimeMutated(cleanUserId, sqlUpdated?.phone);
+        markUserRuntimeMutated(targetUserId, sqlUpdated?.phone);
 
         const currentUsers = getCachedUsersBackup();
         const userIdx = currentUsers.findIndex(
-          (u) => u.id === cleanUserId || u.uid === cleanUserId || u.phone === cleanUserId
+          (u) => u.id === targetUserId || u.uid === targetUserId || u.phone === targetUserId
         );
         if (userIdx >= 0) {
           const currentBal = Number(currentUsers[userIdx].rechargeBalance) || 0;
@@ -6457,7 +6641,6 @@ app.post('/api/admin/recharges/action', async (req, res) => {
           updatedUser = currentUsers[userIdx];
           markUserRuntimeMutated(updatedUser.id, updatedUser.phone);
 
-          // Sync to Cloud SQL
           try {
             await upsertUser({
               uid: currentUsers[userIdx].id,
@@ -6489,17 +6672,34 @@ app.post('/api/admin/recharges/action', async (req, res) => {
       const creditBalSnapshot = updatedUser
         ? buildUserBalanceSnapshot(updatedUser)
         : targetUserId
-        ? buildUserBalanceSnapshot(String(targetUserId).trim())
+        ? buildUserBalanceSnapshot(targetUserId)
         : {};
 
-      // 2. Update ALL matching rows in Cloud SQL with credited balanceAfter snapshot
-      await updateTransactionStatusInDb(cleanId, 'completed', {
-        originalReferenceNo,
+      // 3. Persist completed tx + balanceAfter snapshot across Cloud SQL, SQLite, and disk backup (even if existingTx came only from Firestore!)
+      const dbUpdated = await updateTransactionStatusInDb(cleanId, 'completed', {
+        originalReferenceNo: originalReferenceNo || cleanRefSeed,
         identifiers: Array.from(candidateIds),
         ...creditBalSnapshot,
       });
+      if (!dbUpdated) {
+        try {
+          await createTransaction({
+            ...baseTx,
+            status: 'completed',
+            ...creditBalSnapshot,
+          });
+        } catch {}
+      }
 
-      // 3. Update ALL matching entries in backup
+      const completedTxRecord = {
+        ...baseTx,
+        id: !isNumericOnlyId(cleanId) ? cleanId : String(baseTx.id || cleanId),
+        status: 'completed',
+        ...creditBalSnapshot,
+        updatedAt: settledNowIso,
+      };
+      upsertTransactionInSql(completedTxRecord);
+
       let updatedTx: any = null;
       for (let i = 0; i < backupTxs.length; i++) {
         const t = backupTxs[i];
@@ -6507,24 +6707,19 @@ app.post('/api/admin/recharges/action', async (req, res) => {
         const tId = String(t.id || '').trim();
         const tSqlId = String(t.sqlId || '').trim();
         const tRef = String(t.referenceNo || '').trim();
-        if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef)) {
+        const tUtr = String(t.utrNumber || '').trim();
+        if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef) || candidateIds.has(tUtr)) {
           backupTxs[i] = {
             ...t,
             status: 'completed',
             ...creditBalSnapshot,
-            updatedAt: new Date().toISOString(),
+            updatedAt: settledNowIso,
           };
           if (!updatedTx) updatedTx = backupTxs[i];
         }
       }
-      if (!updatedTx && existingTx) {
-        updatedTx = {
-          ...existingTx,
-          id: !isNumericOnlyId(cleanId) ? cleanId : String(existingTx.id),
-          status: 'completed',
-          ...creditBalSnapshot,
-          updatedAt: new Date().toISOString(),
-        };
+      if (!updatedTx) {
+        updatedTx = completedTxRecord;
         backupTxs.unshift(updatedTx);
       }
       saveServerTransactions(backupTxs);
@@ -6537,11 +6732,56 @@ app.post('/api/admin/recharges/action', async (req, res) => {
       });
     } else if (action === 'reject') {
       const rejectMsg = reason || 'Deposit verification failed';
-      await updateTransactionStatusInDb(cleanId, 'rejected', {
-        originalReferenceNo,
+      const settledNowMs = Date.now();
+      const settledNowIso = new Date(settledNowMs).toISOString();
+      const numAmount = Number(amount) || (existingTx ? Number(existingTx.amount) : 0);
+      const targetUserId = String(cleanUserId || existingTx?.userId || '').trim();
+
+      const baseTx = existingTx || {
+        id: cleanId,
+        userId: targetUserId,
+        type: 'recharge',
+        amount: numAmount,
+        amountInr: Math.round(numAmount * 100),
+        title: `UPI Fast Deposit ($${numAmount.toFixed(2)} / ₹${Math.round(numAmount * 100).toLocaleString()})`,
+        timestamp: formatISTTimestamp(settledNowMs),
+        createdAt: settledNowMs,
+        referenceNo: cleanRefSeed || cleanId,
+        utrNumber: String(utrNumber || cleanRefSeed || ''),
+        paymentMethod: 'Manual UPI (QR)',
+      };
+
+      markRechargeSettledInSql(guardKeys, {
+        txId: cleanId,
+        userId: targetUserId,
+        utrNumber: String(baseTx.utrNumber || baseTx.referenceNo || ''),
+        status: 'rejected',
+        amount: numAmount,
+        txRecord: { ...baseTx, status: 'rejected', rejectReason: rejectMsg, updatedAt: settledNowIso },
+      });
+
+      const dbUpdated = await updateTransactionStatusInDb(cleanId, 'rejected', {
+        originalReferenceNo: originalReferenceNo || cleanRefSeed,
         reason: rejectMsg,
         identifiers: Array.from(candidateIds),
       });
+      if (!dbUpdated) {
+        try {
+          await createTransaction({
+            ...baseTx,
+            status: 'rejected',
+          });
+        } catch {}
+      }
+
+      const rejectedTxRecord = {
+        ...baseTx,
+        id: !isNumericOnlyId(cleanId) ? cleanId : String(baseTx.id || cleanId),
+        status: 'rejected',
+        rejectReason: rejectMsg,
+        updatedAt: settledNowIso,
+      };
+      upsertTransactionInSql(rejectedTxRecord);
 
       let updatedTx: any = null;
       for (let i = 0; i < backupTxs.length; i++) {
@@ -6550,24 +6790,19 @@ app.post('/api/admin/recharges/action', async (req, res) => {
         const tId = String(t.id || '').trim();
         const tSqlId = String(t.sqlId || '').trim();
         const tRef = String(t.referenceNo || '').trim();
-        if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef)) {
+        const tUtr = String(t.utrNumber || '').trim();
+        if (candidateIds.has(tId) || candidateIds.has(tSqlId) || candidateIds.has(tRef) || candidateIds.has(tUtr)) {
           backupTxs[i] = {
             ...t,
             status: 'rejected',
             rejectReason: rejectMsg,
-            updatedAt: new Date().toISOString(),
+            updatedAt: settledNowIso,
           };
           if (!updatedTx) updatedTx = backupTxs[i];
         }
       }
-      if (!updatedTx && existingTx) {
-        updatedTx = {
-          ...existingTx,
-          id: !isNumericOnlyId(cleanId) ? cleanId : String(existingTx.id),
-          status: 'rejected',
-          rejectReason: rejectMsg,
-          updatedAt: new Date().toISOString(),
-        };
+      if (!updatedTx) {
+        updatedTx = rejectedTxRecord;
         backupTxs.unshift(updatedTx);
       }
       saveServerTransactions(backupTxs);
@@ -6583,7 +6818,7 @@ app.post('/api/admin/recharges/action', async (req, res) => {
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   } finally {
-    activeRechargeLocks.delete(cleanId);
+    lockKeys.forEach((k) => activeRechargeLocks.delete(k));
   }
 });
 

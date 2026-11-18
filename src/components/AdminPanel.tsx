@@ -1064,6 +1064,12 @@ export const AdminPanel: React.FC = () => {
   // Recharge Action Handlers (with strict synchronous anti-double-click ref lock)
   const handleConfirmRechargeAction = async () => {
     if (!selectedTxForAction) return;
+    if (selectedTxForAction.status !== 'processing') {
+      showToast(`This deposit is already ${selectedTxForAction.status}.`, 'info');
+      setSelectedTxForAction(null);
+      setActionType(null);
+      return;
+    }
     if (isProcessingTxRef.current || isProcessingTx) return;
 
     isProcessingTxRef.current = true;
@@ -1082,6 +1088,7 @@ export const AdminPanel: React.FC = () => {
       setActionType(null);
       setRejectReason('');
       setApprovalUtr('');
+      await Promise.all([loadAdminTransactions(), loadAdminUsers()]);
     } catch (err: any) {
       showToast(err.message || 'Operation failed', 'error');
     } finally {
@@ -7189,7 +7196,7 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
               );
             })()}
 
-            {actionType === 'approve' && (
+            {actionType === 'approve' && selectedTxForAction.type === 'withdraw' && (
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">
                   Bank / UPI Settlement UTR Reference (ऑप्शनल / संपादन योग्य)
