@@ -29,7 +29,6 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { InvestmentProduct } from '../types';
-import { triggerOfficialPayUPayment } from '../services/payuService';
 
 interface CheckoutFormState {
   fullName: string;
@@ -48,7 +47,6 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
     openModal,
     platformSettings,
     showToast,
-    showPaymentFailedModal,
     investInProduct,
     setActiveTab,
   } = useApp();
@@ -111,7 +109,7 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
     setActiveCheckoutProduct(product);
   };
 
-  const handleProceedPayUCheckout = async () => {
+  const handleProceedCheckout = async () => {
     if (!activeCheckoutProduct) return;
 
     if (!checkoutForm.fullName.trim() || !checkoutForm.phone.trim()) {
@@ -125,86 +123,52 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
       return;
     }
 
+    if (!user) {
+      showToast('Please sign in first to place an order or add funds via UPI QR.', 'info');
+      setActiveCheckoutProduct(null);
+      if (onOpenLogin) onOpenLogin();
+      else openModal('auth');
+      return;
+    }
+
+    if ((user.rechargeBalance || 0) < activeCheckoutProduct.price) {
+      showToast(
+        `Insufficient wallet balance ($${(user.rechargeBalance || 0).toFixed(2)}). Opening Add Money via UPI QR.`,
+        'info'
+      );
+      setActiveCheckoutProduct(null);
+      openModal('recharge');
+      return;
+    }
+
     setIsProcessingPayment(true);
     const inrAmount = Math.round(activeCheckoutProduct.price * 100);
     const orderNumber = `NX-ORD-${Math.floor(100000 + Math.random() * 900000)}`;
 
     try {
-      const merchantKey = platformSettings.payuMerchantKey?.trim();
-      const isCustomLiveKey = Boolean(merchantKey && merchantKey !== 'gtKFFx' && !merchantKey.toLowerCase().includes('test'));
-      const merchantMode = (isCustomLiveKey || platformSettings.payuMode === 'live') ? 'live' : 'test';
+      const res = await investInProduct(activeCheckoutProduct);
+      if (res.success) {
+        const delivery = new Date();
+        delivery.setDate(delivery.getDate() + 4);
+        const formattedDate = delivery.toLocaleDateString('en-IN', {
+          weekday: 'short',
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric',
+        });
 
-      const res = await triggerOfficialPayUPayment({
-        key: merchantKey,
-        salt: platformSettings.payuMerchantSalt,
-        mode: merchantMode,
-        amount: inrAmount,
-        usdAmount: activeCheckoutProduct.price,
-        merchantName: store,
-        themeColor: platformSettings.payuThemeColor || '#0f766e',
-        userName: checkoutForm.fullName.trim(),
-        userPhone: cleanPhone,
-        userEmail: checkoutForm.email?.trim(),
-        userId: user?.id || `guest_${cleanPhone.slice(-6)}`,
-        purpose: 'product_purchase',
-        productId: activeCheckoutProduct.id,
-        productName: activeCheckoutProduct.retailName || activeCheckoutProduct.name,
-        onSuccess: async (paymentId: string) => {
-          setIsProcessingPayment(false);
-          showToast(`Payment successful! Order ${orderNumber} is confirmed.`, 'success');
-
-          // If logged in, also record in customer account
-          if (user) {
-            try {
-              await investInProduct(activeCheckoutProduct);
-            } catch (e) {
-              console.warn('Customer account order link notice:', e);
-            }
-          }
-
-          // Calculate delivery date (4 business days from now)
-          const delivery = new Date();
-          delivery.setDate(delivery.getDate() + 4);
-          const formattedDate = delivery.toLocaleDateString('en-IN', {
-            weekday: 'short',
-            month: 'short',
-            day: 'numeric',
-            year: 'numeric',
-          });
-
-          setCompletedOrderDetails({
-            orderId: orderNumber,
-            productName: activeCheckoutProduct.retailName || activeCheckoutProduct.name,
-            amountInr: inrAmount,
-            deliveryDate: formattedDate,
-          });
-
-          setActiveCheckoutProduct(null);
-        },
-        onFailure: (reason: string) => {
-          setIsProcessingPayment(false);
-          showPaymentFailedModal({
-            reason: reason || 'Payment was declined by issuing bank or user cancelled.',
-            amountUsd: activeCheckoutProduct.price,
-            amountInr: inrAmount,
-            productName: activeCheckoutProduct.retailName || activeCheckoutProduct.name,
-            onRetry: () => {
-              handleProceedPayUCheckout();
-            },
-          });
-        },
-        onDismiss: () => {
-          setIsProcessingPayment(false);
-        },
-      });
-
-      if (!res.success && res.message) {
-        setIsProcessingPayment(false);
-        showToast(res.message, 'error');
+        setCompletedOrderDetails({
+          orderId: orderNumber,
+          productName: activeCheckoutProduct.retailName || activeCheckoutProduct.name,
+          amountInr: inrAmount,
+          deliveryDate: formattedDate,
+        });
+        setActiveCheckoutProduct(null);
       }
     } catch (err: any) {
+      showToast(`Order error: ${err?.message || 'Could not complete order'}`, 'error');
+    } finally {
       setIsProcessingPayment(false);
-      showToast(`Checkout initialization notice: ${err?.message || 'Error connecting to gateway'}`, 'error');
     }
   };
 
@@ -339,7 +303,7 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
 
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed max-w-xl">
               Power your embedded smart projects and IoT automation with industrial-grade AI accelerators.
-              Backed by verified PayU 256-bit secure checkout, pan-India doorstep delivery, and 3-year replacement warranties.
+              Backed by verified 256-bit secure UPI checkout, pan-India doorstep delivery, and 3-year replacement warranties.
             </p>
 
             <div className="pt-2 flex flex-wrap items-center gap-4 text-xs font-semibold text-slate-700 dark:text-slate-300">
@@ -417,7 +381,7 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
               Hardware Catalog & Compute Devices
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              Select any unit to inspect technical specifications or proceed directly to PayU checkout.
+              Select any unit to inspect technical specifications or proceed directly to checkout.
             </p>
           </div>
 
@@ -595,10 +559,10 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
                 <ShieldCheck className="w-5 h-5" />
               </div>
               <h4 className="text-xs font-bold text-slate-900 dark:text-white">
-                RBI Compliant PayU India
+                RBI Compliant NPCI UPI
               </h4>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                256-bit encrypted card, UPI & NetBanking processing
+                256-bit encrypted UPI QR & fast verified processing
               </p>
             </div>
 
@@ -748,7 +712,7 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
             <div className="flex items-center gap-3">
               <span className="flex items-center gap-1 text-slate-400">
                 <Lock className="w-3 h-3 text-emerald-400" />
-                PayU Verified 256-Bit SSL Checkout
+                Verified 256-Bit SSL Checkout
               </span>
               <span>·</span>
               <button
@@ -931,11 +895,11 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
                 </div>
               </div>
 
-              {/* PayU Trust Notice */}
+              {/* Payment Notice */}
               <div className="p-3 rounded-xl bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800 text-[11px] text-teal-800 dark:text-teal-300 flex items-center gap-2">
                 <ShieldCheck className="w-4 h-4 shrink-0 text-teal-600" />
                 <span>
-                  Payments are processed securely via PayU India's RBI-authorized gateway. Supports UPI, Cards & NetBanking.
+                  Orders are settled securely via your verified wallet balance (top up anytime using Dynamic NPCI UPI QR).
                 </span>
               </div>
             </div>
@@ -952,15 +916,15 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
 
               <button
                 type="button"
-                onClick={handleProceedPayUCheckout}
+                onClick={handleProceedCheckout}
                 disabled={isProcessingPayment}
                 className="px-6 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-800 disabled:opacity-50 text-white text-xs font-black shadow-lg hover:shadow-xl transition-all flex items-center gap-2"
               >
                 <CreditCard className="w-4 h-4" />
                 <span>
                   {isProcessingPayment
-                    ? 'Connecting to PayU...'
-                    : `Pay ₹${Math.round(activeCheckoutProduct.price * 100).toLocaleString()} with PayU`}
+                    ? 'Processing Order...'
+                    : `Complete Order (₹${Math.round(activeCheckoutProduct.price * 100).toLocaleString()})`}
                 </span>
               </button>
             </div>
@@ -1044,7 +1008,7 @@ export const EcommerceStorefront: React.FC<{ onOpenLogin?: () => void }> = ({ on
             </h3>
 
             <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              Thank you for shopping with {store}. Your order has been placed successfully through PayU.
+              Thank you for shopping with {store}. Your order has been placed successfully.
             </p>
 
             <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-xs space-y-2 text-left font-mono">

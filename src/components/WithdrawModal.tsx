@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { X, Building2, AlertCircle, ArrowDownToLine, CheckCircle2, ShieldCheck, Sparkles } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, Building2, AlertCircle, ArrowDownToLine, ShieldCheck, Smartphone } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
 const POPULAR_BANKS = [
@@ -16,8 +16,64 @@ const POPULAR_BANKS = [
 export const WithdrawModal: React.FC = () => {
   const { user, withdraw, closeModal, showToast, theme, platformSettings, transactions } = useApp();
   const [amount, setAmount] = useState<string>('5.00');
+  const [otp, setOtp] = useState<string>('');
+  const [otpCountdown, setOtpCountdown] = useState<number>(0);
+  const [isSendingOtp, setIsSendingOtp] = useState<boolean>(false);
+  const [otpSentToPhone, setOtpSentToPhone] = useState<boolean>(false);
+  const [otpError, setOtpError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = React.useRef(false);
+
+  const isOtpRequired = platformSettings?.smsGatewayActive !== false;
+  const userCleanPhone = String(user?.phone || '').replace(/\D/g, '').slice(-10);
+
+  useEffect(() => {
+    if (otpCountdown <= 0) return;
+    const timer = setTimeout(() => setOtpCountdown((prev) => prev - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [otpCountdown]);
+
+  const handleSendOtp = async () => {
+    if (!userCleanPhone || userCleanPhone.length !== 10) {
+      const msg = 'Valid 10-digit registered mobile number not found on your profile.';
+      setOtpError(msg);
+      showToast(msg, 'error');
+      return;
+    }
+
+    setOtpError(null);
+    setIsSendingOtp(true);
+    try {
+      const res = await fetch('/api/send-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mobile: userCleanPhone,
+          purpose: 'withdraw',
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setOtpCountdown(60);
+        setOtpSentToPhone(true);
+        setOtp('');
+        showToast(
+          `OTP sent to +91 ${userCleanPhone}. Please enter the 6-digit code received.`,
+          'success'
+        );
+      } else {
+        const msg = data.error || 'Failed to send OTP. Please try again.';
+        setOtpError(msg);
+        showToast(msg, 'error');
+      }
+    } catch {
+      const msg = 'Connection error while sending OTP. Please try again.';
+      setOtpError(msg);
+      showToast(msg, 'error');
+    } finally {
+      setIsSendingOtp(false);
+    }
+  };
 
   // Check if user already has an active pending withdrawal
   const pendingWithdrawal = transactions.find(
@@ -104,20 +160,47 @@ export const WithdrawModal: React.FC = () => {
       return;
     }
 
+    if (isOtpRequired) {
+      const cleanOtp = otp.trim();
+      if (cleanOtp.length !== 6) {
+        const msg = 'Please enter the 6-digit verification code (OTP). Click "Send OTP" first.';
+        setOtpError(msg);
+        showToast(msg, 'error');
+        isSubmittingRef.current = false;
+        return;
+      }
+    }
+
+    setOtpError(null);
     setIsSubmitting(true);
+    let withdrawOk = false;
     try {
-      await withdraw(numAmount, {
-        accountHolder: cleanHolder,
-        accountNumber: cleanAccount,
-        ifscCode: cleanIfsc,
-        bankName: cleanBank || 'Bank Account',
-        upiId: '',
-      });
+      const res = await withdraw(
+        numAmount,
+        {
+          accountHolder: cleanHolder,
+          accountNumber: cleanAccount,
+          ifscCode: cleanIfsc,
+          bankName: cleanBank || 'Bank Account',
+          upiId: '',
+        },
+        isOtpRequired ? otp.trim() : undefined
+      );
+      withdrawOk = Boolean(res?.success);
+      if (!res?.success && res?.message) {
+        if (res.message.toLowerCase().includes('otp')) {
+          setOtpError(res.message);
+        }
+      }
     } finally {
       setIsSubmitting(false);
-      setTimeout(() => {
+      if (withdrawOk) {
+        setTimeout(() => {
+          isSubmittingRef.current = false;
+        }, 2500);
+      } else {
         isSubmittingRef.current = false;
-      }, 2500);
+      }
     }
   };
 
@@ -367,6 +450,67 @@ export const WithdrawModal: React.FC = () => {
               </span>
             </div>
           </div>
+
+          {/* SMS OTP Verification Box (Required when SMS OTP Gateway is ON) */}
+          {isOtpRequired && (
+            <div className="p-3.5 rounded-2xl bg-slate-800/70 border border-slate-700/80 space-y-2.5">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="font-bold text-white flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-teal-400 shrink-0" />
+                  <span>Mobile OTP Verification</span>
+                </span>
+                <span className="text-[11px] font-mono text-slate-400 flex items-center gap-1 tabular-nums">
+                  <Smartphone className="w-3 h-3 text-teal-400" />
+                  +91 {userCleanPhone || 'Registered'}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <div className="flex-1 flex items-center min-h-[44px] rounded-xl border border-slate-700 bg-slate-900 px-3 focus-within:border-teal-500 transition-colors">
+                  <ShieldCheck className="w-4 h-4 text-slate-400 mr-2 shrink-0" />
+                  <input
+                    type="text"
+                    value={otp}
+                    onChange={(e) => {
+                      setOtp(e.target.value.replace(/\D/g, '').slice(0, 6));
+                      if (otpError) setOtpError(null);
+                    }}
+                    placeholder="Enter 6-digit OTP"
+                    className="w-full text-xs outline-none bg-transparent text-white font-mono tracking-widest tabular-nums placeholder:normal-case placeholder:tracking-normal placeholder:text-slate-500"
+                    maxLength={6}
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSendOtp}
+                  disabled={otpCountdown > 0 || isSendingOtp || hasPendingWithdrawal}
+                  className="min-h-[44px] px-4 rounded-xl text-xs font-bold bg-teal-500/20 text-teal-300 border border-teal-500/35 hover:bg-teal-500/30 transition-colors disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer tabular-nums"
+                >
+                  {isSendingOtp
+                    ? 'Sending...'
+                    : otpCountdown > 0
+                    ? `Resend (${otpCountdown}s)`
+                    : otpSentToPhone
+                    ? 'Resend OTP'
+                    : 'Send OTP'}
+                </button>
+              </div>
+
+              {otpError ? (
+                <p className="text-[11px] text-rose-400 font-medium leading-snug">{otpError}</p>
+              ) : otpSentToPhone ? (
+                <p className="text-[11px] text-emerald-400 font-medium leading-snug">
+                  OTP dispatched to +91 {userCleanPhone}. Enter the 6-digit code to confirm withdrawal.
+                </p>
+              ) : (
+                <p className="text-[11px] text-slate-400 leading-snug">
+                  Tap "Send OTP" to receive a 6-digit verification code on your registered mobile number.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Safety Notice tip */}
           <div className="flex items-start gap-2 text-[11px] text-slate-400 p-2.5 rounded-xl bg-slate-800/40 border border-slate-800">

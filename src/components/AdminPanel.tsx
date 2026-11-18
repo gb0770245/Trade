@@ -66,12 +66,14 @@ import {
   ArrowUpRight,
   ArrowDownLeft,
   ArrowRight,
+  MonitorSmartphone,
 } from 'lucide-react';
 import { useApp, normalizeRedirectUrl, deduplicateTransactions } from '../context/AppContext';
-import { dbService } from '../services/dbService';
+import { dbService, formatTransactionTimeIST } from '../services/dbService';
 import { User, Transaction, InvestmentProduct, InvestmentOrder, NoticeItem, CustomPromoCode, PlatformSettings, SpinPrizeConfig, OtpLogItem, HelpCenterLinkItem } from '../types';
 import { getOrderClaimStatus, formatCountdown, formatCountdownHuman } from '../utils/dividendUtils';
 import { AdminBannerManager } from './AdminBannerManager';
+import { AdminAdMobManager } from './AdminAdMobManager';
 
 export const AdminPanel: React.FC = () => {
   const {
@@ -119,7 +121,7 @@ export const AdminPanel: React.FC = () => {
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<
-    'users' | 'orders' | 'recharges' | 'withdrawals' | 'p2p' | 'products' | 'banners' | 'settings' | 'notices' | 'promos' | 'otp' | 'helpcenter'
+    'users' | 'orders' | 'recharges' | 'withdrawals' | 'p2p' | 'products' | 'banners' | 'admob' | 'settings' | 'notices' | 'promos' | 'otp' | 'helpcenter'
   >('users');
 
   // User Investment Orders Management States
@@ -751,11 +753,6 @@ export const AdminPanel: React.FC = () => {
   const [grantReason, setGrantReason] = useState<string>('Admin Loyalty Gift');
   const [grantSearchQuery, setGrantSearchQuery] = useState<string>('');
 
-  // Webhook helper states
-  const [isTestingWebhook, setIsTestingWebhook] = useState(false);
-  const [webhookTestStatus, setWebhookTestStatus] = useState<{ ok: boolean; msg: string } | null>(null);
-  const [copiedWebhookUrl, setCopiedWebhookUrl] = useState(false);
-  const [copiedWebhookSecret, setCopiedWebhookSecret] = useState(false);
 
   // SQL Inspector states
   const [sqlDbInfo, setSqlDbInfo] = useState<any>(null);
@@ -827,34 +824,6 @@ export const AdminPanel: React.FC = () => {
     }
   }, [activeTab]);
 
-  const handleTestWebhookPing = async () => {
-    setIsTestingWebhook(true);
-    setWebhookTestStatus(null);
-    try {
-      const res = await fetch('/api/payu/webhook', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          status: 'success',
-          txnid: `PAYU_TEST_${Date.now()}`,
-          amount: '500.00',
-          productinfo: 'Admin Webhook Test Ping',
-          firstname: 'AdminTester',
-          email: 'admin@nexa-ai.shop',
-        }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setWebhookTestStatus({ ok: true, msg: `Endpoint active! Status 200 OK (${data.message || 'Ready'})` });
-      } else {
-        setWebhookTestStatus({ ok: false, msg: `HTTP ${res.status}: ${data.error || 'Check server'}` });
-      }
-    } catch (err: any) {
-      setWebhookTestStatus({ ok: false, msg: err.message || 'Network error' });
-    } finally {
-      setIsTestingWebhook(false);
-    }
-  };
 
   // Instant Auto-Saving Financial & System Toggle Handler
   const handleToggleSetting = async (key: keyof PlatformSettings, label: string) => {
@@ -2075,6 +2044,34 @@ export const AdminPanel: React.FC = () => {
 
           <button
             type="button"
+            onClick={() => setActiveTab('admob')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+              activeTab === 'admob'
+                ? 'bg-gradient-to-r from-cyan-500 to-emerald-600 text-white shadow-md shadow-cyan-900/40 ring-1 ring-white/20'
+                : 'text-cyan-300 hover:text-white hover:bg-slate-900'
+            }`}
+          >
+            <MonitorSmartphone className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Google AdMob Ads</span>
+            <span
+              className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase ${
+                platformSettings.isAdMobEnabled === false
+                  ? 'bg-slate-800 text-slate-400'
+                  : platformSettings.adMobTestMode === false
+                  ? 'bg-emerald-500/25 text-emerald-200'
+                  : 'bg-amber-500/25 text-amber-200'
+              }`}
+            >
+              {platformSettings.isAdMobEnabled === false
+                ? 'OFF'
+                : platformSettings.adMobTestMode === false
+                ? 'LIVE'
+                : 'TEST'}
+            </span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setActiveTab('settings')}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
               activeTab === 'settings'
@@ -3095,7 +3092,7 @@ export const AdminPanel: React.FC = () => {
                             )}
                           </td>
                           <td className="py-3 px-3 text-slate-400 text-[11px]">
-                            {tx.timestamp}
+                            {formatTransactionTimeIST(tx)}
                           </td>
                           <td className="py-3 px-3">
                             {tx.status === 'completed' && (
@@ -3335,7 +3332,7 @@ export const AdminPanel: React.FC = () => {
                               )}
                             </td>
                             <td className="py-3 px-3 text-slate-400 text-[11px]">
-                              {tx.timestamp}
+                              {formatTransactionTimeIST(tx)}
                             </td>
                             <td className="py-3 px-3">
                               {tx.status === 'completed' && (
@@ -3472,7 +3469,7 @@ export const AdminPanel: React.FC = () => {
                       Number(tr.amount || 0).toFixed(2),
                       tr.initiatedBy || 'user',
                       (tr.note || '').replace(/,/g, ';'),
-                      (tr.timestamp || '').replace(/,/g, ''),
+                      formatTransactionTimeIST(tr).replace(/,/g, ''),
                     ]);
                     const csv = [headers.join(','), ...rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))].join('\n');
                     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -3772,7 +3769,7 @@ export const AdminPanel: React.FC = () => {
                                   </button>
                                 </div>
                                 <div className="text-[10px] text-slate-400 mt-0.5 tabular-nums">
-                                  {tr.timestamp || (tr.createdAt ? new Date(tr.createdAt).toLocaleString() : '—')}
+                                  {formatTransactionTimeIST(tr)}
                                 </div>
                               </td>
                               <td className="py-3 px-3">
@@ -3896,7 +3893,7 @@ export const AdminPanel: React.FC = () => {
                                   {tx.referenceNo}
                                 </td>
                                 <td className="py-3 px-3 text-slate-400 text-[11px] tabular-nums">
-                                  {tx.timestamp}
+                                  {formatTransactionTimeIST(tx)}
                                 </td>
                                 <td
                                   className={`py-3 px-4 text-right font-mono font-black tabular-nums ${
@@ -4176,577 +4173,6 @@ export const AdminPanel: React.FC = () => {
 
             {/* Help Center Direct Redirect Link Control */}
             {renderHelpCenterManagerCard()}
-
-            {/* PayU India Official Payment Gateway Integration (payu.in) */}
-            <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-teal-950/40 border border-teal-800/40 space-y-4">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-teal-600 text-white flex items-center justify-center font-black text-xs shadow-md">
-                    PayU
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h3 className="font-bold text-sm text-white">PayU India Official Payment Gateway</h3>
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                        localSettings.isPayUEnabled ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-slate-800 text-slate-400'
-                      }`}>
-                        {localSettings.isPayUEnabled ? 'Active' : 'Disabled'}
-                      </span>
-                      <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
-                        localSettings.payuMode === 'live'
-                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                          : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                      }`}>
-                        {localSettings.payuMode === 'live' ? 'LIVE Production Mode (secure.payu.in)' : 'Test / Sandbox Mode (test.payu.in)'}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-400">
-                      Official PayU India Gateway: Instant Auto-credit deposits via UPI (PhonePe, GPay, Paytm), Cards, NetBanking & Wallets
-                    </p>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => handleToggleSetting('isPayUEnabled', 'PayU Payment Gateway')}
-                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                    localSettings.isPayUEnabled ? 'bg-teal-600' : 'bg-slate-700'
-                  }`}
-                  role="switch"
-                  aria-checked={Boolean(localSettings.isPayUEnabled)}
-                  title={localSettings.isPayUEnabled ? 'Click to Pause PayU' : 'Click to Enable PayU'}
-                >
-                  <span
-                    aria-hidden="true"
-                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                      localSettings.isPayUEnabled ? 'translate-x-5' : 'translate-x-0'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              {/* Mode Selection Toggle & Live Gateway Status Banner */}
-              <div className="space-y-2">
-                <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
-                  <div>
-                    <span className="font-bold text-slate-200">Gateway Environment Mode:</span>
-                    <p className="text-[11px] text-slate-400">Switch between PayU Test Sandbox and Live Production payments</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        setLocalSettings({ ...localSettings, payuMode: 'test' });
-                        await updatePlatformSettings({ payuMode: 'test' });
-                        showToast('Switched PayU to Test Sandbox Mode', 'success');
-                      }}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                        localSettings.payuMode !== 'live'
-                          ? 'bg-amber-500 text-slate-950 shadow-md'
-                          : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      🧪 Test Sandbox
-                    </button>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        setLocalSettings({ ...localSettings, payuMode: 'live' });
-                        await updatePlatformSettings({ payuMode: 'live' });
-                        showToast('Switched PayU to LIVE Production Mode', 'success');
-                      }}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                        localSettings.payuMode === 'live'
-                          ? 'bg-emerald-500 text-slate-950 shadow-md'
-                          : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      🟢 LIVE Production
-                    </button>
-                  </div>
-                </div>
-
-                {/* Gateway Target URL Status Indicator */}
-                <div
-                  className={`p-3 rounded-xl border flex items-center justify-between text-xs ${
-                    localSettings.payuMerchantKey && localSettings.payuMerchantKey !== 'gtKFFx' && !localSettings.payuMerchantKey.toLowerCase().includes('test')
-                      ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-200'
-                      : 'bg-amber-950/40 border-amber-500/50 text-amber-200'
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm">
-                      {localSettings.payuMerchantKey && localSettings.payuMerchantKey !== 'gtKFFx' && !localSettings.payuMerchantKey.toLowerCase().includes('test')
-                        ? '🟢'
-                        : '🧪'}
-                    </span>
-                    <div>
-                      <div className="font-bold">
-                        {localSettings.payuMerchantKey && localSettings.payuMerchantKey !== 'gtKFFx' && !localSettings.payuMerchantKey.toLowerCase().includes('test')
-                          ? 'LIVE Production Gateway Active (Real Bank / UPI Payments)'
-                          : 'Test Sandbox Gateway Active (Demo Simulation)'}
-                      </div>
-                      <div className="text-[10px] font-mono opacity-80">
-                        Target Gateway Endpoint:{' '}
-                        {localSettings.payuMerchantKey && localSettings.payuMerchantKey !== 'gtKFFx' && !localSettings.payuMerchantKey.toLowerCase().includes('test')
-                          ? 'https://secure.payu.in/_payment'
-                          : 'https://test.payu.in/_payment'}
-                      </div>
-                    </div>
-                  </div>
-                  <span className="px-2 py-0.5 rounded-md bg-black/40 text-[10px] font-mono border border-white/10">
-                    {localSettings.payuMerchantKey && localSettings.payuMerchantKey !== 'gtKFFx' && !localSettings.payuMerchantKey.toLowerCase().includes('test')
-                      ? 'REAL MONEY MODE'
-                      : 'SANDBOX MODE'}
-                  </span>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs font-semibold text-slate-300">
-                      PayU Merchant Key <span className="text-rose-400">*</span>
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setLocalSettings({ ...localSettings, payuMerchantKey: 'JvSfdw', payuMode: 'live' });
-                        updatePlatformSettings({ payuMerchantKey: 'JvSfdw', payuMode: 'live' });
-                        showToast('Set to Live PayU Key (JvSfdw)', 'success');
-                      }}
-                      className="text-[10px] text-teal-400 hover:underline font-mono"
-                    >
-                      Use Live Key ('JvSfdw')
-                    </button>
-                  </div>
-                  <input
-                    type="text"
-                    value={localSettings.payuMerchantKey || ''}
-                    onChange={(e) => {
-                      const newKey = e.target.value;
-                      const isCustom = Boolean(newKey && newKey.trim() !== 'gtKFFx' && !newKey.toLowerCase().includes('test'));
-                      setLocalSettings({
-                        ...localSettings,
-                        payuMerchantKey: newKey,
-                        payuMode: isCustom ? 'live' : localSettings.payuMode,
-                      });
-                    }}
-                    onBlur={() => {
-                      const cleanKey = localSettings.payuMerchantKey?.trim() || 'JvSfdw';
-                      const isCustom = cleanKey !== 'gtKFFx' && !cleanKey.toLowerCase().includes('test');
-                      const nextMode = isCustom ? 'live' : (localSettings.payuMode || 'live');
-                      setLocalSettings({ ...localSettings, payuMerchantKey: cleanKey, payuMode: nextMode });
-                      updatePlatformSettings({ payuMerchantKey: cleanKey, payuMode: nextMode });
-                    }}
-                    className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300 focus:outline-none focus:border-teal-500"
-                    placeholder="Enter PayU Merchant Key"
-                  />
-                  <p className="text-[10px] text-slate-500 mt-1">Found in PayU Dashboard → Settings → API Credentials (Merchant Key: JvSfdw)</p>
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs font-semibold text-slate-300">
-                      PayU Merchant Salt <span className="text-rose-400">*</span>
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setLocalSettings({ ...localSettings, payuMerchantSalt: 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e' });
-                        updatePlatformSettings({ payuMerchantSalt: 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e' });
-                        showToast('Set to Live PayU Salt', 'success');
-                      }}
-                      className="text-[10px] text-teal-400 hover:underline font-mono"
-                    >
-                      Use Live Salt ('k6p3r...')
-                    </button>
-                  </div>
-                  <input
-                    type="password"
-                    value={localSettings.payuMerchantSalt || ''}
-                    onChange={(e) => setLocalSettings({ ...localSettings, payuMerchantSalt: e.target.value })}
-                    onBlur={() => {
-                      const cleanSalt = localSettings.payuMerchantSalt?.trim() || 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e';
-                      setLocalSettings({ ...localSettings, payuMerchantSalt: cleanSalt });
-                      updatePlatformSettings({ payuMerchantSalt: cleanSalt });
-                    }}
-                    className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-emerald-300 focus:outline-none focus:border-teal-500"
-                    placeholder="Enter PayU Merchant Salt"
-                  />
-                  <p className="text-[10px] text-slate-500 mt-1">Used for cryptographic SHA-512 payment hash computation & response verification</p>
-                </div>
-
-                {/* Gateway Environment Mode Toggle */}
-                <div className="md:col-span-2 p-3.5 rounded-xl bg-slate-900/90 border border-slate-700/80 flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <label className="text-xs font-bold text-slate-200 block">
-                      PayU Environment Mode (गेटवे मोड चुनें)
-                    </label>
-                    <p className="text-[10px] text-slate-400">
-                      Live mode uses real money on <code className="text-emerald-400 font-mono">secure.payu.in</code>. Test mode uses sandbox on <code className="text-amber-400 font-mono">test.payu.in</code>.
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const updated = { ...localSettings, payuMode: 'live' as const };
-                        setLocalSettings(updated);
-                        await updatePlatformSettings({ payuMode: 'live' });
-                        showToast('PayU Mode set to LIVE (secure.payu.in)', 'success');
-                      }}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                        localSettings.payuMode === 'live' || (!localSettings.payuMode && localSettings.payuMerchantKey !== 'gtKFFx')
-                          ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
-                          : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      <span>🟢</span> Live (Production - secure.payu.in)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const updated = { ...localSettings, payuMode: 'test' as const };
-                        setLocalSettings(updated);
-                        await updatePlatformSettings({ payuMode: 'test' });
-                        showToast('PayU Mode set to TEST Sandbox (test.payu.in)', 'info');
-                      }}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                        localSettings.payuMode === 'test' && localSettings.payuMerchantKey === 'gtKFFx'
-                          ? 'bg-amber-600 text-white shadow-lg shadow-amber-500/20'
-                          : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      <span>🧪</span> Test (Sandbox - test.payu.in)
-                    </button>
-                  </div>
-                </div>
-
-                {/* Instant Save PayU Credentials Button */}
-                <div className="md:col-span-2 flex justify-end">
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const cleanKey = localSettings.payuMerchantKey?.trim() || 'gtKFFx';
-                      const cleanSalt = localSettings.payuMerchantSalt?.trim() || '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW';
-                      const isCustom = cleanKey !== 'gtKFFx' && !cleanKey.toLowerCase().includes('test');
-                      const modeToSave = isCustom ? 'live' : (localSettings.payuMode || 'test');
-                      const toSave = {
-                        payuMerchantKey: cleanKey,
-                        payuMerchantSalt: cleanSalt,
-                        payuMode: modeToSave,
-                      };
-                      setLocalSettings({ ...localSettings, ...toSave });
-                      await updatePlatformSettings(toSave);
-                      showToast('✅ PayU credentials saved permanently to server & SQLite!', 'success');
-                    }}
-                    className="px-4 py-2 rounded-xl bg-gradient-to-r from-teal-500 to-emerald-600 hover:from-teal-400 hover:to-emerald-500 text-white font-bold text-xs shadow-lg shadow-teal-500/20 flex items-center gap-2 cursor-pointer transition-all"
-                  >
-                    <span>💾</span> Save & Apply PayU Credentials Now
-                  </button>
-                </div>
-
-                {/* Render.com Deployment Environment Guide Box */}
-                <div className="md:col-span-2 p-4 rounded-xl bg-indigo-950/40 border border-indigo-500/40 space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="text-base">🚀</span>
-                      <h5 className="text-xs font-bold text-indigo-300">
-                        Render.com Environment Variables Setup (Deploy Hone Ke Baad Ke Liye)
-                      </h5>
-                    </div>
-                    <span className="text-[10px] font-mono bg-indigo-500/20 text-indigo-200 px-2.5 py-0.5 rounded-full border border-indigo-500/30">
-                      Production Persistence Guide
-                    </span>
-                  </div>
-
-                  <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Render.com par redeploy hone par bhi credentials hamesha permanent live rakhne ke liye Render Dashboard → <strong>Web Service ('nexa')</strong> → <strong>Environment</strong> tab me jaakar ye 4 variables add karein:
-                  </p>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono">
-                    <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between">
-                      <div>
-                        <div className="text-[10px] text-slate-400 font-sans">Key:</div>
-                        <div className="text-emerald-400 font-bold">PAYU_MERCHANT_KEY</div>
-                        <div className="text-[10px] text-slate-500 truncate max-w-[180px]">Value: {localSettings.payuMerchantKey || 'Your Merchant Key'}</div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard?.writeText(localSettings.payuMerchantKey || '');
-                          showToast('Copied Merchant Key value for Render!', 'success');
-                        }}
-                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 transition-colors cursor-pointer"
-                      >
-                        Copy Value
-                      </button>
-                    </div>
-
-                    <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between">
-                      <div>
-                        <div className="text-[10px] text-slate-400 font-sans">Key:</div>
-                        <div className="text-emerald-400 font-bold">PAYU_MERCHANT_SALT</div>
-                        <div className="text-[10px] text-slate-500">Value: ••••••••</div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard?.writeText(localSettings.payuMerchantSalt || '');
-                          showToast('Copied Merchant Salt value for Render!', 'success');
-                        }}
-                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 transition-colors cursor-pointer"
-                      >
-                        Copy Value
-                      </button>
-                    </div>
-
-                    <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between">
-                      <div>
-                        <div className="text-[10px] text-slate-400 font-sans">Key:</div>
-                        <div className="text-emerald-400 font-bold">PAYU_MODE</div>
-                        <div className="text-[10px] text-cyan-400">Value: live</div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard?.writeText('live');
-                          showToast('Copied PAYU_MODE value ("live")!', 'success');
-                        }}
-                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 transition-colors cursor-pointer"
-                      >
-                        Copy 'live'
-                      </button>
-                    </div>
-
-                    <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between">
-                      <div>
-                        <div className="text-[10px] text-slate-400 font-sans">Key:</div>
-                        <div className="text-emerald-400 font-bold">APP_URL</div>
-                        <div className="text-[10px] text-cyan-400 truncate max-w-[180px]">Value: {typeof window !== 'undefined' ? window.location.origin : 'https://nexatrad.site'}</div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const url = typeof window !== 'undefined' ? window.location.origin : 'https://nexatrad.site';
-                          navigator.clipboard?.writeText(url);
-                          showToast(`Copied APP_URL (${url})!`, 'success');
-                        }}
-                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 transition-colors cursor-pointer"
-                      >
-                        Copy URL
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* PayU Merchant Name & Branding */}
-                <div className="md:col-span-2 p-4 rounded-xl bg-slate-950/70 border border-teal-500/30 space-y-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <h4 className="text-xs font-bold text-teal-400 flex items-center gap-1.5">
-                        <span>🏷️</span> PayU Checkout Brand Identity (Name & Logo)
-                      </h4>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        Controls brand name and logo displayed on PayU checkout and payment invoices
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const updated = {
-                          ...localSettings,
-                          payuMerchantName: 'Nexa AI',
-                          payuLogoUrl: '/logo.png',
-                          storeName: 'Nexa AI Retail Store',
-                          companyLegalName: 'Nexa AI Technologies India Pvt Ltd',
-                        };
-                        setLocalSettings(updated);
-                        await updatePlatformSettings({
-                          payuMerchantName: 'Nexa AI',
-                          payuLogoUrl: '/logo.png',
-                          storeName: 'Nexa AI Retail Store',
-                          companyLegalName: 'Nexa AI Technologies India Pvt Ltd',
-                        });
-                        showToast('Applied Nexa AI branding to PayU & saved!', 'success');
-                      }}
-                      className="px-3 py-1.5 rounded-lg bg-teal-500/20 hover:bg-teal-500/30 border border-teal-500/40 text-teal-300 text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm"
-                    >
-                      <span>✨</span> Apply Nexa AI Brand Preset
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">
-                        Merchant Brand Name in PayU
-                      </label>
-                      <input
-                        type="text"
-                        value={localSettings.payuMerchantName ?? 'Nexa AI'}
-                        onChange={(e) => setLocalSettings({ ...localSettings, payuMerchantName: e.target.value })}
-                        onBlur={async () => {
-                          const val = localSettings.payuMerchantName?.trim() || 'Nexa AI';
-                          await updatePlatformSettings({ payuMerchantName: val });
-                          showToast('PayU merchant name saved to cloud!', 'success');
-                        }}
-                        className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-semibold text-white focus:outline-none focus:border-teal-500"
-                        placeholder="Nexa AI"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">
-                        Merchant Logo URL in PayU
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <div className="w-9 h-9 rounded-lg bg-slate-900 border border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
-                          <img
-                            src={localSettings.payuLogoUrl || '/logo.png'}
-                            alt="Logo Preview"
-                            className="w-full h-full object-cover"
-                            onError={(e) => {
-                              (e.currentTarget as HTMLImageElement).src = '/logo.png';
-                            }}
-                          />
-                        </div>
-                        <input
-                          type="text"
-                          value={localSettings.payuLogoUrl ?? '/logo.png'}
-                          onChange={(e) => setLocalSettings({ ...localSettings, payuLogoUrl: e.target.value })}
-                          onBlur={async () => {
-                            const val = localSettings.payuLogoUrl?.trim() || '/logo.png';
-                            await updatePlatformSettings({ payuLogoUrl: val });
-                            showToast('PayU logo URL saved!', 'success');
-                          }}
-                          className="flex-1 px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-white focus:outline-none focus:border-teal-500"
-                          placeholder="/logo.png or https://..."
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* PayU Hosted URLs & Webhook Connection Guide */}
-              <div className="mt-4 p-4 rounded-xl bg-slate-950/80 border border-teal-500/30 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-800">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-teal-400 animate-pulse" />
-                    <h4 className="text-xs font-bold text-white uppercase tracking-wider">
-                      PayU Webhook & Callback Endpoints (SURL / FURL)
-                    </h4>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleTestWebhookPing}
-                    disabled={isTestingWebhook}
-                    className="px-2.5 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-[11px] font-bold flex items-center gap-1 transition-colors disabled:opacity-50"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${isTestingWebhook ? 'animate-spin' : ''}`} />
-                    <span>{isTestingWebhook ? 'Testing...' : 'Test PayU Webhook Ping'}</span>
-                  </button>
-                </div>
-
-                {webhookTestStatus && (
-                  <div
-                    className={`p-2.5 rounded-lg text-xs font-medium flex items-center gap-2 ${
-                      webhookTestStatus.ok
-                        ? 'bg-emerald-950/50 border border-emerald-500/40 text-emerald-300'
-                        : 'bg-rose-950/50 border border-rose-500/40 text-rose-300'
-                    }`}
-                  >
-                    {webhookTestStatus.ok ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                    ) : (
-                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-                    )}
-                    <span>{webhookTestStatus.msg}</span>
-                  </div>
-                )}
-
-                <div className="space-y-2.5 text-xs">
-                  {/* SURL & FURL (Return URL) */}
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-300 mb-1">
-                      1. PayU Response / Callback URL (SURL & FURL)
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1 p-2 rounded-lg bg-slate-900 border border-slate-700 font-mono text-[11px] text-cyan-300 select-all truncate">
-                        {typeof window !== 'undefined'
-                          ? `${window.location.origin}/api/payu/response`
-                          : 'https://your-domain.com/api/payu/response'}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const url =
-                            typeof window !== 'undefined'
-                              ? `${window.location.origin}/api/payu/response`
-                              : 'https://your-domain.com/api/payu/response';
-                          navigator.clipboard.writeText(url);
-                          setCopiedWebhookUrl(true);
-                          setTimeout(() => setCopiedWebhookUrl(false), 2000);
-                        }}
-                        className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shrink-0"
-                      >
-                        {copiedWebhookUrl ? (
-                          <>
-                            <Check className="w-3.5 h-3.5 text-emerald-400" />
-                            <span className="text-emerald-400">Copied!</span>
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="w-3.5 h-3.5" />
-                            <span>Copy URL</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Webhook Server URL */}
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-300 mb-1">
-                      2. PayU Webhook / Notification URL (Paste into PayU Dashboard Webhook URL)
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1 p-2 rounded-lg bg-slate-900 border border-slate-700 font-mono text-[11px] text-emerald-300 select-all truncate">
-                        {typeof window !== 'undefined'
-                          ? `${window.location.origin}/api/payu/webhook`
-                          : 'https://your-domain.com/api/payu/webhook'}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const url =
-                            typeof window !== 'undefined'
-                              ? `${window.location.origin}/api/payu/webhook`
-                              : 'https://your-domain.com/api/payu/webhook';
-                          navigator.clipboard.writeText(url);
-                          setCopiedWebhookSecret(true);
-                          setTimeout(() => setCopiedWebhookSecret(false), 2000);
-                        }}
-                        className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shrink-0"
-                      >
-                        {copiedWebhookSecret ? (
-                          <>
-                            <Check className="w-3.5 h-3.5 text-emerald-400" />
-                            <span className="text-emerald-400">Copied!</span>
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="w-3.5 h-3.5" />
-                            <span>Copy Webhook URL</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
 
             {/* Razorpay E-Commerce Shopping Category & Compliance Settings */}
             <div className="p-5 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-4">
@@ -5062,14 +4488,14 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
                     />
                     <div className="flex flex-wrap items-center gap-1.5 mt-2">
                       <span className="text-[10px] text-slate-400">Quick Suffix:</span>
-                      {['@paytm', '@okaxis', '@okhdfcbank', '@icici', '@ybl', '@postbank', '@upi'].map((suf) => (
+                      {['@fbpe', '@yesbankltd', '@paytm', '@okaxis', '@okhdfcbank', '@icici', '@ybl', '@upi'].map((suf) => (
                         <button
                           key={suf}
                           type="button"
                           onClick={() => {
                             const current = localSettings.merchantUpiId || '';
                             const prefix = current.includes('@') ? current.split('@')[0] : current;
-                            setLocalSettings({ ...localSettings, merchantUpiId: `${prefix || 'nexaai'}${suf}` });
+                            setLocalSettings({ ...localSettings, merchantUpiId: `${prefix || 'bharatpe'}${suf}` });
                           }}
                           className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors cursor-pointer"
                         >
@@ -5118,17 +4544,75 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
                     </div>
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">
-                      Custom Fallback QR Code Image URL (Optional)
+                  <div className="space-y-2">
+                    <label className="block text-xs font-semibold text-slate-300 flex items-center justify-between gap-2">
+                      <span>Official BharatPe / Business QR Image (Upload Photo ya URL daalein)</span>
+                      {localSettings.merchantQrUrl && (
+                        <button
+                          type="button"
+                          onClick={() => setLocalSettings({ ...localSettings, merchantQrUrl: '' })}
+                          className="text-[10px] text-rose-400 hover:text-rose-300 flex items-center gap-1 cursor-pointer"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>Clear QR Image</span>
+                        </button>
+                      )}
                     </label>
-                    <input
-                      type="text"
-                      value={localSettings.merchantQrUrl || ''}
-                      onChange={(e) => setLocalSettings({ ...localSettings, merchantQrUrl: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300 focus:outline-none focus:border-cyan-500"
-                      placeholder="Optional: https://... (Leave blank to use auto dynamic vector QR)"
-                    />
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="text"
+                        value={localSettings.merchantQrUrl || ''}
+                        onChange={(e) => setLocalSettings({ ...localSettings, merchantQrUrl: e.target.value })}
+                        className="flex-1 px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300 focus:outline-none focus:border-cyan-500"
+                        placeholder="Optional: Paste URL OR upload BharatPe QR screenshot →"
+                      />
+                      <label className="px-3 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer shrink-0 shadow-sm">
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Upload BharatPe QR</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            const reader = new FileReader();
+                            reader.onload = () => {
+                              const rawDataUrl = String(reader.result || '');
+                              if (!rawDataUrl) return;
+                              // Keep small crisp QR photos untouched; resize large photos keeping crisp QR edges
+                              if (file.size <= 350 * 1024) {
+                                setLocalSettings({ ...localSettings, merchantQrUrl: rawDataUrl });
+                                showToast('BharatPe QR photo uploaded! Ab "Save UPI Gateway Settings" par click karein.', 'success');
+                                return;
+                              }
+                              const img = new Image();
+                              img.onload = () => {
+                                const maxDim = 720;
+                                const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+                                const canvas = document.createElement('canvas');
+                                canvas.width = Math.max(1, Math.round(img.width * scale));
+                                canvas.height = Math.max(1, Math.round(img.height * scale));
+                                const ctx = canvas.getContext('2d');
+                                if (ctx) {
+                                  ctx.imageSmoothingEnabled = false;
+                                  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                                  const optimizedUrl = canvas.toDataURL('image/png');
+                                  setLocalSettings({ ...localSettings, merchantQrUrl: optimizedUrl });
+                                  showToast('BharatPe QR photo uploaded! Ab "Save UPI Gateway Settings" par click karein.', 'success');
+                                }
+                              };
+                              img.src = rawDataUrl;
+                            };
+                            reader.readAsDataURL(file);
+                            e.target.value = '';
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <p className="text-[10px] text-slate-400">
+                      💡 Apna <strong>BharatPe Business QR photo</strong> upload karne se users ko aapka asli verified BharatPe QR dikhega (aur BharatPe UPI ID copy karke ₹1,00,000 tak pay kar sakenge).
+                    </p>
                   </div>
 
                   <div>
@@ -5179,10 +4663,10 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
                       <div>
                         <div className="text-xs font-bold text-white flex items-center gap-1.5">
                           <QrCode className="w-4 h-4 text-cyan-400" />
-                          <span>Show / Hide Raw UPI ID & App Intent Buttons</span>
+                          <span>Direct UPI App & Copy VPA Buttons (For ₹2,000+ Payments)</span>
                         </div>
                         <p className="text-[10px] text-slate-400 mt-0.5">
-                          यूजर स्क्रीन पर केवल QR Code और अमाउंट दिखेगा। VPA टेक्स्ट और PhonePe/GPay/Paytm बटन्स छिपे रहेंगे।
+                          ऑन रखने पर यूजर को Direct Navi/PhonePe/GPay बटन और Copy UPI ID दिखेगा (₹2,000 से ऊपर ₹2,000 gallery screenshot error अपने आप बायपास रहेगा)।
                         </p>
                       </div>
                       <button
@@ -5190,16 +4674,16 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
                         onClick={() =>
                           setLocalSettings({
                             ...localSettings,
-                            showUpiVpaDetails: !localSettings.showUpiVpaDetails,
+                            showUpiVpaDetails: localSettings.showUpiVpaDetails === false,
                           })
                         }
                         className={`px-3 py-1.5 rounded-xl text-xs font-bold shrink-0 transition-colors cursor-pointer ${
-                          !localSettings.showUpiVpaDetails
-                            ? 'bg-emerald-600/30 text-emerald-300 border border-emerald-500/30'
+                          localSettings.showUpiVpaDetails !== false
+                            ? 'bg-emerald-600 text-white shadow-sm'
                             : 'bg-slate-800 text-slate-300 border border-slate-700'
                         }`}
                       >
-                        {!localSettings.showUpiVpaDetails ? 'HIDDEN (QR Scan Only)' : 'VISIBLE'}
+                        {localSettings.showUpiVpaDetails !== false ? 'VISIBLE (Recommended)' : 'HIDDEN (< ₹2k Only)'}
                       </button>
                     </div>
                   </div>
@@ -5229,17 +4713,19 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
                 <div className="p-4 rounded-2xl bg-slate-950/90 border border-emerald-500/20 flex flex-col items-center justify-between text-center relative overflow-hidden">
                   <div className="w-full pb-2 mb-2 border-b border-slate-800/80 flex items-center justify-between">
                     <span className="text-[11px] font-bold text-emerald-400 flex items-center gap-1">
-                      <Sparkles className="w-3 h-3" /> Live Dynamic QR
+                      <Sparkles className="w-3 h-3" />{' '}
+                      {localSettings.merchantQrUrl ? 'Official BharatPe / Merchant QR' : 'Live Dynamic QR'}
                     </span>
                     <span className="text-[9px] bg-slate-800 px-2 py-0.5 rounded-full text-slate-400 font-mono">
-                      Test Sample: ₹500
+                      {localSettings.merchantQrUrl ? 'Uploaded QR Active' : 'Sample: ₹500'}
                     </span>
                   </div>
 
                   {(() => {
-                    const upiId = localSettings.merchantUpiId || 'nexaai.pay@icici';
+                    const upiId = (localSettings.merchantUpiId || 'nexaai.pay@icici').replace(/\s+/g, '').trim();
                     const payee = localSettings.merchantPayeeName || 'Nexa AI Technologies';
-                    const testString = `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(payee)}&am=500&cu=INR&tn=${encodeURIComponent('Add Money Sample')}`;
+                    const cleanPayee = payee.replace(/[^a-zA-Z0-9]/g, '').slice(0, 25) || 'NexaAI';
+                    const testString = `upi://pay?pa=${upiId}&pn=${cleanPayee}&am=500&cu=INR&tn=NXSAMPLE`;
                     const liveQrUrl = localSettings.merchantQrUrl
                       ? localSettings.merchantQrUrl
                       : `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(testString)}&margin=6`;
@@ -6071,6 +5557,11 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
         {activeTab === 'banners' && <AdminBannerManager />}
 
         {/* ========================================================= */}
+        {/* TAB: GOOGLE ADMOB BANNER ADS MANAGER */}
+        {/* ========================================================= */}
+        {activeTab === 'admob' && <AdminAdMobManager />}
+
+        {/* ========================================================= */}
         {/* TAB: OTP & SMS TEMPLATES MANAGER (ADMIN CONTROL) */}
         {/* ========================================================= */}
         {activeTab === 'otp' && (
@@ -6859,10 +6350,22 @@ Products Sold: Nexa Neural Edge Compute Sticks, Quantum Home Hubs, AI GPU Comput
                                     ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
                                     : log.purpose === 'forgot-password'
                                     ? 'bg-orange-500/15 text-orange-300 border border-orange-500/30'
+                                    : log.purpose === 'withdraw'
+                                    ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
+                                    : log.purpose === 'p2p'
+                                    ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
                                     : 'bg-purple-500/15 text-purple-300 border border-purple-500/30'
                                 }`}
                               >
-                                {log.purpose === 'register' ? 'Registration' : log.purpose === 'forgot-password' ? 'Forgot Pass' : 'Admin Test'}
+                                {log.purpose === 'register'
+                                  ? 'Registration'
+                                  : log.purpose === 'forgot-password'
+                                  ? 'Forgot Pass'
+                                  : log.purpose === 'withdraw'
+                                  ? 'Withdrawal'
+                                  : log.purpose === 'p2p'
+                                  ? 'P2P Transfer'
+                                  : 'Admin Test'}
                               </span>
                             </td>
                             <td className="py-3 px-3 whitespace-nowrap">

@@ -33,22 +33,48 @@ declare global {
     ReactNativeWebView?: {
       postMessage: (msg: string) => void;
     };
+    __NEXA_ADMOB_CONFIG__?: {
+      enabled: boolean;
+      isTestMode: boolean;
+      appId: string;
+      bannerUnitId: string;
+      publisherId: string;
+      adSenseSlot: string;
+      bannerSize: string;
+      position: string;
+    };
   }
 }
 
-const TEST_APP_ID = 'ca-app-pub-3940256099942544~3347511713';
+const LIVE_DEFAULT_APP_ID = 'ca-app-pub-6701253514262817~4453946322';
+const LIVE_DEFAULT_BANNER_UNIT_ID = 'ca-app-pub-6701253514262817/2657487227';
 const TEST_BANNER_UNIT_ID = 'ca-app-pub-3940256099942544/6300978111';
+const TEST_PUB_ID = 'pub-3940256099942544';
 
 export function deriveAdMobPublisherId(settings?: Partial<PlatformSettings>): string {
-  const explicit = String(settings?.adMobPublisherId || '').trim();
-  if (explicit) {
-    const cleaned = explicit.replace(/^ca-/, '');
-    return cleaned.startsWith('pub-') ? cleaned : `pub-${cleaned.replace(/^pub-/, '')}`;
-  }
+  const rawExplicit = String(settings?.adMobPublisherId || '').trim().replace(/^ca-/, '');
+  const normalizedExplicit = rawExplicit
+    ? rawExplicit.startsWith('pub-')
+      ? rawExplicit.toLowerCase()
+      : `pub-${rawExplicit.replace(/^pub-/i, '').toLowerCase()}`
+    : '';
   const source = String(settings?.adMobAppId || settings?.adMobBannerUnitId || '').trim();
   const match = source.match(/ca-app-(pub-\d+)/i) || source.match(/(pub-\d+)/i);
-  if (match?.[1]) return match[1].toLowerCase();
-  return 'pub-3940256099942544';
+  const derivedFromIds = match?.[1] ? match[1].toLowerCase() : '';
+
+  if (normalizedExplicit && normalizedExplicit !== TEST_PUB_ID) {
+    return normalizedExplicit;
+  }
+  if (derivedFromIds && derivedFromIds !== TEST_PUB_ID) {
+    return derivedFromIds;
+  }
+  if (normalizedExplicit) {
+    return normalizedExplicit;
+  }
+  if (derivedFromIds) {
+    return derivedFromIds;
+  }
+  return TEST_PUB_ID;
 }
 
 const SAMPLE_CREATIVES = [
@@ -73,6 +99,7 @@ const SAMPLE_CREATIVES = [
 ];
 
 let capacitorAdMobInitialized = false;
+let webAutoAdsInitializedForClient = '';
 
 export const AdMobBanner: React.FC<AdMobBannerProps> = ({
   placement,
@@ -85,8 +112,9 @@ export const AdMobBanner: React.FC<AdMobBannerProps> = ({
   const [dismissed, setDismissed] = useState(false);
   const [creativeIndex, setCreativeIndex] = useState(0);
   const [showAdInfo, setShowAdInfo] = useState(false);
+  const [adSenseStatus, setAdSenseStatus] = useState<'loading' | 'filled' | 'unfilled'>('loading');
   const adContainerRef = useRef<HTMLDivElement | null>(null);
-  const adsensePushedRef = useRef<string>('');
+  const insRef = useRef<HTMLModElement | null>(null);
 
   const effective = useMemo(
     () => ({
@@ -117,9 +145,9 @@ export const AdMobBanner: React.FC<AdMobBannerProps> = ({
     return false;
   }, [forceVisible, variant, configuredPosition]);
 
-  const isTestMode = effective.adMobTestMode !== false;
-  const appId = effective.adMobAppId?.trim() || TEST_APP_ID;
-  const bannerUnitId = effective.adMobBannerUnitId?.trim() || TEST_BANNER_UNIT_ID;
+  const isTestMode = effective.adMobTestMode === true;
+  const appId = effective.adMobAppId?.trim() || LIVE_DEFAULT_APP_ID;
+  const bannerUnitId = effective.adMobBannerUnitId?.trim() || LIVE_DEFAULT_BANNER_UNIT_ID;
   const publisherId = deriveAdMobPublisherId(effective);
   const adSenseSlot = effective.adSenseBannerSlot?.trim() || '';
   const bannerSize = effective.adMobBannerSize || 'ADAPTIVE_BANNER';
@@ -243,37 +271,93 @@ export const AdMobBanner: React.FC<AdMobBannerProps> = ({
     configuredPosition,
   ]);
 
-  // Dynamic Web AdSense script injection when Live Mode + AdSense slot configured
+  // Expose live AdMob config globally for hybrid Android/iOS WebView wrappers
+  useEffect(() => {
+    if (forceVisible || typeof window === 'undefined') return;
+    window.__NEXA_ADMOB_CONFIG__ = {
+      enabled: isEnabled,
+      isTestMode,
+      appId,
+      bannerUnitId,
+      publisherId,
+      adSenseSlot,
+      bannerSize,
+      position: configuredPosition,
+    };
+  }, [forceVisible, isEnabled, isTestMode, appId, bannerUnitId, publisherId, adSenseSlot, bannerSize, configuredPosition]);
+
+  // Dynamic Google AdSense account meta & Auto Ads / slot script injection when Live Mode + non-test Publisher ID
+  useEffect(() => {
+    if (forceVisible || !isEnabled || isTestMode || publisherId === TEST_PUB_ID) {
+      return;
+    }
+    if (typeof document === 'undefined') return;
+    const clientAttr = `ca-${publisherId}`;
+    let meta = document.querySelector<HTMLMetaElement>('meta[name="google-adsense-account"]');
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.name = 'google-adsense-account';
+      document.head.appendChild(meta);
+    }
+    if (meta.content !== clientAttr) {
+      meta.content = clientAttr;
+    }
+
+    if (!isNativeAdMobAvailable) {
+      const existingScript = document.querySelector<HTMLScriptElement>(
+        'script[src*="pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"]'
+      );
+      if (!existingScript) {
+        const script = document.createElement('script');
+        script.async = true;
+        script.crossOrigin = 'anonymous';
+        script.dataset.nexaAdsense = 'true';
+        script.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(
+          clientAttr
+        )}`;
+        document.head.appendChild(script);
+      }
+
+      if (webAutoAdsInitializedForClient !== clientAttr) {
+        webAutoAdsInitializedForClient = clientAttr;
+        try {
+          window.adsbygoogle = window.adsbygoogle || [];
+          window.adsbygoogle.push({
+            google_ad_client: clientAttr,
+            enable_page_level_ads: true,
+          });
+        } catch {}
+      }
+    }
+  }, [forceVisible, isEnabled, isTestMode, publisherId, isNativeAdMobAvailable]);
+
   useEffect(() => {
     if (!shouldRenderWebAdSense || !isEnabled || !isPlacementAllowed || !matchesVariant || dismissed) {
       return;
     }
-    if (typeof document === 'undefined') return;
+    if (typeof document === 'undefined' || !insRef.current) return;
 
-    const clientAttr = `ca-${publisherId}`;
-    const existingScript = document.querySelector<HTMLScriptElement>(
-      'script[data-nexa-adsense="true"]'
-    );
+    setAdSenseStatus('loading');
+    const el = insRef.current;
 
-    if (!existingScript) {
-      const script = document.createElement('script');
-      script.async = true;
-      script.crossOrigin = 'anonymous';
-      script.dataset.nexaAdsense = 'true';
-      script.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(
-        clientAttr
-      )}`;
-      document.head.appendChild(script);
-    }
+    const observer = new MutationObserver(() => {
+      const status = el.getAttribute('data-ad-status');
+      if (status === 'filled') {
+        setAdSenseStatus('filled');
+      } else if (status === 'unfilled') {
+        setAdSenseStatus('unfilled');
+      }
+    });
+    observer.observe(el, { attributes: true, attributeFilter: ['data-ad-status'] });
 
-    const pushKey = `${clientAttr}:${adSenseSlot}:${placement}:${variant}`;
-    if (adsensePushedRef.current !== pushKey) {
-      adsensePushedRef.current = pushKey;
+    if (!el.getAttribute('data-adsbygoogle-status')) {
       try {
         window.adsbygoogle = window.adsbygoogle || [];
         window.adsbygoogle.push({});
       } catch {}
     }
+
+    return () => observer.disconnect();
   }, [
     shouldRenderWebAdSense,
     isEnabled,
@@ -365,11 +449,14 @@ export const AdMobBanner: React.FC<AdMobBannerProps> = ({
   const bannerContent = (
     <div
       ref={adContainerRef}
+      data-admob-app-id={appId}
       data-admob-unit={bannerUnitId}
+      data-admob-publisher={publisherId}
+      data-admob-mode={isTestMode ? 'test' : 'live'}
       data-admob-placement={placement}
       className={`w-full rounded-xl border ${styles.shell} ${heightClass} px-3 py-2 flex items-center justify-between gap-2.5 relative overflow-hidden transition-colors`}
     >
-      {shouldRenderWebAdSense ? (
+      {shouldRenderWebAdSense && adSenseStatus !== 'unfilled' ? (
         <div className="w-full flex flex-col">
           <div className="flex items-center justify-between mb-1">
             <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${styles.badge}`}>
@@ -385,11 +472,13 @@ export const AdMobBanner: React.FC<AdMobBannerProps> = ({
             </button>
           </div>
           <ins
+            ref={insRef}
+            key={`${publisherId}:${adSenseSlot}:${placement}:${variant}`}
             className="adsbygoogle block w-full overflow-hidden"
             style={{ display: 'block', minHeight: effectiveSize === 'BANNER_320x50' ? 50 : 60 }}
             data-ad-client={`ca-${publisherId}`}
             data-ad-slot={adSenseSlot}
-            data-ad-format="horizontal"
+            data-ad-format="auto"
             data-full-width-responsive="true"
           />
         </div>
@@ -480,7 +569,7 @@ export const AdMobBanner: React.FC<AdMobBannerProps> = ({
   if (variant === 'docked-bottom') {
     return (
       <div
-        className={`fixed bottom-16 left-0 right-0 z-30 flex justify-center pointer-events-none px-2 pb-1.5 ${className}`}
+        className={`fixed bottom-[76px] left-0 right-0 z-30 flex justify-center pointer-events-none px-2 pb-1.5 ${className}`}
       >
         <div className="w-full max-w-md pointer-events-auto">{bannerContent}</div>
       </div>

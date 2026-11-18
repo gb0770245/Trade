@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   X,
   CheckCircle2,
@@ -6,34 +6,26 @@ import {
   ShieldCheck,
   Sparkles,
   AlertCircle,
+  AlertTriangle,
   Lock,
-  Layers,
-  Smartphone,
-  CreditCard,
-  Building2,
-  Wallet,
   QrCode,
   Copy,
   Check,
-  Zap,
-  Clock,
-  ExternalLink,
-  ChevronRight,
   RefreshCw,
+  Smartphone,
+  Download,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { triggerOfficialPayUPayment } from '../services/payuService';
+import { formatISTDateTime } from '../services/dbService';
 
 export const RechargeModal: React.FC = () => {
   const {
     user,
-    recharge,
     submitManualRecharge,
     closeModal,
     showToast,
     theme,
     platformSettings,
-    showPaymentFailedModal,
   } = useApp();
 
   const minDeposit =
@@ -41,27 +33,13 @@ export const RechargeModal: React.FC = () => {
       ? platformSettings.minRecharge
       : 0.01;
   const isRechargeAllowed = platformSettings?.isRechargeEnabled !== false;
-  const isPayUAllowed = Boolean(platformSettings?.isPayUEnabled);
-  const isManualUpiAllowed = platformSettings?.isManualUpiEnabled !== false;
-
-  // Active Gateway Tab: default strictly to manual_upi when PayU is hidden
-  const [activeGateway, setActiveGateway] = useState<'manual_upi' | 'payu'>('manual_upi');
-
-  useEffect(() => {
-    if (!isPayUAllowed) {
-      setActiveGateway('manual_upi');
-    }
-  }, [isPayUAllowed]);
 
   const PRESETS =
     minDeposit < 25
-      ? [minDeposit, 1, 5, 10, 25, 50, 100].filter((v, idx, arr) => arr.indexOf(v) === idx && v >= minDeposit)
-      : [25, 50, 100, 200, 500, 1000];
+      ? [minDeposit, 1, 5, 10, 20, 25, 50, 100].filter((v, idx, arr) => arr.indexOf(v) === idx && v >= minDeposit)
+      : [20, 25, 50, 100, 200, 500, 1000].filter((v) => v >= minDeposit);
   const [selectedAmount, setSelectedAmount] = useState<number>(() => (minDeposit < 25 ? minDeposit : 25));
   const [customAmount, setCustomAmount] = useState<string>('');
-
-  // Razorpay method selector
-  const [selectedMethod, setSelectedMethod] = useState<'all' | 'upi' | 'card' | 'netbanking' | 'wallet'>('all');
   const [isProcessing, setIsProcessing] = useState(false);
 
   // Manual UPI State
@@ -79,31 +57,38 @@ export const RechargeModal: React.FC = () => {
   const activeAmount = customAmount ? parseFloat(customAmount) || 0 : selectedAmount;
   // 1 USD converts to 100 INR in payment mode (minimum 1 INR for micro-deposits)
   const paymentInrAmount = Math.max(1, Math.round(activeAmount * 100));
+  const isAboveGalleryLimit = paymentInrAmount > 2000;
+  const showDirectPayAndVpa = platformSettings?.showUpiVpaDetails !== false || isAboveGalleryLimit;
 
   // Admin Configured UPI ID & Name
-  const adminUpiId = (platformSettings?.merchantUpiId || 'nexaai.pay@icici').trim();
+  const adminUpiId = (platformSettings?.merchantUpiId || 'nexaai.pay@icici').replace(/\s+/g, '').trim();
   const adminPayeeName = (platformSettings?.merchantPayeeName || 'Nexa AI Technologies').trim();
+  const cleanPayeeName = adminPayeeName.replace(/[^a-zA-Z0-9]/g, '').slice(0, 25) || 'NexaAI';
+  const hasCustomMerchantQr = Boolean(platformSettings?.merchantQrUrl && platformSettings.merchantQrUrl.trim() !== '');
 
-  // Dynamic NPCI UPI Link string
-  const upiNote = `Add Money ${user?.phone || user?.nickname || 'Member'}`;
-  const dynamicUpiString = `upi://pay?pa=${encodeURIComponent(adminUpiId)}&pn=${encodeURIComponent(
-    adminPayeeName
-  )}&am=${paymentInrAmount}&cu=INR&tn=${encodeURIComponent(upiNote)}`;
+  // Clean NPCI UPI QR Payload (no %40 encoding, clean alphanumeric pn/tn)
+  const cleanUserRef = String(user?.id || user?.phone || 'USER').replace(/[^a-zA-Z0-9]/g, '').slice(-10) || 'USER';
+  const upiNote = `NX${cleanUserRef}`;
+  const cleanAmountStr = Number.isInteger(paymentInrAmount) ? String(paymentInrAmount) : paymentInrAmount.toFixed(2);
+  const embedAmountInQr = platformSettings?.autoDynamicQrEnabled !== false;
+  const baseUpiParams = `pa=${adminUpiId}&pn=${cleanPayeeName}`;
+  const dynamicUpiString = embedAmountInQr
+    ? `upi://pay?${baseUpiParams}&am=${cleanAmountStr}&cu=INR&tn=${upiNote}`
+    : `upi://pay?${baseUpiParams}&cu=INR&tn=${upiNote}`;
 
-  // Dynamic QR Code Image URL
-  const dynamicQrCodeUrl =
-    platformSettings?.merchantQrUrl && platformSettings.merchantQrUrl.trim() !== ''
-      ? platformSettings.merchantQrUrl.trim()
-      : `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(
-          dynamicUpiString
-        )}&margin=10`;
+  // Official Uploaded Merchant QR (e.g. BharatPe) or Auto-Generated Dynamic QR
+  const dynamicQrCodeUrl = hasCustomMerchantQr
+    ? platformSettings!.merchantQrUrl!.trim()
+    : `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(
+        dynamicUpiString
+      )}&margin=10`;
 
   // Copy UPI ID
   const handleCopyUpi = () => {
     navigator.clipboard?.writeText(adminUpiId);
     setCopiedUpi(true);
-    showToast(`Copied UPI ID: ${adminUpiId}`, 'success');
-    setTimeout(() => setCopiedUpi(false), 2500);
+    showToast(`UPI ID Copied: ${adminUpiId} — Ab PhonePe / Navi / GPay me "To UPI ID" se pay karein!`, 'success');
+    setTimeout(() => setCopiedUpi(false), 3000);
   };
 
   // Copy Exact INR Amount
@@ -112,6 +97,27 @@ export const RechargeModal: React.FC = () => {
     setCopiedAmount(true);
     showToast(`Copied Amount: ₹${paymentInrAmount}`, 'success');
     setTimeout(() => setCopiedAmount(false), 2500);
+  };
+
+  // Download QR Image safely
+  const handleDownloadQr = async () => {
+    try {
+      const link = document.createElement('a');
+      if (dynamicQrCodeUrl.startsWith('data:')) {
+        link.href = dynamicQrCodeUrl;
+      } else {
+        const res = await fetch(dynamicQrCodeUrl);
+        const blob = await res.blob();
+        link.href = URL.createObjectURL(blob);
+      }
+      link.download = `BharatPe-UPI-QR-${paymentInrAmount}INR.png`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      showToast('QR Code downloaded! (Note: Phone Gallery upload ₹2,000 tak allowed hai)', 'success');
+    } catch {
+      showToast('QR save karne ke liye QR par long-press / screenshot lein.', 'info');
+    }
   };
 
   // Submit Manual UPI Deposit
@@ -139,7 +145,7 @@ export const RechargeModal: React.FC = () => {
           utr: cleanUtr,
           usd: activeAmount,
           inr: paymentInrAmount,
-          time: new Date().toLocaleTimeString(),
+          time: formatISTDateTime(Date.now()),
         });
       } else {
         showToast(res.message, 'error');
@@ -148,82 +154,6 @@ export const RechargeModal: React.FC = () => {
       showToast(err.message || 'Failed to submit payment proof.', 'error');
     } finally {
       setIsProcessing(false);
-    }
-  };
-
-  // Trigger Official PayU India Payment Gateway directly
-  const handlePayUPayment = async () => {
-    if (!isRechargeAllowed) {
-      showToast('Add Money is currently paused by platform administrator.', 'error');
-      return;
-    }
-    if (!isPayUAllowed) {
-      showToast('PayU payment gateway is currently disabled by administrator.', 'error');
-      return;
-    }
-    if (activeAmount < minDeposit) {
-      showToast(`Minimum deposit is $${minDeposit < 1 ? minDeposit.toFixed(2) : minDeposit} (₹${Math.max(1, Math.round(minDeposit * 100)).toLocaleString()})`, 'error');
-      return;
-    }
-    setIsProcessing(true);
-
-    try {
-      const merchantKey = platformSettings?.payuMerchantKey?.trim();
-      const merchantSalt = platformSettings?.payuMerchantSalt?.trim();
-      const isCustomLiveKey = Boolean(merchantKey && merchantKey !== 'gtKFFx' && !merchantKey.toLowerCase().includes('test'));
-      const merchantMode = (isCustomLiveKey || platformSettings?.payuMode === 'live') ? 'live' : 'test';
-      const merchantName = platformSettings?.payuMerchantName?.trim() || 'Nexa AI';
-
-      const result = await triggerOfficialPayUPayment({
-        key: merchantKey,
-        salt: merchantSalt,
-        mode: merchantMode,
-        amount: paymentInrAmount,
-        usdAmount: activeAmount,
-        merchantName,
-        themeColor: platformSettings?.payuThemeColor || '#0f766e',
-        userName: user?.nickname || 'Investor',
-        userPhone: user?.phone || '9999999999',
-        userId: user?.id || '833863',
-        purpose: 'recharge',
-        onSuccess: async (paymentId: string) => {
-          showToast(`PayU payment verified! $${activeAmount.toFixed(2)} added to your wallet (Ref: ${paymentId})`, 'success');
-          await recharge(activeAmount, 'PayU Instant', paymentId);
-          setIsProcessing(false);
-          closeModal();
-        },
-        onFailure: (reason: string) => {
-          setIsProcessing(false);
-          showPaymentFailedModal({
-            reason: reason || 'Transaction declined by bank or user.',
-            amountUsd: activeAmount,
-            amountInr: paymentInrAmount,
-            onRetry: () => {
-              handlePayUPayment();
-            },
-          });
-        },
-        onDismiss: () => {
-          setIsProcessing(false);
-          showPaymentFailedModal({
-            reason: 'Payment window was closed before completion.',
-            amountUsd: activeAmount,
-            amountInr: paymentInrAmount,
-            onRetry: () => {
-              handlePayUPayment();
-            },
-          });
-        },
-      });
-
-      if (!result.success && result.message) {
-        setIsProcessing(false);
-        showToast(result.message, 'error');
-      }
-    } catch (err: any) {
-      console.error('PayU trigger exception:', err);
-      setIsProcessing(false);
-      showToast(`Error opening PayU: ${err.message}`, 'error');
     }
   };
 
@@ -340,49 +270,12 @@ export const RechargeModal: React.FC = () => {
           </div>
         ) : (
           <div className="mt-3.5 space-y-4">
-            {/* Gateway Tabs Switcher: Only displayed if PayU Gateway is enabled */}
-            {isPayUAllowed && (
-              <div className="grid grid-cols-2 p-1 bg-slate-100 dark:bg-slate-800/80 rounded-2xl border border-slate-200 dark:border-slate-700 text-xs font-bold">
-                <button
-                  type="button"
-                  onClick={() => setActiveGateway('manual_upi')}
-                  className={`py-2 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                    activeGateway === 'manual_upi'
-                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
-                      : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-                  }`}
-                >
-                  <QrCode className="w-4 h-4" />
-                  <span>UPI Dynamic QR</span>
-                  <span className="text-[9px] bg-emerald-400 text-slate-950 px-1.5 py-0.2 rounded-full font-black">
-                    FAST
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setActiveGateway('payu')}
-                  className={`py-2 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                    activeGateway === 'payu'
-                      ? 'bg-teal-600 text-white shadow-md shadow-teal-600/30'
-                      : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-                  }`}
-                >
-                  <CreditCard className="w-4 h-4" />
-                  <span>PayU Gateway</span>
-                  <span className="text-[9px] bg-emerald-400 text-slate-950 px-1.5 py-0.2 rounded-full font-black">
-                    INSTANT
-                  </span>
-                </button>
-              </div>
-            )}
-
             {/* Quick Presets */}
             <div>
               <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">
                 Select Amount ($ USD)
               </label>
-              <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+              <div className="grid grid-cols-4 gap-2">
                 {PRESETS.map((amt) => {
                   const isSelected = !customAmount && selectedAmount === amt;
                   return (
@@ -393,11 +286,9 @@ export const RechargeModal: React.FC = () => {
                         setSelectedAmount(amt);
                         setCustomAmount('');
                       }}
-                      className={`py-2.5 px-2 rounded-xl text-xs font-bold transition-all relative cursor-pointer ${
+                      className={`py-2 px-2 rounded-xl text-xs font-bold transition-all relative cursor-pointer ${
                         isSelected
-                          ? activeGateway === 'manual_upi'
-                            ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30 ring-2 ring-emerald-500'
-                            : 'bg-teal-700 text-white shadow-md shadow-teal-700/20 ring-2 ring-teal-500'
+                          ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30 ring-2 ring-emerald-500'
                           : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200/60 dark:border-slate-700 hover:border-emerald-500'
                       }`}
                     >
@@ -451,270 +342,216 @@ export const RechargeModal: React.FC = () => {
             </div>
 
             {/* ============================================================== */}
-            {/* GATEWAY 1: MANUAL DYNAMIC UPI QR GATEWAY */}
+            {/* DYNAMIC UPI QR GATEWAY + HIGH-AMOUNT (>₹2,000) BYPASS */}
             {/* ============================================================== */}
-            {activeGateway === 'manual_upi' && (
-              <div className="space-y-4">
-                {/* Dynamic QR Code Card */}
-                <div className="p-4 rounded-3xl bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 border border-emerald-500/30 text-white shadow-xl flex flex-col items-center relative overflow-hidden">
-                  <div className="w-full flex items-center justify-between pb-2 mb-2 border-b border-slate-800 text-[11px]">
-                    <span className="font-bold text-emerald-400 flex items-center gap-1.5">
-                      <Sparkles className="w-3.5 h-3.5" />
-                      Dynamic NPCI QR Generated
-                    </span>
-                    <span className="text-slate-400 text-[10px]">
-                      Payee: <strong className="text-slate-200">{adminPayeeName}</strong>
-                    </span>
-                  </div>
-
-                  {/* QR Image Frame */}
-                  <div className="relative p-3 bg-white rounded-2xl shadow-2xl border-4 border-emerald-500/50 my-1 group">
-                    <img
-                      src={dynamicQrCodeUrl}
-                      alt="Dynamic UPI QR Code"
-                      className="w-44 h-44 sm:w-48 sm:h-48 object-contain rounded-lg transition-transform group-hover:scale-[1.02]"
-                    />
-                    <div className="absolute inset-0 rounded-xl pointer-events-none border border-emerald-400/30 animate-pulse" />
-                  </div>
-
-                  {/* Highlighted Amount */}
-                  <div className="mt-2 text-center">
-                    <div className="text-[11px] text-slate-400">Exact Amount to Pay</div>
-                    <div className="text-xl sm:text-2xl font-black text-emerald-400 tracking-tight flex items-center justify-center gap-1.5">
-                      <span>₹{paymentInrAmount.toLocaleString()} INR</span>
-                      <button
-                        type="button"
-                        onClick={handleCopyAmount}
-                        title="Copy INR Amount"
-                        className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer text-xs"
-                      >
-                        {copiedAmount ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                      </button>
+            <div className="space-y-4">
+              {/* Smart Alert when Amount > ₹2,000 explaining NPCI Gallery Cap & Zero-Error Methods */}
+              {isAboveGalleryLimit && (
+                <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/40 text-xs space-y-2">
+                  <div className="flex items-start gap-2 text-amber-800 dark:text-amber-300">
+                    <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <div className="font-extrabold">
+                        ₹2,000+ Payment Guide (₹1,00,000 Limit • Zero Error)
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-amber-900/90 dark:text-amber-200/90">
+                        NPCI rules ke mutabik PhonePe / Navi / GPay me <strong>QR Screenshot Gallery Upload</strong> se maximum <strong>₹2,000</strong> aur direct browser link par <strong>Security Block</strong> aata hai. <strong>₹{paymentInrAmount.toLocaleString()}</strong> 100% pass karne ke liye:
+                      </p>
+                      <ul className="text-[11px] space-y-0.5 list-disc pl-4 text-amber-900 dark:text-amber-200">
+                        <li>
+                          <strong>Same Phone (100% Working up to ₹1,00,000):</strong> Neeche se <strong>Copy UPI ID</strong> karein → PhonePe / Navi / GPay kholkar <strong>"To Bank / UPI ID"</strong> se pay karein.
+                        </li>
+                        <li>
+                          <strong>Camera Scan (₹1,00,000 Limit):</strong> Doosre phone ke live camera se neeche wala QR scan karein.
+                        </li>
+                      </ul>
                     </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedAmount(20);
+                      setCustomAmount('');
+                      showToast('Amount set to $20 (₹2,000) — Ab aap QR screenshot gallery se bhi pay kar sakte hain!', 'success');
+                    }}
+                    className="w-full py-1.5 px-3 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-[11px] font-bold text-amber-800 dark:text-amber-200 transition-colors cursor-pointer"
+                  >
+                    Ya ₹2,000 ($20) Select Karein (Gallery QR Upload ke liye)
+                  </button>
+                </div>
+              )}
 
-                  {/* Clean helper badge for QR scan */}
-                  <div className="mt-3 px-3.5 py-1.5 rounded-full bg-slate-800/90 border border-emerald-500/30 text-[11px] text-emerald-300 font-medium flex items-center gap-2 shadow-xs">
-                    <QrCode className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    <span>Open PhonePe, GPay, or Paytm & Scan this QR Code</span>
+              {/* Merchant / Dynamic QR Code Card */}
+              <div className="p-4 rounded-3xl bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 border border-emerald-500/30 text-white shadow-xl flex flex-col items-center relative overflow-hidden">
+                <div className="w-full flex items-center justify-between pb-2 mb-2 border-b border-slate-800 text-[11px]">
+                  <span className="font-bold text-emerald-400 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    {hasCustomMerchantQr ? 'Official BharatPe / Merchant QR' : 'Dynamic NPCI QR Generated'}
+                  </span>
+                  <span className="text-slate-400 text-[10px]">
+                    Payee: <strong className="text-slate-200">{adminPayeeName}</strong>
+                  </span>
+                </div>
+
+                {/* QR Image Frame */}
+                <div className="relative p-3 bg-white rounded-2xl shadow-2xl border-4 border-emerald-500/50 my-1 group">
+                  <img
+                    src={dynamicQrCodeUrl}
+                    alt="Merchant UPI QR Code"
+                    className="w-44 h-44 sm:w-48 sm:h-48 object-contain rounded-lg transition-transform group-hover:scale-[1.02]"
+                  />
+                  <div className="absolute inset-0 rounded-xl pointer-events-none border border-emerald-400/30 animate-pulse" />
+                </div>
+
+                {/* Highlighted Amount + Download QR */}
+                <div className="mt-2 text-center space-y-1.5">
+                  <div className="text-[11px] text-slate-400">Exact Amount to Pay</div>
+                  <div className="text-xl sm:text-2xl font-black text-emerald-400 tracking-tight flex items-center justify-center gap-1.5">
+                    <span>₹{paymentInrAmount.toLocaleString()} INR</span>
+                    <button
+                      type="button"
+                      onClick={handleCopyAmount}
+                      title="Copy INR Amount"
+                      className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer text-xs flex items-center gap-1"
+                    >
+                      {copiedAmount ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    </button>
                   </div>
+                  <button
+                    type="button"
+                    onClick={handleDownloadQr}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] font-bold text-slate-300 transition-colors cursor-pointer"
+                  >
+                    <Download className="w-3 h-3 text-emerald-400" />
+                    <span>Save QR Image</span>
+                  </button>
+                </div>
 
-                  {/* Optional: UPI ID Display & App Intent Buttons (Hidden by default as requested in screenshot) */}
-                  {platformSettings?.showUpiVpaDetails && (
-                    <>
-                      {/* UPI ID Display with 1-Click Copy */}
-                      <div className="w-full mt-3 p-2.5 rounded-xl bg-slate-800/90 border border-slate-700 flex items-center justify-between gap-2">
-                        <div className="min-w-0">
-                          <span className="text-[9px] text-slate-400 block uppercase font-mono tracking-wider">
-                            Merchant UPI ID (VPA)
-                          </span>
-                          <span className="text-xs sm:text-sm font-mono font-bold text-emerald-300 truncate block">
-                            {adminUpiId}
-                          </span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={handleCopyUpi}
-                          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-all shadow-md shrink-0 cursor-pointer active:scale-95"
-                        >
-                          {copiedUpi ? (
-                            <>
-                              <Check className="w-3.5 h-3.5" />
-                              <span>Copied!</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3.5 h-3.5" />
-                              <span>Copy UPI</span>
-                            </>
-                          )}
-                        </button>
-                      </div>
+                {/* Clean helper badge for QR scan */}
+                <div className="mt-3 px-3.5 py-1.5 rounded-full bg-slate-800/90 border border-emerald-500/30 text-[11px] text-emerald-300 font-medium flex items-center gap-2 shadow-xs text-center">
+                  <QrCode className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>
+                    {isAboveGalleryLimit
+                      ? 'Camera se Scan karein ya neeche UPI ID Copy karke Pay karein'
+                      : 'PhonePe, Navi, GPay ya Paytm se QR Scan karke pay karein'}
+                  </span>
+                </div>
 
-                      {/* 1-Click Direct Mobile UPI Intent Buttons */}
-                      <div className="w-full mt-3 pt-2.5 border-t border-slate-800/90">
-                        <div className="text-[10px] text-slate-400 text-center mb-1.5">
-                          Or Open Directly in UPI App (Mobile Only):
-                        </div>
-                        <div className="grid grid-cols-4 gap-1.5">
-                          <a
-                            href={dynamicUpiString}
-                            className="py-1.5 px-1 rounded-lg bg-slate-800 hover:bg-purple-900/60 border border-purple-500/30 text-[10px] font-bold text-purple-300 text-center truncate block transition-colors"
-                          >
-                            PhonePe
-                          </a>
-                          <a
-                            href={dynamicUpiString}
-                            className="py-1.5 px-1 rounded-lg bg-slate-800 hover:bg-blue-900/60 border border-blue-500/30 text-[10px] font-bold text-blue-300 text-center truncate block transition-colors"
-                          >
-                            GPay
-                          </a>
-                          <a
-                            href={dynamicUpiString}
-                            className="py-1.5 px-1 rounded-lg bg-slate-800 hover:bg-sky-900/60 border border-sky-500/30 text-[10px] font-bold text-sky-300 text-center truncate block transition-colors"
-                          >
-                            Paytm
-                          </a>
-                          <a
-                            href={dynamicUpiString}
-                            className="py-1.5 px-1 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-[10px] font-bold text-emerald-300 text-center truncate block transition-colors"
-                          >
-                            Any UPI
-                          </a>
-                        </div>
+                {/* 100% Working UPI ID Payment Flow (Zero Security Reason / Zero ₹2k Gallery Error) */}
+                {showDirectPayAndVpa && (
+                  <div className="w-full mt-3.5 pt-3 border-t border-slate-800/90 space-y-2.5">
+                    {/* UPI ID Display with 1-Click Copy */}
+                    <div className="w-full p-3 rounded-2xl bg-emerald-950/50 border border-emerald-500/50 flex items-center justify-between gap-2 shadow-inner">
+                      <div className="min-w-0">
+                        <span className="text-[9px] text-emerald-400 block uppercase font-mono tracking-wider font-bold">
+                          100% Working • Zero Security Error • ₹1,00,000 Limit
+                        </span>
+                        <span className="text-xs sm:text-sm font-mono font-bold text-white truncate block mt-0.5">
+                          {adminUpiId}
+                        </span>
                       </div>
-                    </>
+                      <button
+                        type="button"
+                        onClick={handleCopyUpi}
+                        className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-all shadow-md shrink-0 cursor-pointer active:scale-95"
+                      >
+                        {copiedUpi ? (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Copied!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copy UPI ID</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {/* Step-by-step Same-Phone Payment Guide */}
+                    <div className="p-3 rounded-2xl bg-slate-800/80 border border-slate-700/80 text-[11px] text-slate-300 space-y-1.5">
+                      <div className="font-bold text-white flex items-center gap-1.5">
+                        <Smartphone className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span>Same Phone se Bina Error Pay Kaise Karein (3 Easy Steps):</span>
+                      </div>
+                      <ol className="list-decimal pl-4 space-y-1 text-[10px] text-slate-300 leading-relaxed">
+                        <li>
+                          Upar <strong>Copy UPI ID</strong> par tap karein (aur amount <strong className="text-emerald-300">₹{paymentInrAmount.toLocaleString()}</strong> note/copy karein).
+                        </li>
+                        <li>
+                          Apna <strong>PhonePe / Navi / GPay / Paytm</strong> app kholein aur <strong className="text-white">"To Bank / UPI ID"</strong> par jaayein.
+                        </li>
+                        <li>
+                          UPI ID paste karke <strong className="text-emerald-300">₹{paymentInrAmount.toLocaleString()}</strong> pay karein, fir 12-digit UTR neeche submit karein.
+                        </li>
+                      </ol>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Step 2: Form to Submit 12-Digit UTR */}
+              <form
+                onSubmit={handleSubmitManualUpi}
+                className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-3"
+              >
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
+                    <span className="w-4 h-4 rounded-full bg-emerald-600 text-white text-[10px] font-bold flex items-center justify-center">
+                      2
+                    </span>
+                    <span>Enter 12-Digit UPI UTR / Reference No.</span>
+                  </label>
+                  <span
+                    className={`text-[10px] font-mono font-bold ${
+                      utrNumber.trim().length === 12
+                        ? 'text-emerald-500'
+                        : 'text-slate-400'
+                    }`}
+                  >
+                    {utrNumber.trim().length} / 12 Digits
+                  </span>
+                </div>
+
+                <div className="relative">
+                  <input
+                    type="text"
+                    maxLength={16}
+                    value={utrNumber}
+                    onChange={(e) => setUtrNumber(e.target.value.replace(/\s+/g, ''))}
+                    placeholder="e.g. 430987123456 (Found in UPI receipt)"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 text-sm font-mono font-bold text-slate-900 dark:text-emerald-400 tracking-wider focus:outline-none focus:border-emerald-500"
+                  />
+                  {utrNumber.trim().length === 12 && (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-500 absolute right-3 top-1/2 -translate-y-1/2" />
                   )}
                 </div>
 
-                {/* Step 2: Form to Submit 12-Digit UTR */}
-                <form
-                  onSubmit={handleSubmitManualUpi}
-                  className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-3"
-                >
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
-                      <span className="w-4 h-4 rounded-full bg-emerald-600 text-white text-[10px] font-bold flex items-center justify-center">
-                        2
-                      </span>
-                      <span>Enter 12-Digit UPI UTR / Reference No.</span>
-                    </label>
-                    <span
-                      className={`text-[10px] font-mono font-bold ${
-                        utrNumber.trim().length === 12
-                          ? 'text-emerald-500'
-                          : 'text-slate-400'
-                      }`}
-                    >
-                      {utrNumber.trim().length} / 12 Digits
-                    </span>
-                  </div>
+                <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                  💡 Payment करने के बाद आपके PhonePe / Navi / GPay में 12 अंकों का <strong>UTR / UPI Ref ID</strong> मिलता है, उसे यहाँ डालकर सबमिट करें। एडमिन वेरिफाई करके तुरंत वॉलेट में क्रेडिट कर देगा।
+                </p>
 
-                  <div className="relative">
-                    <input
-                      type="text"
-                      maxLength={16}
-                      value={utrNumber}
-                      onChange={(e) => setUtrNumber(e.target.value.replace(/\s+/g, ''))}
-                      placeholder="e.g. 430987123456 (Found in UPI receipt)"
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 text-sm font-mono font-bold text-slate-900 dark:text-emerald-400 tracking-wider focus:outline-none focus:border-emerald-500"
-                    />
-                    {utrNumber.trim().length === 12 && (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-500 absolute right-3 top-1/2 -translate-y-1/2" />
-                    )}
-                  </div>
-
-                  <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                    💡 Payment करने के बाद आपके PhonePe / GPay में 12 अंकों का <strong>UTR / UPI Ref ID</strong> मिलता है, उसे यहाँ डालकर सबमिट करें। एडमिन वेरिफाई करके तुरंत वॉलेट में क्रेडिट कर देगा।
-                  </p>
-
-                  <button
-                    type="submit"
-                    disabled={isProcessing || !isRechargeAllowed || activeAmount < minDeposit}
-                    className="w-full py-3 rounded-xl font-bold text-white bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-700 hover:to-teal-800 transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                  >
-                    {isProcessing ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>Submitting Deposit Proof...</span>
-                      </>
-                    ) : (
-                      <>
-                        <CheckCircle2 className="w-4 h-4 text-emerald-300" />
-                        <span>Submit Payment Proof (पेमेंट सबमिट करें)</span>
-                        <ArrowRight className="w-4 h-4" />
-                      </>
-                    )}
-                  </button>
-                </form>
-              </div>
-            )}
-
-            {/* ============================================================== */}
-            {/* GATEWAY 2: PAYU INDIA ONLINE GATEWAY */}
-            {/* ============================================================== */}
-            {activeGateway === 'payu' && (
-              <div className="space-y-4">
-                {/* Payment Highlights & Badges */}
-                <div className="p-3.5 rounded-2xl bg-teal-500/10 border border-teal-500/30 text-teal-800 dark:text-teal-200">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <div className="w-7 h-7 rounded-lg bg-teal-600 text-white flex items-center justify-center font-black text-xs shadow-md">
-                        PayU
-                      </div>
-                      <div>
-                        <h4 className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
-                          <span>PayU India Official Checkout</span>
-                          <span className="text-[9px] bg-emerald-500 text-white px-1.5 py-0.2 rounded font-extrabold">VERIFIED</span>
-                        </h4>
-                        <p className="text-[10px] text-teal-700 dark:text-teal-300">
-                          100% Secure • Instant Auto-Credit to Wallet
-                        </p>
-                      </div>
-                    </div>
-                    <span className="text-xs font-extrabold text-teal-600 dark:text-teal-400 font-mono">
-                      ₹{paymentInrAmount.toLocaleString()} INR
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-teal-500/20 text-[10px]">
-                    <div className="flex items-center gap-1.5 text-slate-700 dark:text-slate-300">
-                      <Smartphone className="w-3.5 h-3.5 text-teal-600" />
-                      <span>PhonePe / GPay</span>
-                    </div>
-                    <div className="flex items-center gap-1.5 text-slate-700 dark:text-slate-300">
-                      <CreditCard className="w-3.5 h-3.5 text-teal-600" />
-                      <span>Debit/Credit Card</span>
-                    </div>
-                    <div className="flex items-center gap-1.5 text-slate-700 dark:text-slate-300">
-                      <Building2 className="w-3.5 h-3.5 text-teal-600" />
-                      <span>50+ NetBanking</span>
-                    </div>
-                    <div className="flex items-center gap-1.5 text-slate-700 dark:text-slate-300">
-                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                      <span>256-bit Encrypted</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Amount Confirmation Banner */}
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-center justify-between text-xs">
-                  <div>
-                    <span className="text-slate-500 dark:text-slate-400">Deposit Amount:</span>
-                    <span className="font-extrabold text-slate-900 dark:text-white ml-1.5">${activeAmount.toFixed(2)} USD</span>
-                  </div>
-                  <div className="text-right">
-                    <span className="text-slate-500 dark:text-slate-400">Total in INR:</span>
-                    <span className="font-extrabold text-teal-600 dark:text-teal-400 ml-1.5 font-mono">₹{paymentInrAmount.toLocaleString()}</span>
-                  </div>
-                </div>
-
-                {/* PayU Action CTA Button */}
                 <button
-                  type="button"
-                  onClick={handlePayUPayment}
-                  disabled={isProcessing || !isRechargeAllowed || !isPayUAllowed || activeAmount < minDeposit}
-                  className="w-full py-3.5 rounded-xl font-bold text-white bg-gradient-to-r from-teal-600 via-emerald-600 to-teal-700 hover:from-teal-700 hover:via-emerald-700 hover:to-teal-800 transition-all flex items-center justify-center gap-2 shadow-lg shadow-teal-600/30 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                  type="submit"
+                  disabled={isProcessing || !isRechargeAllowed || activeAmount < minDeposit}
+                  className="w-full py-3 rounded-xl font-bold text-white bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-700 hover:to-teal-800 transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                 >
                   {isProcessing ? (
                     <>
-                      <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      <span>Connecting to PayU India...</span>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Submitting Deposit Proof...</span>
                     </>
-                  ) : !isRechargeAllowed ? (
-                    <span>Add Money Paused by Admin</span>
-                  ) : !isPayUAllowed ? (
-                    <span>Gateway Unavailable</span>
                   ) : (
                     <>
-                      <Sparkles className="w-4 h-4 text-amber-300" />
-                      <span>Pay ₹{paymentInrAmount.toLocaleString()} INR via PayU (Add ${activeAmount.toFixed(2)})</span>
+                      <CheckCircle2 className="w-4 h-4 text-emerald-300" />
+                      <span>Submit Payment Proof (पेमेंट सबमिट करें)</span>
                       <ArrowRight className="w-4 h-4" />
                     </>
                   )}
                 </button>
-              </div>
-            )}
+              </form>
+            </div>
 
             {/* Trust & Compliance info */}
             <div className="pt-2 flex items-center justify-center gap-4 text-[10px] text-slate-400">
@@ -733,3 +570,4 @@ export const RechargeModal: React.FC = () => {
     </div>
   );
 };
+

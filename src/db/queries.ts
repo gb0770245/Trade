@@ -12,6 +12,97 @@ import {
 } from './schema.ts';
 import { eq, or, desc } from 'drizzle-orm';
 
+export function extractTxEpochMs(rawTxOrVal: any): number {
+  const parseStr = (raw: any): number => {
+    if (typeof raw === 'number') {
+      if (!Number.isNaN(raw) && raw > 1600000000000) return raw;
+      if (!Number.isNaN(raw) && raw > 1600000000) return raw * 1000;
+      return 0;
+    }
+    if (typeof raw === 'string') {
+      const s = raw.trim();
+      if (!s) return 0;
+      if (/^\d{13}$/.test(s)) return Number(s);
+      if (/\bIST$/i.test(s)) {
+        const istParsed = Date.parse(s.replace(/\s*IST$/i, ' +05:30'));
+        if (!Number.isNaN(istParsed)) return istParsed;
+      }
+      if (/(Z|UTC|GMT|[+-]\d{2}:?\d{2})$/i.test(s) || /^\d{4}-\d{2}-\d{2}T/.test(s)) {
+        const parsed = Date.parse(s);
+        if (!Number.isNaN(parsed)) return parsed;
+      }
+      const utcParsed = Date.parse(`${s} UTC`);
+      if (!Number.isNaN(utcParsed)) return utcParsed;
+      const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})[,\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i);
+      if (dmy) {
+        const [, dd, mm, yyyy, hh, min, sec = '00', ampm = ''] = dmy;
+        const normalized = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')} ${hh.padStart(2, '0')}:${min}:${sec}${ampm ? ` ${ampm.toUpperCase()}` : ''} UTC`;
+        const dmyParsed = Date.parse(normalized);
+        if (!Number.isNaN(dmyParsed)) return dmyParsed;
+      }
+      const fallback = Date.parse(s);
+      if (!Number.isNaN(fallback)) return fallback;
+    }
+    return 0;
+  };
+
+  if (!rawTxOrVal) return 0;
+  if (typeof rawTxOrVal !== 'object') return parseStr(rawTxOrVal);
+
+  const createdMs = parseStr(rawTxOrVal.createdAt);
+  if (createdMs > 1600000000000) return createdMs;
+
+  for (const field of [rawTxOrVal.id, rawTxOrVal.referenceNo]) {
+    if (field) {
+      const match = String(field).match(/(1[6-9]\d{11}|20\d{11})/);
+      if (match) {
+        const num = Number(match[1]);
+        if (!Number.isNaN(num) && num > 1600000000000) return num;
+      }
+    }
+  }
+
+  return parseStr(rawTxOrVal.timestamp);
+}
+
+export function formatISTTimestamp(dateInput: number | string | Date = Date.now()): string {
+  let d: Date;
+  if (dateInput instanceof Date) {
+    d = dateInput;
+  } else {
+    const ms = extractTxEpochMs(dateInput);
+    d = ms > 0 ? new Date(ms) : new Date();
+  }
+  if (Number.isNaN(d.getTime())) d = new Date();
+  return (
+    d
+      .toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+      })
+      .replace(/[\u202f\u00a0]/g, ' ')
+      .replace(/\b(am|pm)\b/i, (m) => m.toUpperCase()) + ' IST'
+  );
+}
+
+export function normalizeTxTimestampIST<T extends Record<string, any>>(tx: T): T {
+  if (!tx || typeof tx !== 'object') return tx;
+  const epochMs = extractTxEpochMs(tx);
+  const nextCreatedAt = (typeof tx.createdAt === 'number' && tx.createdAt > 1600000000000) ? tx.createdAt : (epochMs || undefined);
+  const nextTimestamp = epochMs > 0 ? formatISTTimestamp(epochMs) : tx.timestamp;
+  return {
+    ...tx,
+    ...(nextCreatedAt ? { createdAt: nextCreatedAt } : {}),
+    ...(nextTimestamp ? { timestamp: nextTimestamp } : {}),
+  };
+}
+
 // Fetch all users from Cloud SQL
 export async function getAllUsers() {
   if (!isSqlConfigured) return [];
@@ -62,10 +153,21 @@ export async function upsertUser(data: {
   totalReferrals?: number;
   totalCommissionEarned?: number;
   bankDetails?: any;
+  isExplicitZeroReset?: boolean;
+  explicitZeroWallets?: string[];
+  balanceUpdatedAt?: string;
+  updatedAt?: string;
 }) {
   if (!isSqlConfigured) return null;
   try {
     const existing = await findUser(data.uid || data.phone || '');
+    const nowIso = new Date().toISOString();
+    const parseTs = (val: any): number => {
+      if (!val) return 0;
+      const ms = Date.parse(String(val));
+      return Number.isNaN(ms) ? 0 : ms;
+    };
+
     if (existing) {
       const updateData: any = {};
       if (data.phone !== undefined) updateData.phone = data.phone;
@@ -76,19 +178,83 @@ export async function upsertUser(data: {
       if (data.invitedBy !== undefined) updateData.invitedBy = data.invitedBy;
       if (data.inviterName !== undefined) updateData.inviterName = data.inviterName;
       if (data.inviterId !== undefined) updateData.inviterId = data.inviterId;
-      if (data.rechargeBalance !== undefined) updateData.rechargeBalance = data.rechargeBalance;
-      if (data.withdrawalBalance !== undefined) updateData.withdrawalBalance = data.withdrawalBalance;
-      if (data.productRevenue !== undefined) updateData.productRevenue = data.productRevenue;
       if (data.vipLevel !== undefined) updateData.vipLevel = data.vipLevel;
-      if (data.totalInvested !== undefined) updateData.totalInvested = data.totalInvested;
       if (data.checkInStreak !== undefined) updateData.checkInStreak = data.checkInStreak;
       if (data.lastCheckInDate !== undefined) updateData.lastCheckInDate = data.lastCheckInDate;
       if (data.spinChances !== undefined) updateData.spinChances = data.spinChances;
       if (data.status !== undefined) updateData.status = data.status;
       if (data.role !== undefined) updateData.role = data.role;
       if (data.totalReferrals !== undefined) updateData.totalReferrals = data.totalReferrals;
-      if (data.totalCommissionEarned !== undefined) updateData.totalCommissionEarned = data.totalCommissionEarned;
       if (data.bankDetails !== undefined) updateData.bankDetails = data.bankDetails;
+
+      const existingBalTs =
+        parseTs((existing as any).balanceUpdatedAt) ||
+        ((Number(existing.rechargeBalance) || 0) > 0 ||
+        (Number(existing.withdrawalBalance) || 0) > 0 ||
+        (Number(existing.productRevenue) || 0) > 0 ||
+        (Number(existing.totalInvested) || 0) > 0 ||
+        (Number(existing.totalCommissionEarned) || 0) > 0
+          ? parseTs((existing as any).updatedAt) || parseTs(existing.createdAt)
+          : 0);
+      const incomingBalTs = parseTs(data.balanceUpdatedAt);
+      const existingStrictlyNewerBal =
+        existingBalTs > 0 && incomingBalTs > 0 && existingBalTs > incomingBalTs + 1000;
+
+      const existingZeroArr: string[] = Array.isArray((existing as any).explicitZeroWallets)
+        ? ((existing as any).explicitZeroWallets as string[])
+        : [];
+      const incomingZeroArr: string[] = Array.isArray(data.explicitZeroWallets)
+        ? data.explicitZeroWallets
+        : [];
+      const nextZeroSet = new Set<string>([...existingZeroArr, ...incomingZeroArr]);
+
+      const checkWalletUpdate = (
+        field: 'rechargeBalance' | 'withdrawalBalance' | 'productRevenue' | 'totalInvested' | 'totalCommissionEarned',
+        incomingVal: number | undefined
+      ): boolean => {
+        if (incomingVal === undefined || incomingVal === null || Number.isNaN(Number(incomingVal))) return false;
+        const incNum = Number(incomingVal);
+        const extNum = Number((existing as any)[field]) || 0;
+        if (existingStrictlyNewerBal) return false;
+        if (extNum > 0 && incNum === 0) {
+          const explicitAllowed =
+            Boolean(data.isExplicitZeroReset) ||
+            incomingZeroArr.includes(field);
+          if (!explicitAllowed) return false;
+        }
+        if (field === 'totalCommissionEarned' && extNum > incNum) {
+          const explicitAllowed = Boolean(data.isExplicitZeroReset) || incomingZeroArr.includes(field);
+          if (!explicitAllowed) return false;
+        }
+        updateData[field] = incNum;
+        if (incNum > 0) nextZeroSet.delete(field);
+        return Math.abs(incNum - extNum) > 0.0001;
+      };
+
+      const changedBal =
+        checkWalletUpdate('rechargeBalance', data.rechargeBalance) ||
+        checkWalletUpdate('withdrawalBalance', data.withdrawalBalance) ||
+        checkWalletUpdate('productRevenue', data.productRevenue) ||
+        checkWalletUpdate('totalInvested', data.totalInvested) ||
+        checkWalletUpdate('totalCommissionEarned', data.totalCommissionEarned);
+
+      if (data.isExplicitZeroReset !== undefined) {
+        updateData.isExplicitZeroReset = Boolean(data.isExplicitZeroReset);
+        if (data.isExplicitZeroReset === false && nextZeroSet.size === 0) {
+          updateData.explicitZeroWallets = [];
+        }
+      }
+      if (data.explicitZeroWallets !== undefined || changedBal) {
+        updateData.explicitZeroWallets = Array.from(nextZeroSet);
+      }
+
+      if (changedBal) {
+        updateData.balanceUpdatedAt =
+          incomingBalTs > existingBalTs ? data.balanceUpdatedAt : nowIso;
+      } else if (incomingBalTs > existingBalTs) {
+        updateData.balanceUpdatedAt = data.balanceUpdatedAt;
+      }
+      updateData.updatedAt = data.updatedAt || nowIso;
 
       const updated = await db
         .update(users)
@@ -97,6 +263,13 @@ export async function upsertUser(data: {
         .returning();
       return updated[0];
     } else {
+      const zeroArr = Array.isArray(data.explicitZeroWallets) ? data.explicitZeroWallets : [];
+      const hasNonZero =
+        (Number(data.rechargeBalance) || 0) > 0 ||
+        (Number(data.withdrawalBalance) || 0) > 0 ||
+        (Number(data.productRevenue) || 0) > 0 ||
+        (Number(data.totalInvested) || 0) > 0 ||
+        (Number(data.totalCommissionEarned) || 0) > 0;
       const inserted = await db
         .insert(users)
         .values({
@@ -122,6 +295,10 @@ export async function upsertUser(data: {
           totalReferrals: data.totalReferrals || 0,
           totalCommissionEarned: data.totalCommissionEarned || 0,
           bankDetails: data.bankDetails || null,
+          isExplicitZeroReset: Boolean(data.isExplicitZeroReset),
+          explicitZeroWallets: zeroArr,
+          balanceUpdatedAt: data.balanceUpdatedAt || (hasNonZero || data.isExplicitZeroReset || zeroArr.length > 0 ? nowIso : null),
+          updatedAt: data.updatedAt || nowIso,
         })
         .returning();
       return inserted[0];
@@ -219,6 +396,11 @@ export async function createTransaction(tx: {
       }
     }
 
+    const resolvedCreatedAt = extractTxEpochMs(tx) || Date.now();
+    const resolvedTimestamp = /\bIST$/i.test(String(tx.timestamp || '').trim())
+      ? String(tx.timestamp).trim()
+      : formatISTTimestamp(resolvedCreatedAt);
+
     const result = await db
       .insert(transactions)
       .values({
@@ -226,8 +408,8 @@ export async function createTransaction(tx: {
         type: tx.type,
         amount: Number(tx.amount) || 0,
         title: tx.title,
-        timestamp: tx.timestamp || new Date().toLocaleString(),
-        createdAt: tx.createdAt || Date.now(),
+        timestamp: resolvedTimestamp,
+        createdAt: resolvedCreatedAt,
         status: tx.status || 'completed',
         referenceNo: refNo,
         paymentMethod: tx.paymentMethod || null,
@@ -365,10 +547,20 @@ export async function refundUserWithdrawalInDb(userId: string, amount: number) {
 
     const currentBal = Number(target.withdrawalBalance) || 0;
     const newBal = Number((currentBal + amount).toFixed(2));
+    const nowIso = new Date().toISOString();
+    const existingZeros = Array.isArray((target as any).explicitZeroWallets)
+      ? ((target as any).explicitZeroWallets as string[]).filter((w) => w !== 'withdrawalBalance')
+      : [];
 
     const updated = await db
       .update(users)
-      .set({ withdrawalBalance: newBal })
+      .set({
+        withdrawalBalance: newBal,
+        isExplicitZeroReset: false,
+        explicitZeroWallets: existingZeros,
+        balanceUpdatedAt: nowIso,
+        updatedAt: nowIso,
+      })
       .where(eq(users.uid, target.uid))
       .returning();
 
@@ -487,15 +679,20 @@ export async function purgeAllTransactionsFromDb(): Promise<void> {
 }
 
 // Reset all users balances to 0 in Cloud SQL PostgreSQL
-export async function resetAllUsersBalancesInDb(): Promise<void> {
+export async function resetAllUsersBalancesInDb(resetIso?: string): Promise<void> {
   if (!isSqlConfigured) return;
   try {
+    const nowIso = resetIso || new Date().toISOString();
     await db.update(users).set({
       rechargeBalance: 0,
       withdrawalBalance: 0,
       productRevenue: 0,
       totalInvested: 0,
       totalCommissionEarned: 0,
+      isExplicitZeroReset: true,
+      explicitZeroWallets: ['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'totalCommissionEarned'],
+      balanceUpdatedAt: nowIso,
+      updatedAt: nowIso,
     });
     console.log('[PostgreSQL] Successfully reset all user balances to 0');
   } catch (err) {

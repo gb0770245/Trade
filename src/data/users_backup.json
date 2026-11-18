@@ -25,7 +25,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-03T10:58:03.386Z",
     "updatedAt": "2026-11-16T08:41:19.566Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "283754",
@@ -53,7 +54,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-03T13:41:33.192Z",
     "updatedAt": "2026-11-16T08:41:19.567Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "104473",
@@ -81,7 +83,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-03T17:37:51.313Z",
     "updatedAt": "2026-11-16T08:41:19.568Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "618717",
@@ -109,7 +112,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-03T10:40:27.922Z",
     "updatedAt": "2026-11-16T08:41:19.569Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "684973",
@@ -137,7 +141,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-03T10:38:02.713Z",
     "updatedAt": "2026-11-16T08:41:19.570Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "959918",
@@ -165,7 +170,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-03T10:31:25.611Z",
     "updatedAt": "2026-11-16T08:41:19.571Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "787126",
@@ -193,7 +199,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-03T10:15:56.676Z",
     "updatedAt": "2026-11-16T08:41:19.571Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "142988",
@@ -221,7 +228,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-03T10:20:53.407Z",
     "updatedAt": "2026-11-16T08:41:19.572Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "109378",
@@ -249,7 +257,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-03T10:09:36.547Z",
     "updatedAt": "2026-11-16T08:41:19.573Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "300775",
@@ -277,7 +286,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-03T10:01:42.630Z",
     "updatedAt": "2026-11-16T08:41:19.574Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "962228",
@@ -305,7 +315,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-02T05:14:28.059Z",
     "updatedAt": "2026-11-16T08:41:19.575Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "928544",
@@ -339,7 +350,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-01T20:45:33.180Z",
     "updatedAt": "2026-11-16T08:41:19.576Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "876089",
@@ -367,7 +379,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-02T01:29:31.604Z",
     "updatedAt": "2026-11-16T08:41:19.576Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "833656",
@@ -395,7 +408,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-02T02:30:01.775Z",
     "updatedAt": "2026-11-16T08:41:19.577Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "617291",
@@ -429,7 +443,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-02T07:23:13.773Z",
     "updatedAt": "2026-11-16T08:41:19.578Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "569973",
@@ -466,7 +481,8 @@
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
     ],
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "560113",
@@ -497,7 +513,8 @@
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
     ],
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "406332",
@@ -535,7 +552,8 @@
       "BSSBJJIEVJOVGYWBSK",
       "SYBYGEJEBUYIRIIR"
     ],
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "325697",
@@ -562,11 +580,12 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-02T01:22:00.237Z",
-    "updatedAt": "2026-11-16T09:02:53.356Z",
+    "updatedAt": "2026-11-17T14:30:23.273Z",
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
     ],
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "935211",
@@ -605,7 +624,8 @@
     "redeemedCodes": [
       "SYBYGEJEBUYIRIIR"
     ],
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "833863",
@@ -618,7 +638,7 @@
     "inviterName": "gaurav",
     "inviterId": "833863",
     "rechargeBalance": 0,
-    "withdrawalBalance": 0,
+    "withdrawalBalance": 1989,
     "productRevenue": 0,
     "vipLevel": 1,
     "totalInvested": 0,
@@ -627,7 +647,7 @@
     "spinChances": 2,
     "status": "active",
     "role": "admin",
-    "totalReferrals": 6,
+    "totalReferrals": 5,
     "totalCommissionEarned": 0,
     "bankDetails": {
       "accountHolder": "gaurav",
@@ -637,9 +657,11 @@
       "upiId": ""
     },
     "isDeleted": false,
+    "isExplicitZeroReset": false,
     "createdAt": "2026-10-31T03:08:35.291Z",
-    "updatedAt": "2026-11-16T09:02:53.357Z",
-    "isExplicitZeroReset": true
+    "updatedAt": "2026-11-17T14:40:51.914Z",
+    "balanceUpdatedAt": "2026-11-17T14:40:51.914Z",
+    "explicitZeroWallets": []
   },
   {
     "id": "453665",
@@ -651,7 +673,7 @@
     "invitedBy": "4AB86",
     "inviterName": "gaurav",
     "inviterId": "833863",
-    "rechargeBalance": 0,
+    "rechargeBalance": 5,
     "withdrawalBalance": 0,
     "productRevenue": 0,
     "vipLevel": 4,
@@ -672,8 +694,10 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T00:22:37.632Z",
-    "updatedAt": "2026-11-16T08:41:19.583Z",
-    "isExplicitZeroReset": false
+    "updatedAt": "2026-11-17T14:40:51.914Z",
+    "isExplicitZeroReset": false,
+    "balanceUpdatedAt": "2026-11-17T14:40:51.914Z",
+    "explicitZeroWallets": []
   },
   {
     "id": "752520",
@@ -700,8 +724,9 @@
     "bankDetails": null,
     "isDeleted": false,
     "createdAt": "2026-11-01T00:22:37.753Z",
-    "updatedAt": "2026-11-16T09:02:53.358Z",
-    "isExplicitZeroReset": false
+    "updatedAt": "2026-11-17T14:30:23.275Z",
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "812624",
@@ -729,7 +754,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-01T00:22:37.863Z",
     "updatedAt": "2026-11-16T08:41:19.585Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "950580",
@@ -757,7 +783,8 @@
     "isDeleted": false,
     "createdAt": "2026-11-01T02:54:15.104Z",
     "updatedAt": "2026-11-16T08:41:19.586Z",
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "644029",
@@ -788,7 +815,8 @@
     "redeemedCodes": [
       "BSSBJJIEVJOVGYWBSK"
     ],
-    "isExplicitZeroReset": false
+    "isExplicitZeroReset": false,
+    "explicitZeroWallets": []
   },
   {
     "id": "518604",
@@ -821,97 +849,8 @@
     },
     "isDeleted": false,
     "createdAt": "2026-11-01T07:33:04.366Z",
-    "updatedAt": "2026-11-16T09:02:53.358Z",
-    "isExplicitZeroReset": false
-  },
-  {
-    "id": "999993",
-    "phone": "9999930003",
-    "password": "password123",
-    "nickname": "__TEST_USER_R__",
-    "avatar": "HD",
-    "invitationCode": "TSTR93",
-    "invitedBy": null,
-    "inviterName": null,
-    "inviterId": null,
-    "rechargeBalance": 27.31,
-    "withdrawalBalance": 0,
-    "productRevenue": 0,
-    "vipLevel": 0,
-    "totalInvested": 0,
-    "checkInStreak": 0,
-    "lastCheckInDate": null,
-    "spinChances": 0,
-    "status": "active",
-    "role": "user",
-    "totalReferrals": 0,
-    "totalCommissionEarned": 0,
-    "bankDetails": null,
-    "isDeleted": false,
+    "updatedAt": "2026-11-17T14:30:23.276Z",
     "isExplicitZeroReset": false,
-    "createdAt": "2026-11-16T08:54:03.450Z",
-    "updatedAt": "2026-11-16T08:55:03.578Z"
-  },
-  {
-    "id": "999992",
-    "phone": "9999920002",
-    "password": "password123",
-    "nickname": "__TEST_USER_B__",
-    "avatar": "HD",
-    "invitationCode": "TSTB92",
-    "invitedBy": null,
-    "inviterName": null,
-    "inviterId": null,
-    "rechargeBalance": 0,
-    "withdrawalBalance": 0,
-    "productRevenue": 0,
-    "vipLevel": 0,
-    "totalInvested": 0,
-    "checkInStreak": 0,
-    "lastCheckInDate": null,
-    "spinChances": 0,
-    "status": "active",
-    "role": "user",
-    "totalReferrals": 0,
-    "totalCommissionEarned": 0,
-    "bankDetails": null,
-    "isDeleted": false,
-    "isExplicitZeroReset": true,
-    "createdAt": "2026-11-16T08:54:03.450Z",
-    "updatedAt": "2026-11-16T08:55:03.578Z"
-  },
-  {
-    "id": "999991",
-    "phone": "9999910001",
-    "password": "password123",
-    "nickname": "__TEST_USER_A__",
-    "avatar": "HD",
-    "invitationCode": "TSTA91",
-    "invitedBy": null,
-    "inviterName": null,
-    "inviterId": null,
-    "rechargeBalance": 0,
-    "withdrawalBalance": 0,
-    "productRevenue": 0,
-    "vipLevel": 0,
-    "totalInvested": 0,
-    "checkInStreak": 0,
-    "lastCheckInDate": null,
-    "spinChances": 0,
-    "status": "active",
-    "role": "user",
-    "totalReferrals": 0,
-    "totalCommissionEarned": 0,
-    "bankDetails": {
-      "accountHolder": "Test A",
-      "bankName": "SBI",
-      "accountNumber": "1234567890",
-      "ifscCode": "SBIN0000001",
-      "upiId": ""
-    },
-    "isDeleted": false,
-    "isExplicitZeroReset": true,
-    "createdAt": "2026-11-16T08:54:03.450Z",
-    "updatedAt": "2026-11-16T08:55:03.519Z"
+    "explicitZeroWallets": []
   }
 ]

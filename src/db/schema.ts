@@ -36,6 +36,10 @@ export const users = pgTable('users', {
   totalReferrals: integer('total_referrals').default(0),
   totalCommissionEarned: doublePrecision('total_commission_earned').default(0),
   bankDetails: jsonb('bank_details'),
+  isExplicitZeroReset: boolean('is_explicit_zero_reset').default(false),
+  explicitZeroWallets: jsonb('explicit_zero_wallets'),
+  balanceUpdatedAt: text('balance_updated_at'),
+  updatedAt: text('updated_at'),
   createdAt: timestamp('created_at').defaultNow(),
 });
 

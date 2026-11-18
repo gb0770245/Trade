@@ -36,6 +36,9 @@ import {
   purgeAllTransactionsFromDb,
   resetAllUsersBalancesInDb,
   initPostgresSchema,
+  formatISTTimestamp,
+  extractTxEpochMs,
+  normalizeTxTimestampIST,
 } from './src/db/queries.ts';
 import {
   getSqliteDb,
@@ -120,12 +123,13 @@ export interface OtpServerLog {
   id: string;
   mobile: string;
   otp: string;
-  purpose: 'register' | 'forgot-password' | 'test';
+  purpose: 'register' | 'forgot-password' | 'withdraw' | 'p2p' | 'test';
   message: string;
   status: 'pending' | 'verified' | 'wrong_otp' | 'expired';
   attempts: number;
   createdAt: string;
   expiresAt: number;
+  consumedAt?: number;
   provider?: string;
   senderId?: string;
   gatewayStatus?: string;
@@ -142,6 +146,8 @@ export interface ServerOtpSettings {
   masterFallbackOtp: string;
   registrationOtpTemplate: string;
   forgotPasswordOtpTemplate: string;
+  withdrawalOtpTemplate?: string;
+  p2pOtpTemplate?: string;
   helpCenterUrl?: string;
   helpCenterLinks?: any[];
 }
@@ -160,7 +166,7 @@ const DEFAULT_SERVER_PLATFORM_SETTINGS: Record<string, any> = {
   isManualUpiEnabled: true,
   autoDynamicQrEnabled: true,
   requireAdminRechargeApproval: true,
-  showUpiVpaDetails: false,
+  showUpiVpaDetails: true,
   minRecharge: 0.01,
   minWithdrawal: 2,
   withdrawalFeePercent: 5,
@@ -176,7 +182,57 @@ const DEFAULT_SERVER_PLATFORM_SETTINGS: Record<string, any> = {
   minP2PAmount: 1,
   maxP2PAmount: 50000,
   p2pNotice: '',
+  isAdMobEnabled: true,
+  adMobTestMode: false,
+  adMobAppId: 'ca-app-pub-6701253514262817~4453946322',
+  adMobBannerUnitId: 'ca-app-pub-6701253514262817/2657487227',
+  adMobPublisherId: 'pub-6701253514262817',
+  adSenseBannerSlot: '',
+  adMobBannerSize: 'ADAPTIVE_BANNER',
+  adMobPosition: 'inline',
+  adMobPlacements: {
+    home: true,
+    invest: true,
+    notice: true,
+    blog: true,
+    account: true,
+  },
+  adMobRefreshSeconds: 60,
+  adMobLiveMigratedV1: true,
 };
+
+const PERMANENT_LIVE_ADMOB_APP_ID = 'ca-app-pub-6701253514262817~4453946322';
+const PERMANENT_LIVE_ADMOB_BANNER_ID = 'ca-app-pub-6701253514262817/2657487227';
+const PERMANENT_LIVE_ADMOB_PUB_ID = 'pub-6701253514262817';
+const GOOGLE_TEST_ADMOB_APP_ID = 'ca-app-pub-3940256099942544~3347511713';
+const GOOGLE_TEST_ADMOB_BANNER_ID = 'ca-app-pub-3940256099942544/6300978111';
+const GOOGLE_TEST_ADMOB_PUB_ID = 'pub-3940256099942544';
+
+function deriveAdMobPublisherIdServer(settings?: Record<string, any>): string {
+  const rawExplicit = String(settings?.adMobPublisherId || '').trim().replace(/^ca-/, '');
+  const normalizedExplicit = rawExplicit
+    ? rawExplicit.startsWith('pub-')
+      ? rawExplicit.toLowerCase()
+      : `pub-${rawExplicit.replace(/^pub-/i, '').toLowerCase()}`
+    : '';
+  const source = String(settings?.adMobAppId || settings?.adMobBannerUnitId || '').trim();
+  const match = source.match(/ca-app-(pub-\d+)/i) || source.match(/(pub-\d+)/i);
+  const derivedFromIds = match?.[1] ? match[1].toLowerCase() : '';
+
+  if (normalizedExplicit && normalizedExplicit !== GOOGLE_TEST_ADMOB_PUB_ID) {
+    return normalizedExplicit;
+  }
+  if (derivedFromIds && derivedFromIds !== GOOGLE_TEST_ADMOB_PUB_ID) {
+    return derivedFromIds;
+  }
+  if (normalizedExplicit) {
+    return normalizedExplicit;
+  }
+  if (derivedFromIds) {
+    return derivedFromIds;
+  }
+  return GOOGLE_TEST_ADMOB_PUB_ID;
+}
 
 function initSqlitePlatformSettings(): void {
   try {
@@ -190,6 +246,19 @@ function initSqlitePlatformSettings(): void {
     `);
   } catch {}
 }
+
+const stripLegacyPayUKeys = (obj: Record<string, any>) => {
+  if (!obj || typeof obj !== 'object') return obj;
+  const cleaned = { ...obj };
+  delete cleaned.isPayUEnabled;
+  delete cleaned.payuMerchantKey;
+  delete cleaned.payuMerchantSalt;
+  delete cleaned.payuMode;
+  delete cleaned.payuMerchantName;
+  delete cleaned.payuLogoUrl;
+  delete cleaned.payuThemeColor;
+  return cleaned;
+};
 
 function loadServerPlatformSettings(): Record<string, any> {
   let fileSettings: Record<string, any> = {};
@@ -207,11 +276,11 @@ function loadServerPlatformSettings(): Record<string, any> {
     const row = db.prepare('SELECT settings_json FROM platform_settings_kv WHERE id = ?').get('global') as any;
     if (row?.settings_json) {
       const sqlSettings = JSON.parse(row.settings_json);
-      return { ...DEFAULT_SERVER_PLATFORM_SETTINGS, ...fileSettings, ...sqlSettings };
+      return stripLegacyPayUKeys({ ...DEFAULT_SERVER_PLATFORM_SETTINGS, ...fileSettings, ...sqlSettings });
     }
   } catch {}
 
-  return { ...DEFAULT_SERVER_PLATFORM_SETTINGS, ...fileSettings };
+  return stripLegacyPayUKeys({ ...DEFAULT_SERVER_PLATFORM_SETTINGS, ...fileSettings });
 }
 
 function saveServerPlatformSettings(next: Record<string, any>): Record<string, any> {
@@ -226,7 +295,29 @@ function saveServerPlatformSettings(next: Record<string, any>): Record<string, a
   if ('tier2Commission' in next) nextNormalized.tier2Commission = parseRate(next.tier2Commission, Number(current.tier2Commission ?? 3));
   if ('tier3Commission' in next) nextNormalized.tier3Commission = parseRate(next.tier3Commission, Number(current.tier3Commission ?? 1));
 
-  const merged = { ...current, ...nextNormalized, updatedAtMs: Date.now(), updatedAt: new Date().toISOString() };
+  if ('adMobPlacements' in next && next.adMobPlacements && typeof next.adMobPlacements === 'object') {
+    nextNormalized.adMobPlacements = {
+      home: true,
+      invest: true,
+      notice: true,
+      blog: true,
+      account: true,
+      ...(current.adMobPlacements || {}),
+      ...next.adMobPlacements,
+    };
+  }
+  if ('adMobRefreshSeconds' in next) {
+    nextNormalized.adMobRefreshSeconds = Math.max(30, Math.min(300, Number(next.adMobRefreshSeconds) || 60));
+  }
+
+  const merged: Record<string, any> = stripLegacyPayUKeys({ ...current, ...nextNormalized, updatedAtMs: Date.now(), updatedAt: new Date().toISOString() });
+  if (
+    'adMobAppId' in next ||
+    'adMobBannerUnitId' in next ||
+    'adMobPublisherId' in next
+  ) {
+    merged.adMobPublisherId = deriveAdMobPublisherIdServer(merged);
+  }
   try {
     fs.writeFileSync(PLATFORM_SETTINGS_PATH, JSON.stringify(merged, null, 2), 'utf-8');
   } catch (err) {
@@ -295,6 +386,10 @@ const DEFAULT_OTP_SETTINGS: ServerOtpSettings = {
     'Dear user, your Nexa AI registration verification code is {OTP}. Valid for 5 minutes. Do not share with anyone.',
   forgotPasswordOtpTemplate:
     'Your Nexa AI password reset code is {OTP}. Valid for 5 minutes. If not requested by you, please ignore this SMS.',
+  withdrawalOtpTemplate:
+    'Your Nexa AI withdrawal verification OTP is {OTP}. Valid for {VALIDITY} minutes. Do not share with anyone.',
+  p2pOtpTemplate:
+    'Your Nexa AI P2P transfer verification OTP is {OTP}. Valid for {VALIDITY} minutes. Do not share with anyone.',
   helpCenterUrl: '',
   helpCenterLinks: [],
 };
@@ -529,8 +624,14 @@ function formatSmsMessageFromAdminTemplate(params: {
   otpSettings = loadServerOtpSettings();
 
   const isForgot = params.purpose === 'forgot-password';
+  const isWithdraw = params.purpose === 'withdraw';
+  const isP2P = params.purpose === 'p2p';
   const serverSavedTemplate = isForgot
     ? otpSettings.forgotPasswordOtpTemplate
+    : isWithdraw
+    ? otpSettings.withdrawalOtpTemplate
+    : isP2P
+    ? otpSettings.p2pOtpTemplate
     : otpSettings.registrationOtpTemplate;
 
   const cleanOverride =
@@ -546,6 +647,10 @@ function formatSmsMessageFromAdminTemplate(params: {
     saveServerOtpSettings(
       isForgot
         ? { forgotPasswordOtpTemplate: cleanOverride }
+        : isWithdraw
+        ? { withdrawalOtpTemplate: cleanOverride }
+        : isP2P
+        ? { p2pOtpTemplate: cleanOverride }
         : { registrationOtpTemplate: cleanOverride }
     );
   } else if (serverSavedTemplate && serverSavedTemplate.trim().length > 0) {
@@ -555,6 +660,10 @@ function formatSmsMessageFromAdminTemplate(params: {
   } else {
     activeTemplate = isForgot
       ? DEFAULT_OTP_SETTINGS.forgotPasswordOtpTemplate
+      : isWithdraw
+      ? (DEFAULT_OTP_SETTINGS.withdrawalOtpTemplate || '')
+      : isP2P
+      ? (DEFAULT_OTP_SETTINGS.p2pOtpTemplate || '')
       : DEFAULT_OTP_SETTINGS.registrationOtpTemplate;
   }
 
@@ -604,6 +713,12 @@ app.post('/api/admin/otp-settings', (req, res) => {
         : {}),
       ...(typeof body.forgotPasswordOtpTemplate === 'string' && body.forgotPasswordOtpTemplate.trim().length > 0
         ? { forgotPasswordOtpTemplate: body.forgotPasswordOtpTemplate.trim() }
+        : {}),
+      ...(typeof body.withdrawalOtpTemplate === 'string' && body.withdrawalOtpTemplate.trim().length > 0
+        ? { withdrawalOtpTemplate: body.withdrawalOtpTemplate.trim() }
+        : {}),
+      ...(typeof body.p2pOtpTemplate === 'string' && body.p2pOtpTemplate.trim().length > 0
+        ? { p2pOtpTemplate: body.p2pOtpTemplate.trim() }
         : {}),
       ...(typeof body.helpCenterUrl === 'string' ? { helpCenterUrl: body.helpCenterUrl.trim() } : {}),
       ...(Array.isArray(body.helpCenterLinks) ? { helpCenterLinks: body.helpCenterLinks } : {}),
@@ -665,6 +780,86 @@ app.post('/api/admin/platform-settings', async (req, res) => {
   }
 });
 
+// API Routes: Google AdMob Configuration & Permanent Storage
+app.get('/api/admob/config', async (_req, res) => {
+  try {
+    const settings = await getEffectivePlatformSettingsServer();
+    const publisherId = deriveAdMobPublisherIdServer(settings);
+    return res.json({
+      success: true,
+      config: {
+        isAdMobEnabled: settings.isAdMobEnabled !== false,
+        adMobTestMode: settings.adMobTestMode !== false,
+        adMobAppId: String(settings.adMobAppId || GOOGLE_TEST_ADMOB_APP_ID).trim(),
+        adMobBannerUnitId: String(settings.adMobBannerUnitId || GOOGLE_TEST_ADMOB_BANNER_ID).trim(),
+        adMobPublisherId: publisherId,
+        adSenseBannerSlot: String(settings.adSenseBannerSlot || '').trim(),
+        adMobBannerSize: settings.adMobBannerSize || 'ADAPTIVE_BANNER',
+        adMobPosition: settings.adMobPosition || 'inline',
+        adMobPlacements: {
+          home: true,
+          invest: true,
+          notice: true,
+          blog: true,
+          account: true,
+          ...(settings.adMobPlacements || {}),
+        },
+        adMobRefreshSeconds: Math.max(30, Number(settings.adMobRefreshSeconds || 60)),
+      },
+      appAdsTxtLine: `google.com, ${publisherId}, DIRECT, f08c47fec0942fa0`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/admin/admob-settings', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const adMobPayload: Record<string, any> = {};
+    if ('isAdMobEnabled' in body) adMobPayload.isAdMobEnabled = Boolean(body.isAdMobEnabled);
+    if ('adMobTestMode' in body) adMobPayload.adMobTestMode = Boolean(body.adMobTestMode);
+    if (typeof body.adMobAppId === 'string') adMobPayload.adMobAppId = body.adMobAppId.trim() || GOOGLE_TEST_ADMOB_APP_ID;
+    if (typeof body.adMobBannerUnitId === 'string') adMobPayload.adMobBannerUnitId = body.adMobBannerUnitId.trim() || GOOGLE_TEST_ADMOB_BANNER_ID;
+    if (typeof body.adMobPublisherId === 'string') adMobPayload.adMobPublisherId = body.adMobPublisherId.trim();
+    if (typeof body.adSenseBannerSlot === 'string') adMobPayload.adSenseBannerSlot = body.adSenseBannerSlot.trim();
+    if (body.adMobBannerSize === 'BANNER_320x50' || body.adMobBannerSize === 'ADAPTIVE_BANNER' || body.adMobBannerSize === 'LARGE_BANNER_320x100') {
+      adMobPayload.adMobBannerSize = body.adMobBannerSize;
+    }
+    if (body.adMobPosition === 'inline' || body.adMobPosition === 'top' || body.adMobPosition === 'bottom') {
+      adMobPayload.adMobPosition = body.adMobPosition;
+    }
+    if (body.adMobPlacements && typeof body.adMobPlacements === 'object') {
+      adMobPayload.adMobPlacements = {
+        home: body.adMobPlacements.home !== false,
+        invest: body.adMobPlacements.invest !== false,
+        notice: body.adMobPlacements.notice !== false,
+        blog: body.adMobPlacements.blog !== false,
+        account: body.adMobPlacements.account !== false,
+      };
+    }
+    if ('adMobRefreshSeconds' in body) {
+      adMobPayload.adMobRefreshSeconds = Math.max(30, Math.min(300, Number(body.adMobRefreshSeconds) || 60));
+    }
+
+    const updated = saveServerPlatformSettings(adMobPayload);
+    try {
+      await setPlatformSettingInDb('general', updated);
+    } catch (dbErr) {
+      console.warn('Could not persist AdMob settings to Cloud SQL:', dbErr);
+    }
+    const publisherId = deriveAdMobPublisherIdServer(updated);
+    return res.json({
+      success: true,
+      message: 'Google AdMob settings saved permanently!',
+      settings: updated,
+      appAdsTxtLine: `google.com, ${publisherId}, DIRECT, f08c47fec0942fa0`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // API Route: Send OTP via apitxt.com / Fast2SMS / Custom SMS gateway
 app.post('/api/send-otp', async (req, res) => {
   try {
@@ -673,16 +868,22 @@ app.post('/api/send-otp', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Valid 10-digit mobile number required' });
     }
 
+    const normalizedPurpose: OtpServerLog['purpose'] =
+      purpose === 'forgot-password' || purpose === 'withdraw' || purpose === 'p2p' || purpose === 'test'
+        ? purpose
+        : 'register';
+
     otpSettings = loadServerOtpSettings();
     const cleanMobile = String(mobile).replace(/\D/g, '').slice(-10);
     const existingRecord = otpStore.get(cleanMobile);
     const nowMs = Date.now();
-    // If an OTP was just generated within the last 15 seconds for this phone, reuse it so SMS & store never go out of sync
+    // If an OTP was just generated within the last 15 seconds for this phone & same purpose, reuse it so SMS & store never go out of sync
     const reuseExisting =
       existingRecord &&
       existingRecord.expiresAt > nowMs &&
       existingRecord.createdAtMs &&
-      nowMs - existingRecord.createdAtMs < 15000;
+      nowMs - existingRecord.createdAtMs < 15000 &&
+      existingRecord.purpose === normalizedPurpose;
 
     const otp = reuseExisting
       ? existingRecord.otp
@@ -738,14 +939,11 @@ app.post('/api/send-otp', async (req, res) => {
       id: `otp-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       mobile: cleanMobile,
       otp,
-      purpose: purpose === 'forgot-password' ? 'forgot-password' : 'register',
+      purpose: normalizedPurpose,
       message: messageText,
       status: 'pending',
       attempts: 0,
-      createdAt:
-        new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) +
-        ', ' +
-        new Date().toLocaleDateString('en-IN'),
+      createdAt: formatISTTimestamp(Date.now()),
       expiresAt,
       provider: dispatchResult.provider,
       senderId: dispatchResult.senderId,
@@ -793,16 +991,16 @@ function checkAndVerifyOtp(cleanMobile: string, inputOtp: string): { ok: boolean
     return { ok: true };
   }
 
-  // 2. Check if Admin already manually marked the latest OTP log as verified for this mobile
-  const latestLog = otpLogs.find((l) => l.mobile === cleanMobile);
+  // 2. Check if Admin already manually marked the latest unconsumed OTP log as verified for this mobile
+  const latestLog = otpLogs.find((l) => l.mobile === cleanMobile && !l.consumedAt);
   if (latestLog && latestLog.status === 'verified' && (!cleanInput || latestLog.otp === cleanInput)) {
     return { ok: true };
   }
 
-  // 3. Also check if input matches any non-expired OTP log for this mobile number
+  // 3. Also check if input matches any non-expired unconsumed OTP log for this mobile number
   const now = Date.now();
   const matchingActiveLog = otpLogs.find(
-    (l) => l.mobile === cleanMobile && l.otp === cleanInput && (!l.expiresAt || l.expiresAt > now)
+    (l) => l.mobile === cleanMobile && !l.consumedAt && l.otp === cleanInput && (!l.expiresAt || l.expiresAt > now)
   );
   if (matchingActiveLog) {
     matchingActiveLog.status = 'verified';
@@ -837,7 +1035,7 @@ function checkAndVerifyOtp(cleanMobile: string, inputOtp: string): { ok: boolean
 
   if (!isMatch) {
     record.attempts += 1;
-    const log = otpLogs.find((l) => l.mobile === cleanMobile);
+    const log = otpLogs.find((l) => l.mobile === cleanMobile && !l.consumedAt);
     if (log) {
       log.status = 'wrong_otp';
       log.attempts = record.attempts;
@@ -850,12 +1048,26 @@ function checkAndVerifyOtp(cleanMobile: string, inputOtp: string): { ok: boolean
   }
 
   // OTP matched!
-  const log = otpLogs.find((l) => l.mobile === cleanMobile && (l.status === 'pending' || l.status === 'wrong_otp'));
+  const log = otpLogs.find((l) => l.mobile === cleanMobile && !l.consumedAt && (l.status === 'pending' || l.status === 'wrong_otp'));
   if (log) {
     log.status = 'verified';
     persistOtpLogs();
   }
   return { ok: true };
+}
+
+function consumeOtpAfterAction(cleanMobile: string, inputOtp?: string): void {
+  if (!cleanMobile) return;
+  const cleanInput = String(inputOtp || '').trim();
+  const log = otpLogs.find(
+    (l) => l.mobile === cleanMobile && !l.consumedAt && (!cleanInput || l.otp === cleanInput || l.status === 'verified' || l.status === 'pending')
+  );
+  if (log) {
+    log.status = 'verified';
+    log.consumedAt = Date.now();
+    persistOtpLogs();
+  }
+  otpStore.delete(cleanMobile);
 }
 
 // API Route: Verify OTP with strict match requirement and wrong OTP reporting
@@ -918,12 +1130,7 @@ app.post('/api/reset-password', async (req, res) => {
     }
 
     // Clear used OTP and mark verified
-    const log = otpLogs.find((l) => l.mobile === cleanMobile);
-    if (log) {
-      log.status = 'verified';
-      persistOtpLogs();
-    }
-    otpStore.delete(cleanMobile);
+    consumeOtpAfterAction(cleanMobile, otp ? String(otp) : undefined);
 
     // Also persist the updated password in permanent backup & Cloud SQL immediately
     try {
@@ -938,12 +1145,14 @@ app.post('/api/reset-password', async (req, res) => {
         return u;
       });
       if (matchedUser) {
+        markUserRuntimeMutated(matchedUser.id || matchedUser.uid, cleanMobile);
         saveUsersBackup(updatedList);
         await upsertUser({
           uid: matchedUser.id || matchedUser.uid || cleanMobile,
           phone: cleanMobile,
           password: String(newPassword).trim(),
           nickname: matchedUser.nickname,
+          updatedAt: matchedUser.updatedAt,
         }).catch(() => {});
       }
     } catch (persistErr) {
@@ -1169,6 +1378,41 @@ function saveUsersBackup(users: any[]): boolean {
   }
 }
 
+const WALLET_ZERO_KEYS = [
+  'rechargeBalance',
+  'withdrawalBalance',
+  'productRevenue',
+  'totalInvested',
+  'totalCommissionEarned',
+] as const;
+
+const runtimeMutatedUserIds = new Set<string>();
+function markUserRuntimeMutated(id?: string | null, phone?: string | null): void {
+  if (id && String(id).trim()) runtimeMutatedUserIds.add(String(id).trim());
+  const cleanPhone = phone ? String(phone).replace(/\D/g, '').slice(-10) : '';
+  if (cleanPhone.length === 10) runtimeMutatedUserIds.add(cleanPhone);
+}
+function isUserRuntimeMutated(u: any): boolean {
+  if (!u) return false;
+  const idStr = String(u.id || u.uid || '').trim();
+  const phoneStr = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
+  return Boolean(
+    (idStr && runtimeMutatedUserIds.has(idStr)) ||
+    (phoneStr.length === 10 && runtimeMutatedUserIds.has(phoneStr))
+  );
+}
+
+let bootCloudSyncPromise: Promise<void> | null = null;
+async function waitForBootCloudSync(timeoutMs: number = 3500): Promise<void> {
+  if (!bootCloudSyncPromise) return;
+  try {
+    await Promise.race([
+      bootCloudSyncPromise,
+      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
+  } catch {}
+}
+
 function parseTimestampMs(val: any): number {
   if (!val) return 0;
   if (typeof val === 'number' && !Number.isNaN(val)) return val;
@@ -1180,36 +1424,111 @@ function parseTimestampMs(val: any): number {
   return Number.isNaN(ms) ? 0 : ms;
 }
 
+function getFinancialTimestampMs(u: any): number {
+  if (!u) return 0;
+  const balTs = parseTimestampMs(u.balanceUpdatedAt);
+  if (balTs > 0) return balTs;
+  const zeroArr = Array.isArray(u.explicitZeroWallets) ? u.explicitZeroWallets : [];
+  const hasAnyNonZero =
+    (Number(u.rechargeBalance) || 0) > 0 ||
+    (Number(u.withdrawalBalance) || 0) > 0 ||
+    (Number(u.productRevenue) || 0) > 0 ||
+    (Number(u.totalInvested) || 0) > 0 ||
+    (Number(u.totalCommissionEarned) || 0) > 0;
+  if (hasAnyNonZero || u.isExplicitZeroReset || zeroArr.length > 0) {
+    return parseTimestampMs(u.updatedAt) || parseTimestampMs(u.createdAt);
+  }
+  return 0;
+}
+
+function formatPostgresUserRow(u: any): any {
+  const rechargeBalance = u.rechargeBalance ?? 0;
+  const withdrawalBalance = u.withdrawalBalance ?? 0;
+  const productRevenue = u.productRevenue ?? 0;
+  const totalInvested = u.totalInvested ?? 0;
+  const totalCommissionEarned = u.totalCommissionEarned ?? 0;
+  const createdIso = u.createdAt ? new Date(u.createdAt).toISOString() : undefined;
+  const hasPositive =
+    Number(rechargeBalance) > 0 ||
+    Number(withdrawalBalance) > 0 ||
+    Number(productRevenue) > 0 ||
+    Number(totalInvested) > 0 ||
+    Number(totalCommissionEarned) > 0;
+  const explicitZeroWallets = Array.isArray(u.explicitZeroWallets) ? u.explicitZeroWallets : [];
+  const isExplicitZeroReset = Boolean(u.isExplicitZeroReset) && !hasPositive;
+  const updatedAt = u.updatedAt || createdIso;
+  const balanceUpdatedAt =
+    u.balanceUpdatedAt ||
+    (hasPositive || isExplicitZeroReset || explicitZeroWallets.length > 0 ? updatedAt : undefined);
+
+  return {
+    id: u.uid || String(u.id),
+    phone: u.phone,
+    password: u.password || 'password123',
+    nickname: u.nickname,
+    avatar: u.avatar || 'HD',
+    invitationCode: u.invitationCode,
+    invitedBy: u.invitedBy,
+    inviterName: u.inviterName,
+    inviterId: u.inviterId,
+    rechargeBalance,
+    withdrawalBalance,
+    productRevenue,
+    vipLevel: u.vipLevel ?? 0,
+    totalInvested,
+    checkInStreak: u.checkInStreak ?? 0,
+    lastCheckInDate: u.lastCheckInDate,
+    spinChances: u.spinChances ?? 0,
+    status: u.status || 'active',
+    role: u.role || 'user',
+    totalReferrals: u.totalReferrals ?? 0,
+    totalCommissionEarned,
+    bankDetails: u.bankDetails,
+    isExplicitZeroReset,
+    explicitZeroWallets,
+    ...(balanceUpdatedAt ? { balanceUpdatedAt } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
+    createdAt: createdIso,
+  };
+}
+
 function mergeTwoUsers(existing: any, incoming: any): any {
   if (!existing) {
     const clean = { ...incoming };
     delete clean.isAuthoritativeServer;
+    delete clean.isRuntimeMutated;
     return clean;
   }
   if (!incoming) {
     const clean = { ...existing };
     delete clean.isAuthoritativeServer;
+    delete clean.isRuntimeMutated;
     return clean;
   }
 
   const isAuthIncoming = Boolean(incoming.isAuthoritativeServer);
   const existingTs = parseTimestampMs(existing.updatedAt);
   const incomingTs = parseTimestampMs(incoming.updatedAt);
-  const existingStrictlyNewer =
+  const existingBalTs = getFinancialTimestampMs(existing);
+  const incomingBalTs = getFinancialTimestampMs(incoming);
+
+  const existingStrictlyNewerBal =
     !isAuthIncoming &&
-    existingTs > 0 &&
-    incomingTs > 0 &&
-    existingTs > incomingTs + 1000;
-  const incomingIsNewerOrEqual =
-    isAuthIncoming ||
-    (incomingTs > 0 && (existingTs === 0 || incomingTs >= existingTs)) ||
-    (Boolean(incoming.isExplicitZeroReset) && (incomingTs === 0 || existingTs === 0 || incomingTs >= existingTs - 1000));
+    existingBalTs > 0 &&
+    (incomingBalTs === 0 || existingBalTs > incomingBalTs + 1000);
+
+  const existingZeroSet = new Set<string>(
+    Array.isArray(existing.explicitZeroWallets) ? existing.explicitZeroWallets : []
+  );
+  const incomingZeroSet = new Set<string>(
+    Array.isArray(incoming.explicitZeroWallets) ? incoming.explicitZeroWallets : []
+  );
 
   const merged: any = { ...existing };
   for (const [k, v] of Object.entries(incoming)) {
-    if (k === 'isAuthoritativeServer') continue;
-    // Prevent stale snapshots or null/undefined/NaN from overwriting newer balances
-    if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'vipLevel', 'spinChances', 'totalReferrals', 'totalCommissionEarned', 'checkInStreak'].includes(k)) {
+    if (k === 'isAuthoritativeServer' || k === 'isRuntimeMutated' || k === 'explicitZeroWallets') continue;
+    // Prevent stale or $0 bundled snapshots from overwriting live/newer balances
+    if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'totalCommissionEarned'].includes(k)) {
       const existingNum = Number(existing[k]) || 0;
       const incomingNum = Number(v) || 0;
 
@@ -1217,12 +1536,36 @@ function mergeTwoUsers(existing: any, incoming: any): any {
         continue;
       }
 
-      if (existingStrictlyNewer) {
+      if (existingStrictlyNewerBal) {
         continue;
       }
 
-      // Only block a 0 financial value when incoming is NOT newer/authoritative (protects against incomplete legacy payloads)
-      if (existingNum > 0 && incomingNum === 0 && !incomingIsNewerOrEqual) {
+      if (existingNum > 0 && incomingNum === 0) {
+        const incomingExplicitForKey =
+          isAuthIncoming ||
+          (Boolean(incoming.isExplicitZeroReset) && (incomingBalTs === 0 || existingBalTs === 0 || incomingBalTs >= existingBalTs - 1000)) ||
+          (incomingZeroSet.has(k) && (incomingBalTs === 0 || existingBalTs === 0 || incomingBalTs >= existingBalTs - 1000));
+        if (!incomingExplicitForKey) {
+          continue;
+        }
+      }
+    } else if (['vipLevel', 'spinChances', 'totalReferrals', 'checkInStreak'].includes(k)) {
+      const existingNum = Number(existing[k]) || 0;
+      const incomingNum = Number(v) || 0;
+
+      if (merged[k] !== undefined && (v === null || v === undefined || Number.isNaN(Number(v)))) {
+        continue;
+      }
+
+      const existingStrictlyNewerMeta =
+        !isAuthIncoming && existingTs > 0 && incomingTs > 0 && existingTs > incomingTs + 1000;
+      if (existingStrictlyNewerMeta) {
+        continue;
+      }
+
+      const incomingMetaNewerOrAuth =
+        isAuthIncoming || (incomingTs > 0 && (existingTs === 0 || incomingTs >= existingTs));
+      if (existingNum > 0 && incomingNum === 0 && !incomingMetaNewerOrAuth) {
         continue;
       }
     }
@@ -1242,7 +1585,12 @@ function mergeTwoUsers(existing: any, incoming: any): any {
       }
     } else if (((v as any) === 0 || (v as any) === false) && typeof v === typeof existing[k]) {
       if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'totalCommissionEarned'].includes(k)) {
-        if ((Number(existing[k]) || 0) > 0 && !incomingIsNewerOrEqual) {
+        const existingNum = Number(existing[k]) || 0;
+        const allowedZero =
+          isAuthIncoming ||
+          (Boolean(incoming.isExplicitZeroReset) && (incomingBalTs === 0 || existingBalTs === 0 || incomingBalTs >= existingBalTs - 1000)) ||
+          (incomingZeroSet.has(k) && (incomingBalTs === 0 || existingBalTs === 0 || incomingBalTs >= existingBalTs - 1000));
+        if (existingNum > 0 && !allowedZero) {
           continue;
         }
       }
@@ -1292,10 +1640,32 @@ function mergeTwoUsers(existing: any, incoming: any): any {
   }
 
   merged.totalReferrals = Math.max(Number(merged.totalReferrals) || 0, Number(existing.totalReferrals) || 0);
-  if (isAuthIncoming || (incoming.isExplicitZeroReset && !existingStrictlyNewer)) {
+  if (
+    isAuthIncoming ||
+    ((Boolean(incoming.isExplicitZeroReset) || incomingZeroSet.has('totalCommissionEarned')) && !existingStrictlyNewerBal)
+  ) {
     merged.totalCommissionEarned = Number(incoming.totalCommissionEarned ?? merged.totalCommissionEarned) || 0;
-  } else if (!existingStrictlyNewer) {
+  } else if (!existingStrictlyNewerBal) {
     merged.totalCommissionEarned = Math.max(Number(existing.totalCommissionEarned) || 0, Number(merged.totalCommissionEarned) || 0);
+  }
+
+  // Maintain accurate per-wallet explicitZeroWallets & full reset flag
+  const nextZeroSet = new Set<string>([...existingZeroSet, ...incomingZeroSet]);
+  for (const w of WALLET_ZERO_KEYS) {
+    if ((Number(merged[w]) || 0) > 0) {
+      nextZeroSet.delete(w);
+    } else if (incoming.isExplicitZeroReset && !existingStrictlyNewerBal) {
+      nextZeroSet.add(w);
+    }
+  }
+  merged.explicitZeroWallets = Array.from(nextZeroSet);
+  const anyPositiveMerged = WALLET_ZERO_KEYS.some((w) => (Number(merged[w]) || 0) > 0);
+  merged.isExplicitZeroReset = Boolean(merged.isExplicitZeroReset) && !anyPositiveMerged;
+
+  if (existingBalTs > incomingBalTs && !isAuthIncoming) {
+    merged.balanceUpdatedAt = existing.balanceUpdatedAt;
+  } else if (incoming.balanceUpdatedAt || existing.balanceUpdatedAt) {
+    merged.balanceUpdatedAt = incoming.balanceUpdatedAt || existing.balanceUpdatedAt;
   }
 
   if (existingTs > incomingTs && !isAuthIncoming) {
@@ -1308,6 +1678,7 @@ function mergeTwoUsers(existing: any, incoming: any): any {
     merged.createdAt = existing.createdAt || incoming.createdAt || new Date().toISOString();
   }
   delete merged.isAuthoritativeServer;
+  delete merged.isRuntimeMutated;
   return merged;
 }
 
@@ -1341,8 +1712,9 @@ function deduplicateAndMergeUsers(listA: any[], listB: any[]): any[] {
   return Array.from(byId.values());
 }
 
-// API Route: Get Users Permanent Source of Truth (SQLite SQL + Cloud SQL + Disk Backup)
+// API Route: Get Users Permanent Source of Truth (Cloud SQL PostgreSQL -> SQLite SQL -> Disk Backup)
 async function getCombinedServerUsers(): Promise<any[]> {
+  await waitForBootCloudSync();
   const deletedSet = loadDeletedUsers();
   const sqlUsers = getAllUsersFromSql(false);
   const diskUsers = getCachedUsersBackup();
@@ -1356,40 +1728,25 @@ async function getCombinedServerUsers(): Promise<any[]> {
           const uPhone = String(u.phone || '').replace(/\D/g, '').slice(-10);
           return !deletedSet.has(uId) && (!uPhone || !deletedSet.has(uPhone));
         })
-        .map((u) => ({
-          id: u.uid || String(u.id),
-          phone: u.phone,
-          password: u.password || 'password123',
-          nickname: u.nickname,
-          avatar: u.avatar || 'HD',
-          invitationCode: u.invitationCode,
-          invitedBy: u.invitedBy,
-          inviterName: u.inviterName,
-          inviterId: u.inviterId,
-          rechargeBalance: u.rechargeBalance ?? 0,
-          withdrawalBalance: u.withdrawalBalance ?? 0,
-          productRevenue: u.productRevenue ?? 0,
-          vipLevel: u.vipLevel ?? 0,
-          totalInvested: u.totalInvested ?? 0,
-          checkInStreak: u.checkInStreak ?? 0,
-          lastCheckInDate: u.lastCheckInDate,
-          spinChances: u.spinChances ?? 0,
-          status: u.status || 'active',
-          role: u.role || 'user',
-          totalReferrals: u.totalReferrals ?? 0,
-          totalCommissionEarned: u.totalCommissionEarned ?? 0,
-          bankDetails: u.bankDetails,
-          createdAt: u.createdAt ? new Date(u.createdAt).toISOString() : undefined,
-        }));
+        .map((u) => formatPostgresUserRow(u));
     }
   } catch (err: any) {
     console.warn('getCombinedServerUsers cloud fetch note:', err?.message || err);
   }
 
-  // Merge Cloud SQL -> disk users -> authoritative SQLite users (SQLite always wins on wallet balances)
-  const merged1 = deduplicateAndMergeUsers(cloudUsers, diskUsers);
-  const authSqlUsers = sqlUsers.map((u) => ({ ...u, isAuthoritativeServer: true }));
-  const mergedAll = deduplicateAndMergeUsers(merged1, authSqlUsers);
+  // Merge strategy:
+  // - Cloud SQL PostgreSQL persists across deploys/updates; unless user was mutated in THIS running process, Cloud SQL wins over bundled SQLite!
+  // - Local SQLite rows that were actually mutated during THIS server runtime win over everything else.
+  const taggedCloudUsers =
+    cloudUsers.length > 0
+      ? cloudUsers.map((u) => (!isUserRuntimeMutated(u) ? { ...u, isAuthoritativeServer: true } : u))
+      : [];
+  const taggedSqlUsers = sqlUsers.map((u) =>
+    isUserRuntimeMutated(u) ? { ...u, isAuthoritativeServer: true } : u
+  );
+
+  const merged1 = deduplicateAndMergeUsers(diskUsers, taggedCloudUsers);
+  const mergedAll = deduplicateAndMergeUsers(merged1, taggedSqlUsers);
 
   // Filter one more time through deletedSet to be 1000% certain
   const finalCleanUsers = mergedAll.filter((u) => {
@@ -1398,16 +1755,31 @@ async function getCombinedServerUsers(): Promise<any[]> {
     return !deletedSet.has(uId) && (!uPhone || !deletedSet.has(uPhone));
   });
 
-  // Only insert users into SQLite that do NOT exist yet in SQLite (never overwrite existing SQLite balances with stale disk/cloud records)
-  const existingSqlIds = new Set(sqlUsers.map((u) => String(u.id || '').trim()));
-  const existingSqlPhones = new Set(
-    sqlUsers.map((u) => String(u.phone || '').replace(/\D/g, '').slice(-10)).filter((p) => p.length === 10)
-  );
+  // Sync SQLite with any missing users OR live Cloud SQL users that differ from unmutated bundled SQLite
+  const sqlById = new Map<string, any>();
+  const sqlByPhone = new Map<string, any>();
+  for (const su of sqlUsers) {
+    if (su?.id) sqlById.set(String(su.id).trim(), su);
+    const sp = su?.phone ? String(su.phone).replace(/\D/g, '').slice(-10) : '';
+    if (sp.length === 10) sqlByPhone.set(sp, su);
+  }
+
   for (const u of finalCleanUsers) {
     const uId = String(u.id || '').trim();
     const uPhone = String(u.phone || '').replace(/\D/g, '').slice(-10);
-    if (!existingSqlIds.has(uId) && (!uPhone || !existingSqlPhones.has(uPhone))) {
+    const existingSql = sqlById.get(uId) || (uPhone ? sqlByPhone.get(uPhone) : undefined);
+    if (!existingSql) {
       upsertUserInSql(u);
+    } else if (!isUserRuntimeMutated(u) && cloudUsers.length > 0) {
+      const differs =
+        Math.abs((Number(existingSql.rechargeBalance) || 0) - (Number(u.rechargeBalance) || 0)) > 0.001 ||
+        Math.abs((Number(existingSql.withdrawalBalance) || 0) - (Number(u.withdrawalBalance) || 0)) > 0.001 ||
+        Math.abs((Number(existingSql.productRevenue) || 0) - (Number(u.productRevenue) || 0)) > 0.001 ||
+        Math.abs((Number(existingSql.totalInvested) || 0) - (Number(u.totalInvested) || 0)) > 0.001 ||
+        Math.abs((Number(existingSql.totalCommissionEarned) || 0) - (Number(u.totalCommissionEarned) || 0)) > 0.001;
+      if (differs) {
+        upsertUserInSql(u);
+      }
     }
   }
   saveUsersBackup(finalCleanUsers);
@@ -1418,7 +1790,11 @@ async function getCombinedServerUsers(): Promise<any[]> {
 // API Route: Get all users permanently
 app.get(['/api/users', '/api/backup/users'], async (_req, res) => {
   const mergedAll = await getCombinedServerUsers();
-  return res.json({ success: true, count: mergedAll.length, users: mergedAll, source: 'sqlite_sql_database' });
+  const withRuntimeFlag = mergedAll.map((u) => ({
+    ...u,
+    isRuntimeMutated: isUserRuntimeMutated(u),
+  }));
+  return res.json({ success: true, count: withRuntimeFlag.length, users: withRuntimeFlag, source: 'sqlite_sql_database' });
 });
 
 // API Route: Get permanent tombstone blacklists for client synchronization
@@ -1431,18 +1807,34 @@ app.get('/api/deleted-identifiers', (_req, res) => {
   });
 });
 
-// API Route: Get single user by ID, Phone, or Invite Code (Instant, from SQLite SQL)
+// API Route: Get single user by ID, Phone, or Invite Code (PostgreSQL-safe on cold boot)
 app.get('/api/user/:identifier', async (req, res) => {
   try {
+    await waitForBootCloudSync();
     const { identifier } = req.params;
     if (!identifier) {
       return res.status(400).json({ success: false, error: 'Identifier is required' });
     }
     const cleanId = String(identifier).trim();
     // 1. Direct SQLite lookup
-    let userRecord = getUserByIdOrPhoneFromSql(cleanId);
+    let userRecord: any = getUserByIdOrPhoneFromSql(cleanId);
+
+    // 2. When Cloud SQL PostgreSQL is configured and user was not mutated in this runtime, reconcile with PostgreSQL first
+    if (isSqlConfigured && (!userRecord || !isUserRuntimeMutated(userRecord))) {
+      try {
+        const pgRow = await findUser(cleanId);
+        if (pgRow) {
+          const pgFormatted = formatPostgresUserRow(pgRow);
+          userRecord = userRecord
+            ? mergeTwoUsers(userRecord, { ...pgFormatted, isAuthoritativeServer: true })
+            : pgFormatted;
+          upsertUserInSql(userRecord);
+        }
+      } catch {}
+    }
+
     if (!userRecord) {
-      // 2. Fallback to combined lookup
+      // 3. Fallback to combined lookup
       const all = await getCombinedServerUsers();
       const cleanPhone = cleanId.replace(/\D/g, '').slice(-10);
       userRecord = all.find(
@@ -1452,7 +1844,10 @@ app.get('/api/user/:identifier', async (req, res) => {
     if (!userRecord) {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
-    return res.json({ success: true, user: userRecord });
+    return res.json({
+      success: true,
+      user: { ...userRecord, isRuntimeMutated: isUserRuntimeMutated(userRecord) },
+    });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -1469,15 +1864,17 @@ app.post('/api/unblacklist-user', (req, res) => {
   }
 });
 
-// API Route: Save or Update single user permanently into SQLite SQL + Backup (with strict stale-timestamp guard)
+// API Route: Save or Update single user permanently into SQLite SQL + Backup (with strict financial-timestamp guard)
 app.post(['/api/user/save', '/api/user/update'], async (req, res) => {
   try {
+    await waitForBootCloudSync();
     const rawUserData = req.body.user || req.body;
     if (!rawUserData || (!rawUserData.id && !rawUserData.phone)) {
       return res.status(400).json({ success: false, error: 'User data with id or phone required' });
     }
     const userData = { ...rawUserData };
     delete userData.isAuthoritativeServer;
+    delete userData.isRuntimeMutated;
 
     // Remove from blacklist if previously deleted
     unblacklistUser(userData.phone, userData.id);
@@ -1488,16 +1885,22 @@ app.post(['/api/user/save', '/api/user/update'], async (req, res) => {
 
     let payloadToSave = userData;
     if (existingSql) {
-      const existingTs = parseTimestampMs(existingSql.updatedAt);
-      const incomingTs = parseTimestampMs(userData.updatedAt);
+      const existingBalTs = getFinancialTimestampMs(existingSql);
+      const incomingBalTs = getFinancialTimestampMs(userData);
+      const existingRuntime = isUserRuntimeMutated(existingSql);
 
-      // CRITICAL GUARD: Reject stale snapshots whose updatedAt is strictly older than SQLite
-      if (existingTs > 0 && incomingTs > 0 && existingTs > incomingTs + 1000) {
+      // CRITICAL GUARD: Reject stale financial snapshots strictly older than SQLite
+      // (Never reject when existingSql is unmutated $0 seed with existingBalTs === 0 and incoming has live balance)
+      if (
+        (existingRuntime || existingBalTs > 0) &&
+        incomingBalTs > 0 &&
+        existingBalTs > incomingBalTs + 1000
+      ) {
         return res.json({
           success: true,
           staleIgnored: true,
           message: 'Ignored stale user payload; returning authoritative SQLite state.',
-          user: existingSql,
+          user: { ...existingSql, isRuntimeMutated: existingRuntime },
         });
       }
       payloadToSave = mergeTwoUsers(existingSql, userData);
@@ -1505,6 +1908,7 @@ app.post(['/api/user/save', '/api/user/update'], async (req, res) => {
 
     // 1. Upsert directly into SQLite
     const saved = upsertUserInSql(payloadToSave);
+    markUserRuntimeMutated(saved.id, saved.phone);
 
     // 2. Sync to disk backup
     const diskUsers = getCachedUsersBackup();
@@ -1535,12 +1939,16 @@ app.post(['/api/user/save', '/api/user/update'], async (req, res) => {
       totalReferrals: saved.totalReferrals,
       totalCommissionEarned: saved.totalCommissionEarned,
       bankDetails: saved.bankDetails,
+      isExplicitZeroReset: saved.isExplicitZeroReset,
+      explicitZeroWallets: saved.explicitZeroWallets,
+      balanceUpdatedAt: saved.balanceUpdatedAt,
+      updatedAt: saved.updatedAt,
     }).catch(() => {});
 
     return res.json({
       success: true,
       message: 'User details saved permanently in SQLite SQL database!',
-      user: saved,
+      user: { ...saved, isRuntimeMutated: true },
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
@@ -1640,6 +2048,36 @@ app.post('/api/user/withdraw', async (req, res) => {
       });
     }
 
+    const reqOtp = String((req.body || {}).otp || '').trim();
+    otpSettings = loadServerOtpSettings();
+    const isWithdrawOtpRequired =
+      otpSettings.smsGatewayActive !== false && liveSettings.smsGatewayActive !== false;
+    const userCleanPhone = String(user.phone || '').replace(/\D/g, '').slice(-10);
+
+    if (isWithdrawOtpRequired) {
+      if (!userCleanPhone || userCleanPhone.length < 10) {
+        return res.status(400).json({
+          success: false,
+          error: 'Valid registered 10-digit mobile number is required for OTP verification.',
+        });
+      }
+      if (!reqOtp || reqOtp.length !== 6) {
+        return res.status(400).json({
+          success: false,
+          error: 'Please enter the 6-digit verification code (OTP) sent to your mobile number.',
+        });
+      }
+      if ((Number(user.withdrawalBalance) || 0) + 1e-6 >= reqAmount) {
+        const otpCheck = checkAndVerifyOtp(userCleanPhone, reqOtp);
+        if (!otpCheck.ok) {
+          return res.status(400).json({
+            success: false,
+            error: otpCheck.error || 'Wrong OTP (गलत OTP). Withdrawal denied.',
+          });
+        }
+      }
+    }
+
     const cleanBank = {
       accountHolder: String(bankDetails?.accountHolder || user.bankDetails?.accountHolder || user.nickname || '').trim(),
       accountNumber: String(bankDetails?.accountNumber || user.bankDetails?.accountNumber || '').trim(),
@@ -1671,7 +2109,13 @@ app.post('/api/user/withdraw', async (req, res) => {
       } catch {}
       rawJson.withdrawalBalance = nextWithdrawal;
       rawJson.bankDetails = cleanBank;
-      rawJson.isExplicitZeroReset = nextWithdrawal === 0;
+      const prevZeros: string[] = Array.isArray(rawJson.explicitZeroWallets) ? rawJson.explicitZeroWallets : [];
+      const zeroSet = new Set<string>(prevZeros);
+      if (nextWithdrawal === 0) zeroSet.add('withdrawalBalance');
+      else zeroSet.delete('withdrawalBalance');
+      rawJson.explicitZeroWallets = Array.from(zeroSet);
+      rawJson.isExplicitZeroReset = false;
+      rawJson.balanceUpdatedAt = nowIso;
       rawJson.updatedAt = nowIso;
 
       db.prepare(`
@@ -1684,6 +2128,7 @@ app.post('/api/user/withdraw', async (req, res) => {
             bank_upi_id = ?,
             bank_details_json = ?,
             raw_json = ?,
+            balance_updated_at = ?,
             updated_at = ?
         WHERE id = ?
       `).run(
@@ -1695,6 +2140,7 @@ app.post('/api/user/withdraw', async (req, res) => {
         cleanBank.upiId || null,
         JSON.stringify(cleanBank),
         JSON.stringify(rawJson),
+        nowIso,
         nowIso,
         user.id
       );
@@ -1718,9 +2164,12 @@ app.post('/api/user/withdraw', async (req, res) => {
       ...user,
       withdrawalBalance: nextWithdrawal,
       bankDetails: cleanBank,
-      isExplicitZeroReset: nextWithdrawal === 0,
+      isExplicitZeroReset: false,
+      explicitZeroWallets: nextWithdrawal === 0 ? ['withdrawalBalance'] : [],
+      balanceUpdatedAt: nowIso,
       updatedAt: nowIso,
     };
+    markUserRuntimeMutated(updatedUser.id, updatedUser.phone);
 
     const diskUsers = getCachedUsersBackup();
     const updatedDisk = deduplicateAndMergeUsers(diskUsers, [{ ...updatedUser, isAuthoritativeServer: true }]);
@@ -1731,6 +2180,10 @@ app.post('/api/user/withdraw', async (req, res) => {
       phone: updatedUser.phone,
       withdrawalBalance: updatedUser.withdrawalBalance,
       bankDetails: updatedUser.bankDetails,
+      isExplicitZeroReset: false,
+      explicitZeroWallets: updatedUser.explicitZeroWallets,
+      balanceUpdatedAt: nowIso,
+      updatedAt: nowIso,
     }).catch(() => {});
 
     const feePercent = liveSettings.withdrawalFeePercent !== undefined ? Number(liveSettings.withdrawalFeePercent) : 5;
@@ -1747,7 +2200,7 @@ app.post('/api/user/withdraw', async (req, res) => {
       feeAmount: fee,
       netAmount: netPayout,
       title: `Withdrawal: ${cleanBank.accountHolder} (${cleanBank.bankName})`,
-      timestamp: new Date(nowMs).toLocaleString(),
+      timestamp: formatISTTimestamp(nowMs),
       createdAt: nowMs,
       status: 'processing',
       referenceNo: refNo,
@@ -1760,6 +2213,10 @@ app.post('/api/user/withdraw', async (req, res) => {
     backupTxs.unshift(newTx);
     saveServerTransactions(backupTxs);
     await createTransaction(newTx).catch(() => {});
+
+    if (isWithdrawOtpRequired && userCleanPhone) {
+      consumeOtpAfterAction(userCleanPhone, reqOtp);
+    }
 
     console.log(
       `[Atomic Withdrawal] ✅ ${updatedUser.nickname} (${updatedUser.id}) requested $${reqAmount.toFixed(2)} -> New Withdrawal Balance: $${updatedUser.withdrawalBalance.toFixed(2)} [Ref: ${refNo}]`
@@ -1993,9 +2450,11 @@ app.post('/api/user/claim-dividend', async (req, res) => {
     }
     saveServerOrders(diskOrders);
 
+    markUserRuntimeMutated(freshUser.id, freshUser.phone);
+
     // 5. Permanently sync credited user to disk backup & Cloud SQL
     const diskUsers = getCachedUsersBackup();
-    const mergedDiskUsers = deduplicateAndMergeUsers(diskUsers, [freshUser]);
+    const mergedDiskUsers = deduplicateAndMergeUsers(diskUsers, [{ ...freshUser, isAuthoritativeServer: true }]);
     saveUsersBackup(mergedDiskUsers);
 
     upsertUser({
@@ -2003,6 +2462,10 @@ app.post('/api/user/claim-dividend', async (req, res) => {
       phone: freshUser.phone,
       withdrawalBalance: freshUser.withdrawalBalance,
       productRevenue: freshUser.productRevenue,
+      isExplicitZeroReset: false,
+      explicitZeroWallets: freshUser.explicitZeroWallets,
+      balanceUpdatedAt: freshUser.balanceUpdatedAt,
+      updatedAt: freshUser.updatedAt,
     }).catch(() => {});
 
     // 6. Create dividend earnings transaction
@@ -2014,7 +2477,7 @@ app.post('/api/user/claim-dividend', async (req, res) => {
       type: 'earnings',
       amount: totalClaim,
       title: `Daily 24-Hour Dividend Settled (${eligibleUpdates.length} contract${eligibleUpdates.length > 1 ? 's' : ''})`,
-      timestamp: new Date(now).toLocaleString(),
+      timestamp: formatISTTimestamp(now),
       createdAt: now,
       status: 'completed',
       referenceNo: divRef,
@@ -2239,7 +2702,13 @@ async function performAtomicP2PTransfer(params: {
       senderRaw = JSON.parse(senderRow.raw_json || '{}');
     } catch {}
     senderRaw[sourceWallet] = atomicSenderNext;
-    senderRaw.isExplicitZeroReset = atomicSenderNext === 0;
+    const prevSenderZeros: string[] = Array.isArray(senderRaw.explicitZeroWallets) ? senderRaw.explicitZeroWallets : [];
+    const senderZeroSet = new Set<string>(prevSenderZeros);
+    if (atomicSenderNext === 0) senderZeroSet.add(sourceWallet);
+    else senderZeroSet.delete(sourceWallet);
+    senderRaw.explicitZeroWallets = Array.from(senderZeroSet);
+    senderRaw.isExplicitZeroReset = false;
+    senderRaw.balanceUpdatedAt = nowIso;
     senderRaw.updatedAt = nowIso;
 
     let recipientRaw: any = {};
@@ -2247,16 +2716,20 @@ async function performAtomicP2PTransfer(params: {
       recipientRaw = JSON.parse(recipientRow.raw_json || '{}');
     } catch {}
     recipientRaw[targetWallet] = atomicRecipientNext;
+    if (Array.isArray(recipientRaw.explicitZeroWallets)) {
+      recipientRaw.explicitZeroWallets = recipientRaw.explicitZeroWallets.filter((w: string) => w !== targetWallet);
+    }
     recipientRaw.isExplicitZeroReset = false;
+    recipientRaw.balanceUpdatedAt = nowIso;
     recipientRaw.updatedAt = nowIso;
 
     db.prepare(
-      `UPDATE platform_users SET ${srcCol} = ?, raw_json = ?, updated_at = ? WHERE id = ?`
-    ).run(atomicSenderNext, JSON.stringify(senderRaw), nowIso, sender.id);
+      `UPDATE platform_users SET ${srcCol} = ?, raw_json = ?, balance_updated_at = ?, updated_at = ? WHERE id = ?`
+    ).run(atomicSenderNext, JSON.stringify(senderRaw), nowIso, nowIso, sender.id);
 
     db.prepare(
-      `UPDATE platform_users SET ${dstCol} = ?, raw_json = ?, updated_at = ? WHERE id = ?`
-    ).run(atomicRecipientNext, JSON.stringify(recipientRaw), nowIso, recipient.id);
+      `UPDATE platform_users SET ${dstCol} = ?, raw_json = ?, balance_updated_at = ?, updated_at = ? WHERE id = ?`
+    ).run(atomicRecipientNext, JSON.stringify(recipientRaw), nowIso, nowIso, recipient.id);
 
     db.exec('COMMIT');
   } catch (sqlErr: any) {
@@ -2269,28 +2742,56 @@ async function performAtomicP2PTransfer(params: {
   const updatedSender = getUserByIdOrPhoneFromSql(sender.id) || {
     ...sender,
     [sourceWallet]: Number(((Number(sender[sourceWallet]) || 0) - amount).toFixed(2)),
+    balanceUpdatedAt: nowIso,
+    updatedAt: nowIso,
   };
   const updatedRecipient = getUserByIdOrPhoneFromSql(recipient.id) || {
     ...recipient,
     [targetWallet]: Number(((Number(recipient[targetWallet]) || 0) + amount).toFixed(2)),
+    balanceUpdatedAt: nowIso,
+    updatedAt: nowIso,
   };
 
+  markUserRuntimeMutated(updatedSender.id, updatedSender.phone);
+  markUserRuntimeMutated(updatedRecipient.id, updatedRecipient.phone);
+
+  const senderZeroArr: string[] = Array.isArray(updatedSender.explicitZeroWallets)
+    ? [...updatedSender.explicitZeroWallets]
+    : [];
+  if (Number(updatedSender[sourceWallet]) === 0 && !senderZeroArr.includes(sourceWallet)) {
+    senderZeroArr.push(sourceWallet);
+  }
   const senderWithZeroFlag = {
     ...updatedSender,
-    isExplicitZeroReset: Number(updatedSender[sourceWallet]) === 0,
+    isExplicitZeroReset: false,
+    explicitZeroWallets: senderZeroArr,
+    balanceUpdatedAt: updatedSender.balanceUpdatedAt || nowIso,
   };
 
   const diskUsers = getCachedUsersBackup();
-  const updatedDisk = deduplicateAndMergeUsers(diskUsers, [senderWithZeroFlag, updatedRecipient]);
+  const updatedDisk = deduplicateAndMergeUsers(diskUsers, [
+    { ...senderWithZeroFlag, isAuthoritativeServer: true },
+    { ...updatedRecipient, isAuthoritativeServer: true },
+  ]);
   saveUsersBackup(updatedDisk);
 
   upsertUser({
     uid: updatedSender.id,
+    phone: updatedSender.phone,
     [sourceWallet]: updatedSender[sourceWallet],
+    isExplicitZeroReset: false,
+    explicitZeroWallets: senderZeroArr,
+    balanceUpdatedAt: nowIso,
+    updatedAt: nowIso,
   }).catch(() => {});
   upsertUser({
     uid: updatedRecipient.id,
+    phone: updatedRecipient.phone,
     [targetWallet]: updatedRecipient[targetWallet],
+    isExplicitZeroReset: false,
+    explicitZeroWallets: updatedRecipient.explicitZeroWallets,
+    balanceUpdatedAt: nowIso,
+    updatedAt: nowIso,
   }).catch(() => {});
 
   const nowMs = Date.now();
@@ -2298,7 +2799,7 @@ async function performAtomicP2PTransfer(params: {
   const cleanNote = String(note || '').trim().slice(0, 120);
   const srcLabel = sourceWallet === 'withdrawalBalance' ? 'Withdrawal Balance' : 'Charged Balance';
   const dstLabel = targetWallet === 'withdrawalBalance' ? 'Withdrawal Balance' : 'Charged Balance';
-  const timestampStr = new Date(nowMs).toLocaleString();
+  const timestampStr = formatISTTimestamp(nowMs);
   const adminPrefix = initiatedBy === 'admin' ? '[Admin] ' : '';
 
   const senderTx = {
@@ -2459,6 +2960,34 @@ app.post('/api/p2p/transfer', async (req, res) => {
       });
     }
 
+    const reqOtp = String((req.body || {}).otp || '').trim();
+    otpSettings = loadServerOtpSettings();
+    const isP2POtpRequired =
+      otpSettings.smsGatewayActive !== false && liveSettings.smsGatewayActive !== false;
+    const senderCleanPhone = String(sender.phone || '').replace(/\D/g, '').slice(-10);
+
+    if (isP2POtpRequired) {
+      if (!senderCleanPhone || senderCleanPhone.length < 10) {
+        return res.status(400).json({
+          success: false,
+          error: 'Valid registered 10-digit mobile number is required for OTP verification.',
+        });
+      }
+      if (!reqOtp || reqOtp.length !== 6) {
+        return res.status(400).json({
+          success: false,
+          error: 'Please enter the 6-digit verification code (OTP) sent to your mobile number.',
+        });
+      }
+      const otpCheck = checkAndVerifyOtp(senderCleanPhone, reqOtp);
+      if (!otpCheck.ok) {
+        return res.status(400).json({
+          success: false,
+          error: otpCheck.error || 'Wrong OTP (गलत OTP). P2P transfer denied.',
+        });
+      }
+    }
+
     let transferResult;
     try {
       transferResult = await performAtomicP2PTransfer({
@@ -2475,6 +3004,10 @@ app.post('/api/p2p/transfer', async (req, res) => {
         return res.status(400).json({ success: false, error: 'Insufficient wallet balance for P2P transfer.' });
       }
       throw sqlErr;
+    }
+
+    if (isP2POtpRequired && senderCleanPhone) {
+      consumeOtpAfterAction(senderCleanPhone, reqOtp);
     }
 
     const { refBase, nowIso, senderWithZeroFlag, updatedRecipient, senderTx, recipientTx } = transferResult;
@@ -2535,9 +3068,9 @@ app.get('/api/admin/p2p/history', async (_req, res) => {
       txMap.set(key, { ...(txMap.get(key) || {}), ...tx });
     }
 
-    const ledger = Array.from(txMap.values()).sort(
-      (a: any, b: any) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)
-    );
+    const ledger = Array.from(txMap.values())
+      .map((tx: any) => normalizeTxTimestampIST(tx))
+      .sort((a: any, b: any) => extractTxEpochMs(b) - extractTxEpochMs(a));
 
     // Group paired -OUT and -IN records into unified Sender -> Receiver transfer items
     const pairMap = new Map<string, any>();
@@ -2590,11 +3123,11 @@ app.get('/api/admin/p2p/history', async (_req, res) => {
       if (!existing.note && tx.note) existing.note = tx.note;
       if (!existing.timestamp && tx.timestamp) existing.timestamp = tx.timestamp;
       if (!existing.createdAt && tx.createdAt) existing.createdAt = Number(tx.createdAt) || 0;
-      pairMap.set(baseRef, existing);
+      pairMap.set(baseRef, normalizeTxTimestampIST(existing));
     }
 
     const transfers = Array.from(pairMap.values()).sort(
-      (a: any, b: any) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)
+      (a: any, b: any) => extractTxEpochMs(b) - extractTxEpochMs(a)
     );
 
     let totalVolume = 0;
@@ -2762,24 +3295,28 @@ app.post('/api/referral/register-invite', async (req, res) => {
     `).run(senior.invitationCode, senior.id, senior.nickname, String(newUserId).trim());
 
     // Update in disk backup
+    const nowRefIso = new Date().toISOString();
     const diskUsers = getCachedUsersBackup();
     const seniorDiskIdx = diskUsers.findIndex((u) => u.id === senior.id);
     if (seniorDiskIdx >= 0) {
       diskUsers[seniorDiskIdx].totalReferrals = newReferralCount;
       diskUsers[seniorDiskIdx].spinChances = newSpins;
+      diskUsers[seniorDiskIdx].updatedAt = nowRefIso;
       saveUsersBackup(diskUsers);
     }
+    markUserRuntimeMutated(senior.id, senior.phone);
+    markUserRuntimeMutated(String(newUserId).trim(), newUserPhone);
 
-    // Create senior notification transaction
+    const refTxNow = Date.now();
     const seniorTx = {
-      id: `tx-ref-${Date.now()}`,
+      id: `tx-ref-${refTxNow}`,
       userId: senior.id,
       phone: senior.phone || '',
       type: 'bonus',
       amount: 0,
       title: `New Team Member Joined: ${newUserNickname || 'New User'} (+1 Direct Member, +1 Lucky Spin)`,
-      timestamp: new Date().toLocaleString(),
-      createdAt: Date.now(),
+      timestamp: formatISTTimestamp(refTxNow),
+      createdAt: refTxNow,
       status: 'completed',
       referenceNo: `REF-${newUserId}`,
       paymentMethod: 'Referral Team System',
@@ -2833,6 +3370,7 @@ app.post('/api/user/bank-details', async (req, res) => {
     };
 
     const saved = upsertUserInSql(mergedUser);
+    markUserRuntimeMutated(saved.id, saved.phone);
     const diskUsers = getCachedUsersBackup();
     const updatedDisk = deduplicateAndMergeUsers(diskUsers, [saved]);
     saveUsersBackup(updatedDisk);
@@ -2842,6 +3380,7 @@ app.post('/api/user/bank-details', async (req, res) => {
       uid: saved.id,
       phone: saved.phone,
       bankDetails: saved.bankDetails,
+      updatedAt: saved.updatedAt,
     }).catch(() => {});
 
     return res.json({
@@ -3346,12 +3885,17 @@ export async function distributeReferralCommissionServer(
       updated = creditUserCommissionInSql(uplinerObj.phone, commAmount);
     }
     if (updated) {
-      saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [updated]));
+      markUserRuntimeMutated(updated.id, updated.phone);
+      saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [{ ...updated, isAuthoritativeServer: true }]));
       upsertUser({
         uid: updated.id,
         phone: updated.phone,
         withdrawalBalance: updated.withdrawalBalance,
         totalCommissionEarned: updated.totalCommissionEarned,
+        isExplicitZeroReset: false,
+        explicitZeroWallets: updated.explicitZeroWallets,
+        balanceUpdatedAt: updated.balanceUpdatedAt,
+        updatedAt: updated.updatedAt,
       }).catch(() => {});
     }
     return updated;
@@ -3367,8 +3911,9 @@ export async function distributeReferralCommissionServer(
       let tx1: any = null;
       try {
         const txList = loadServerTransactions();
+        const comm1Now = Date.now();
         tx1 = {
-          id: `tx-comm-${Date.now()}-1`,
+          id: `tx-comm-${comm1Now}-1`,
           userId: tier1.id,
           phone: tier1.phone || '',
           downlineUserId: payer.id,
@@ -3376,8 +3921,8 @@ export async function distributeReferralCommissionServer(
           type: 'commission',
           amount: comm1,
           title: `Tier 1 Commission (${rates[0]}%) from ${payer.nickname || payer.phone || 'downline'} - ${actionLabel}`,
-          timestamp: new Date().toLocaleString(),
-          createdAt: Date.now(),
+          timestamp: formatISTTimestamp(comm1Now),
+          createdAt: comm1Now,
           status: 'completed',
           referenceNo: `COMM1-${refSuffix}`,
           paymentMethod: 'Referral Commission Wallet',
@@ -3410,8 +3955,9 @@ export async function distributeReferralCommissionServer(
         let tx2: any = null;
         try {
           const txList = loadServerTransactions();
+          const comm2Now = Date.now();
           tx2 = {
-            id: `tx-comm-${Date.now()}-2`,
+            id: `tx-comm-${comm2Now}-2`,
             userId: tier2.id,
             phone: tier2.phone || '',
             downlineUserId: payer.id,
@@ -3419,8 +3965,8 @@ export async function distributeReferralCommissionServer(
             type: 'commission',
             amount: comm2,
             title: `Tier 2 Commission (${rates[1]}%) from ${payer.nickname || payer.phone || 'downline'} - ${actionLabel}`,
-            timestamp: new Date().toLocaleString(),
-            createdAt: Date.now(),
+            timestamp: formatISTTimestamp(comm2Now),
+            createdAt: comm2Now,
             status: 'completed',
             referenceNo: `COMM2-${refSuffix}`,
             paymentMethod: 'Referral Commission Wallet',
@@ -3453,8 +3999,9 @@ export async function distributeReferralCommissionServer(
           let tx3: any = null;
           try {
             const txList = loadServerTransactions();
+            const comm3Now = Date.now();
             tx3 = {
-              id: `tx-comm-${Date.now()}-3`,
+              id: `tx-comm-${comm3Now}-3`,
               userId: tier3.id,
               phone: tier3.phone || '',
               downlineUserId: payer.id,
@@ -3462,8 +4009,8 @@ export async function distributeReferralCommissionServer(
               type: 'commission',
               amount: comm3,
               title: `Tier 3 Commission (${rates[2]}%) from ${payer.nickname || payer.phone || 'downline'} - ${actionLabel}`,
-              timestamp: new Date().toLocaleString(),
-              createdAt: Date.now(),
+              timestamp: formatISTTimestamp(comm3Now),
+              createdAt: comm3Now,
               status: 'completed',
               referenceNo: `COMM3-${refSuffix}`,
               paymentMethod: 'Referral Commission Wallet',
@@ -3678,14 +4225,16 @@ app.post('/api/backup/users', async (req, res) => {
     for (const rawU of cleanIncoming) {
       const u = { ...rawU };
       delete u.isAuthoritativeServer;
+      delete u.isRuntimeMutated;
       const rawId = String(u.id || u.uid || '').trim();
       const cleanPhone = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
       const existingSql = (rawId && sqlById.get(rawId)) || (cleanPhone && sqlByPhone.get(cleanPhone));
       if (existingSql) {
-        const sqlTs = parseTimestampMs(existingSql.updatedAt);
-        const incTs = parseTimestampMs(u.updatedAt);
+        const sqlBalTs = getFinancialTimestampMs(existingSql);
+        const incBalTs = getFinancialTimestampMs(u);
+        const existingRuntime = isUserRuntimeMutated(existingSql);
         // Never let a stale client backup payload overwrite a newer SQLite state
-        if (sqlTs > 0 && (incTs === 0 || sqlTs > incTs + 1000)) {
+        if ((existingRuntime || sqlBalTs > 0) && (incBalTs === 0 || sqlBalTs > incBalTs + 1000)) {
           continue;
         }
       }
@@ -3693,7 +4242,9 @@ app.post('/api/backup/users', async (req, res) => {
     }
 
     const current = getCachedUsersBackup();
-    const authSqlForMerge = sqlUsersNow.map((u) => ({ ...u, isAuthoritativeServer: true }));
+    const authSqlForMerge = sqlUsersNow.map((u) =>
+      isUserRuntimeMutated(u) ? { ...u, isAuthoritativeServer: true } : u
+    );
     const baseUsers = deduplicateAndMergeUsers(current, authSqlForMerge);
     const mergedList = sanitizedIncoming.length > 0 ? deduplicateAndMergeUsers(baseUsers, sanitizedIncoming) : baseUsers;
     saveUsersBackup(mergedList);
@@ -3712,7 +4263,8 @@ app.post('/api/backup/users', async (req, res) => {
 
         // 1. Permanent SQLite SQL persistence
         try {
-          upsertUserInSql(fullMergedUser);
+          const savedRow = upsertUserInSql(fullMergedUser);
+          markUserRuntimeMutated(savedRow.id, savedRow.phone);
         } catch (sqliteErr) {
           console.warn('Upserting user to SQLite warning:', sqliteErr);
         }
@@ -3742,6 +4294,10 @@ app.post('/api/backup/users', async (req, res) => {
             totalReferrals: Number(fullMergedUser.totalReferrals) || 0,
             totalCommissionEarned: Number(fullMergedUser.totalCommissionEarned) || 0,
             bankDetails: fullMergedUser.bankDetails,
+            isExplicitZeroReset: Boolean(fullMergedUser.isExplicitZeroReset),
+            explicitZeroWallets: fullMergedUser.explicitZeroWallets,
+            balanceUpdatedAt: fullMergedUser.balanceUpdatedAt,
+            updatedAt: fullMergedUser.updatedAt,
           });
         } catch (dbErr: any) {
           console.warn('Upserting user to Cloud SQL encountered an error:', dbErr?.message || dbErr);
@@ -4422,11 +4978,27 @@ app.post(['/api/orders', '/api/admin/orders'], async (req, res) => {
           const curBal = Number(buyerSql.rechargeBalance) || 0;
           const newBal = Math.max(0, Number((curBal - orderPrice).toFixed(2)));
           const newInvested = Number(((buyerSql.totalInvested || 0) + orderPrice).toFixed(2));
-          updateUserWalletBalanceInSql(buyerSql.id, 'rechargeBalance', newBal);
-          try {
-            const db = getSqliteDb();
-            db.prepare('UPDATE platform_users SET total_invested = ? WHERE id = ?').run(newInvested, buyerSql.id);
-          } catch {}
+          const balNow = new Date().toISOString();
+          const zeroSet = new Set<string>(
+            Array.isArray(buyerSql.explicitZeroWallets) ? buyerSql.explicitZeroWallets : []
+          );
+          if (newBal === 0) {
+            zeroSet.add('rechargeBalance');
+          } else {
+            zeroSet.delete('rechargeBalance');
+          }
+          const nextZeroWallets = Array.from(zeroSet);
+
+          upsertUserInSql({
+            ...buyerSql,
+            rechargeBalance: newBal,
+            totalInvested: newInvested,
+            explicitZeroWallets: nextZeroWallets,
+            isExplicitZeroReset: false,
+            balanceUpdatedAt: balNow,
+            updatedAt: balNow,
+          });
+          markUserRuntimeMutated(buyerSql.id, buyerSql.phone);
 
           const currentBackup = getCachedUsersBackup();
           const bIdx = currentBackup.findIndex(
@@ -4437,11 +5009,24 @@ app.post(['/api/orders', '/api/admin/orders'], async (req, res) => {
               ...currentBackup[bIdx],
               rechargeBalance: newBal,
               totalInvested: newInvested,
-              isExplicitZeroReset: newBal === 0,
-              updatedAt: new Date().toISOString(),
+              explicitZeroWallets: nextZeroWallets,
+              isExplicitZeroReset: false,
+              balanceUpdatedAt: balNow,
+              updatedAt: balNow,
             };
             saveUsersBackup(currentBackup);
           }
+
+          upsertUser({
+            uid: buyerSql.id,
+            phone: buyerSql.phone,
+            rechargeBalance: newBal,
+            totalInvested: newInvested,
+            explicitZeroWallets: nextZeroWallets,
+            isExplicitZeroReset: false,
+            balanceUpdatedAt: balNow,
+            updatedAt: balNow,
+          }).catch(() => {});
         }
       } catch (deductErr) {
         console.warn('Server-side order balance deduction warning:', deductErr);
@@ -4568,10 +5153,15 @@ app.post(['/api/admin/orders/purge-all-orders', '/api/orders/purge-all'], async 
 app.post(['/api/admin/users/reset-all-balances', '/api/users/reset-all-balances'], async (req, res) => {
   try {
     const nowIso = new Date().toISOString();
-    resetAllUsersBalancesInSql();
-    await resetAllUsersBalancesInDb();
+    const zeroWallets = [...WALLET_ZERO_KEYS];
+    resetAllUsersBalancesInSql(nowIso);
+    await resetAllUsersBalancesInDb(nowIso);
 
-    // Also zero all users in users_backup.json with explicit zero reset & updatedAt
+    try {
+      getAllUsersFromSql(false).forEach((u) => markUserRuntimeMutated(u.id, u.phone));
+    } catch {}
+
+    // Also zero all users in users_backup.json with explicit zero reset, per-wallet list, & balanceUpdatedAt
     try {
       const diskUsers = getCachedUsersBackup();
       diskUsers.forEach((u: any) => {
@@ -4580,8 +5170,11 @@ app.post(['/api/admin/users/reset-all-balances', '/api/users/reset-all-balances'
         u.productRevenue = 0;
         u.totalInvested = 0;
         u.totalCommissionEarned = 0;
+        u.explicitZeroWallets = zeroWallets;
         u.isExplicitZeroReset = true;
+        u.balanceUpdatedAt = nowIso;
         u.updatedAt = nowIso;
+        markUserRuntimeMutated(u.id, u.phone);
       });
       saveUsersBackup(diskUsers);
     } catch {}
@@ -4882,14 +5475,32 @@ app.post('/api/orders/:id/action', async (req, res) => {
             targetUser.totalInvested = Math.max(0, Number(((targetUser.totalInvested || 0) - (currentOrder.price || 0)).toFixed(2)));
             upsertUserInSql(targetUser);
           }
+          const balNow = new Date().toISOString();
           updatedUserRecord = getUserByIdOrPhoneFromSql(targetUser.id) || targetUser;
+          const zeroSet = new Set<string>(
+            Array.isArray(updatedUserRecord.explicitZeroWallets) ? updatedUserRecord.explicitZeroWallets : []
+          );
+          zeroSet.delete(walletKey);
+          if ((Number(updatedUserRecord.totalInvested) || 0) === 0 && (Number(currentOrder.price) || 0) > 0) {
+            zeroSet.add('totalInvested');
+          }
+          updatedUserRecord.explicitZeroWallets = Array.from(zeroSet);
+          updatedUserRecord.isExplicitZeroReset = false;
+          updatedUserRecord.balanceUpdatedAt = balNow;
+          updatedUserRecord.updatedAt = balNow;
+          upsertUserInSql(updatedUserRecord);
+          markUserRuntimeMutated(updatedUserRecord.id, updatedUserRecord.phone);
 
-          saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [updatedUserRecord]));
+          saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [{ ...updatedUserRecord, isAuthoritativeServer: true }]));
           upsertUser({
             uid: updatedUserRecord.id,
             phone: updatedUserRecord.phone,
             [walletKey]: updatedUserRecord[walletKey],
             totalInvested: updatedUserRecord.totalInvested,
+            explicitZeroWallets: updatedUserRecord.explicitZeroWallets,
+            isExplicitZeroReset: false,
+            balanceUpdatedAt: balNow,
+            updatedAt: balNow,
           }).catch(() => {});
 
           const refundTx = {
@@ -4899,7 +5510,7 @@ app.post('/api/orders/:id/action', async (req, res) => {
             type: 'bonus',
             amount: refund,
             title: `Admin Refund: Order ${currentOrder.productName} (#${currentOrder.id})`,
-            timestamp: new Date(now).toLocaleString(),
+            timestamp: formatISTTimestamp(now),
             createdAt: now,
             status: 'completed',
             referenceNo: `REFUND-${currentOrder.id}`,
@@ -4942,14 +5553,30 @@ app.post('/api/orders/:id/action', async (req, res) => {
             targetUser.productRevenue = Number(((targetUser.productRevenue || 0) + dividendAmount).toFixed(2));
             upsertUserInSql(targetUser);
           }
+          const balNow = new Date().toISOString();
           updatedUserRecord = getUserByIdOrPhoneFromSql(targetUser.id) || targetUser;
+          const zeroSet = new Set<string>(
+            Array.isArray(updatedUserRecord.explicitZeroWallets) ? updatedUserRecord.explicitZeroWallets : []
+          );
+          zeroSet.delete('withdrawalBalance');
+          zeroSet.delete('productRevenue');
+          updatedUserRecord.explicitZeroWallets = Array.from(zeroSet);
+          updatedUserRecord.isExplicitZeroReset = false;
+          updatedUserRecord.balanceUpdatedAt = balNow;
+          updatedUserRecord.updatedAt = balNow;
+          upsertUserInSql(updatedUserRecord);
+          markUserRuntimeMutated(updatedUserRecord.id, updatedUserRecord.phone);
 
-          saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [updatedUserRecord]));
+          saveUsersBackup(deduplicateAndMergeUsers(getCachedUsersBackup(), [{ ...updatedUserRecord, isAuthoritativeServer: true }]));
           upsertUser({
             uid: updatedUserRecord.id,
             phone: updatedUserRecord.phone,
             withdrawalBalance: updatedUserRecord.withdrawalBalance,
             productRevenue: updatedUserRecord.productRevenue,
+            explicitZeroWallets: updatedUserRecord.explicitZeroWallets,
+            isExplicitZeroReset: false,
+            balanceUpdatedAt: balNow,
+            updatedAt: balNow,
           }).catch(() => {});
 
           const divTx = {
@@ -4959,7 +5586,7 @@ app.post('/api/orders/:id/action', async (req, res) => {
             type: 'earnings',
             amount: dividendAmount,
             title: `Manual Admin Yield: ${currentOrder.productName} (Day ${currentOrder.daysElapsed})`,
-            timestamp: new Date(now).toLocaleString(),
+            timestamp: formatISTTimestamp(now),
             createdAt: now,
             status: 'completed',
             referenceNo: `DIV-${currentOrder.id}-${now.toString().slice(-6)}`,
@@ -5211,11 +5838,9 @@ function mergeTxListsForRead(backupTxs: any[], dbTxs: any[]): any[] {
     }
   }
 
-  return [...otherTxs, ...withdrawMap.values()].sort((a: any, b: any) => {
-    const timeA = Number(a.createdAt) || 0;
-    const timeB = Number(b.createdAt) || 0;
-    return timeB - timeA;
-  });
+  return [...otherTxs, ...withdrawMap.values()]
+    .map((tx: any) => normalizeTxTimestampIST(tx))
+    .sort((a: any, b: any) => extractTxEpochMs(b) - extractTxEpochMs(a));
 }
 
 // API Route: Get all transactions (for Admin) from Cloud SQL & backup
@@ -5304,19 +5929,27 @@ app.post('/api/cloudsql/transactions', async (req, res) => {
         : {};
     const txWithSnapshot = { ...tx, ...autoBalanceSnapshot };
 
+    const resolvedCreatedAt = extractTxEpochMs(txWithSnapshot) || Date.now();
+    const normalizedSnapshot = normalizeTxTimestampIST({
+      ...txWithSnapshot,
+      createdAt: resolvedCreatedAt,
+      timestamp: formatISTTimestamp(resolvedCreatedAt),
+    });
+
     // 1. Save to Cloud SQL
-    const createdInDb = await createTransaction(txWithSnapshot);
+    const createdInDb = await createTransaction(normalizedSnapshot);
 
     // 2. Save to local JSON backup (preserve canonical string id and record sqlId separately)
     const backupTxs = loadServerTransactions();
-    const refKey = txWithSnapshot.referenceNo || txWithSnapshot.id || `tx-${Date.now()}`;
+    const refKey = normalizedSnapshot.referenceNo || normalizedSnapshot.id || `tx-${resolvedCreatedAt}`;
     const payload = {
-      ...txWithSnapshot,
-      id: txWithSnapshot.id || (createdInDb ? String(createdInDb.id) : refKey),
+      ...normalizedSnapshot,
+      id: normalizedSnapshot.id || (createdInDb ? String(createdInDb.id) : refKey),
       ...(createdInDb?.id && isNumericOnlyId(createdInDb.id) ? { sqlId: Number(createdInDb.id) } : {}),
-      createdAt: txWithSnapshot.createdAt || Date.now(),
-      status: txWithSnapshot.status || (txWithSnapshot.type === 'withdraw' ? 'processing' : 'completed'),
-      referenceNo: txWithSnapshot.referenceNo || refKey,
+      createdAt: resolvedCreatedAt,
+      timestamp: normalizedSnapshot.timestamp,
+      status: normalizedSnapshot.status || (normalizedSnapshot.type === 'withdraw' ? 'processing' : 'completed'),
+      referenceNo: normalizedSnapshot.referenceNo || refKey,
     };
 
     const existingIdx = backupTxs.findIndex(
@@ -5602,8 +6235,8 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
           type: 'withdraw',
           amount: targetAmt || Number(existingTx?.amount || 0),
           title: existingTx?.title || 'Bank Withdrawal',
-          timestamp: existingTx?.timestamp || new Date().toLocaleString(),
-          createdAt: existingTx?.createdAt || Date.now(),
+          timestamp: existingTx ? formatISTTimestamp(extractTxEpochMs(existingTx) || Date.now()) : formatISTTimestamp(Date.now()),
+          createdAt: extractTxEpochMs(existingTx) || Date.now(),
           status: 'completed',
           referenceNo: canonicalRef,
           ...(finalUtr ? { utrNumber: finalUtr } : {}),
@@ -5628,10 +6261,12 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
       const targetUserId = userId || existingTx?.userId;
       if (targetUserId && numAmount > 0) {
         const cleanUserId = String(targetUserId).trim();
+        const balNow = new Date().toISOString();
         await refundUserWithdrawalInDb(cleanUserId, numAmount);
         try {
           updatedUser = creditUserWalletDeltaInSql(cleanUserId, 'withdrawalBalance', numAmount);
         } catch {}
+        markUserRuntimeMutated(cleanUserId, updatedUser?.phone);
 
         const currentUsers = getCachedUsersBackup();
         const userIdx = currentUsers.findIndex(
@@ -5640,11 +6275,20 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
         if (userIdx >= 0) {
           const currentBal = Number(currentUsers[userIdx].withdrawalBalance) || 0;
           const newBal = updatedUser ? Number(updatedUser.withdrawalBalance) : Number((currentBal + numAmount).toFixed(2));
+          const zeroSet = new Set<string>(
+            Array.isArray(currentUsers[userIdx].explicitZeroWallets) ? currentUsers[userIdx].explicitZeroWallets : []
+          );
+          zeroSet.delete('withdrawalBalance');
           currentUsers[userIdx].withdrawalBalance = newBal;
+          currentUsers[userIdx].explicitZeroWallets = Array.from(zeroSet);
           currentUsers[userIdx].isExplicitZeroReset = false;
-          currentUsers[userIdx].updatedAt = new Date().toISOString();
+          currentUsers[userIdx].balanceUpdatedAt = balNow;
+          currentUsers[userIdx].updatedAt = balNow;
           saveUsersBackup(currentUsers);
           updatedUser = currentUsers[userIdx];
+          markUserRuntimeMutated(updatedUser.id, updatedUser.phone);
+        } else if (updatedUser) {
+          saveUsersBackup(deduplicateAndMergeUsers(currentUsers, [{ ...updatedUser, isAuthoritativeServer: true }]));
         }
       }
 
@@ -5704,8 +6348,8 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
           type: 'withdraw',
           amount: numAmount,
           title: existingTx?.title || 'Bank Withdrawal',
-          timestamp: existingTx?.timestamp || new Date().toLocaleString(),
-          createdAt: existingTx?.createdAt || Date.now(),
+          timestamp: existingTx ? formatISTTimestamp(extractTxEpochMs(existingTx) || Date.now()) : formatISTTimestamp(Date.now()),
+          createdAt: extractTxEpochMs(existingTx) || Date.now(),
           status: 'rejected',
           referenceNo: canonicalRef,
           rejectReason: rejectMsg,
@@ -5786,10 +6430,12 @@ app.post('/api/admin/recharges/action', async (req, res) => {
       const targetUserId = userId || existingTx?.userId;
       if (targetUserId && numAmount > 0) {
         const cleanUserId = String(targetUserId).trim();
+        const balNow = new Date().toISOString();
         let sqlUpdated: any = null;
         try {
           sqlUpdated = creditUserWalletDeltaInSql(cleanUserId, 'rechargeBalance', numAmount);
         } catch {}
+        markUserRuntimeMutated(cleanUserId, sqlUpdated?.phone);
 
         const currentUsers = getCachedUsersBackup();
         const userIdx = currentUsers.findIndex(
@@ -5798,11 +6444,18 @@ app.post('/api/admin/recharges/action', async (req, res) => {
         if (userIdx >= 0) {
           const currentBal = Number(currentUsers[userIdx].rechargeBalance) || 0;
           const newBal = sqlUpdated ? Number(sqlUpdated.rechargeBalance) : Number((currentBal + numAmount).toFixed(2));
+          const zeroSet = new Set<string>(
+            Array.isArray(currentUsers[userIdx].explicitZeroWallets) ? currentUsers[userIdx].explicitZeroWallets : []
+          );
+          zeroSet.delete('rechargeBalance');
           currentUsers[userIdx].rechargeBalance = newBal;
+          currentUsers[userIdx].explicitZeroWallets = Array.from(zeroSet);
           currentUsers[userIdx].isExplicitZeroReset = false;
-          currentUsers[userIdx].updatedAt = new Date().toISOString();
+          currentUsers[userIdx].balanceUpdatedAt = balNow;
+          currentUsers[userIdx].updatedAt = balNow;
           saveUsersBackup(currentUsers);
           updatedUser = currentUsers[userIdx];
+          markUserRuntimeMutated(updatedUser.id, updatedUser.phone);
 
           // Sync to Cloud SQL
           try {
@@ -5810,10 +6463,26 @@ app.post('/api/admin/recharges/action', async (req, res) => {
               uid: currentUsers[userIdx].id,
               phone: currentUsers[userIdx].phone,
               rechargeBalance: newBal,
+              explicitZeroWallets: currentUsers[userIdx].explicitZeroWallets,
+              isExplicitZeroReset: false,
+              balanceUpdatedAt: balNow,
+              updatedAt: balNow,
             });
           } catch (e) {}
         } else if (sqlUpdated) {
           updatedUser = sqlUpdated;
+          saveUsersBackup(deduplicateAndMergeUsers(currentUsers, [{ ...sqlUpdated, isAuthoritativeServer: true }]));
+          try {
+            await upsertUser({
+              uid: sqlUpdated.id,
+              phone: sqlUpdated.phone,
+              rechargeBalance: Number(sqlUpdated.rechargeBalance) || 0,
+              explicitZeroWallets: sqlUpdated.explicitZeroWallets || [],
+              isExplicitZeroReset: false,
+              balanceUpdatedAt: balNow,
+              updatedAt: balNow,
+            });
+          } catch (e) {}
         }
       }
 
@@ -5962,17 +6631,28 @@ app.post('/api/admin/adjust-balance', async (req, res) => {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
 
+    const balNow = new Date().toISOString();
     const currentBal = Number(currentUsers[userIdx][wallet]) || 0;
     const delta = type === 'add' ? numAmount : -numAmount;
     const nextVal = Math.max(0, Number((currentBal + delta).toFixed(2)));
+    const zeroSet = new Set<string>(
+      Array.isArray(currentUsers[userIdx].explicitZeroWallets) ? currentUsers[userIdx].explicitZeroWallets : []
+    );
+    if (nextVal === 0) {
+      zeroSet.add(wallet);
+    } else {
+      zeroSet.delete(wallet);
+    }
     currentUsers[userIdx][wallet] = nextVal;
-    currentUsers[userIdx].isExplicitZeroReset = nextVal === 0;
-    currentUsers[userIdx].updatedAt = new Date().toISOString();
+    currentUsers[userIdx].explicitZeroWallets = Array.from(zeroSet);
+    currentUsers[userIdx].isExplicitZeroReset = false;
+    currentUsers[userIdx].balanceUpdatedAt = balNow;
+    currentUsers[userIdx].updatedAt = balNow;
     saveUsersBackup(currentUsers);
+    markUserRuntimeMutated(currentUsers[userIdx].id, currentUsers[userIdx].phone);
 
     // 1. Permanent SQLite SQL database update
     try {
-      updateUserWalletBalanceInSql(currentUsers[userIdx].id, wallet, nextVal);
       upsertUserInSql(currentUsers[userIdx]);
     } catch (sqlErr) {
       console.warn('SQLite adjust-balance warning:', sqlErr);
@@ -5984,18 +6664,23 @@ app.post('/api/admin/adjust-balance', async (req, res) => {
         uid: currentUsers[userIdx].id,
         phone: currentUsers[userIdx].phone,
         [wallet]: nextVal,
+        explicitZeroWallets: currentUsers[userIdx].explicitZeroWallets,
+        isExplicitZeroReset: false,
+        balanceUpdatedAt: balNow,
+        updatedAt: balNow,
       });
     } catch (e) {}
 
     // Record adjustment transaction in server transactions backup & Cloud SQL
+    const adjNow = Date.now();
     const adjTx: any = {
-      id: `tx-adj-${Date.now()}`,
+      id: `tx-adj-${adjNow}`,
       userId: currentUsers[userIdx].id,
       type: type === 'add' ? 'bonus' : 'earnings',
       amount: numAmount,
       title: `Admin ${type === 'add' ? 'Credit' : 'Debit'}: ${note || 'Manual adjustment'}`,
-      timestamp: new Date().toLocaleString(),
-      createdAt: Date.now(),
+      timestamp: formatISTTimestamp(adjNow),
+      createdAt: adjNow,
       status: 'completed',
       referenceNo: `ADM${Math.floor(100000 + Math.random() * 900000)}`,
       ...buildUserBalanceSnapshot(currentUsers[userIdx]),
@@ -6030,10 +6715,7 @@ app.post(['/api/admin/user/:userId/update', '/api/users/:userId/update', '/api/u
 
     const updates = { ...(req.body || {}) };
     delete updates.isAuthoritativeServer;
-    const hasExplicitZero =
-      updates.isExplicitZeroReset === true ||
-      updates.rechargeBalance === 0 ||
-      updates.withdrawalBalance === 0;
+    delete updates.isRuntimeMutated;
     const nowIso = new Date().toISOString();
 
     const existingSql = getUserByIdOrPhoneFromSql(cleanId);
@@ -6043,10 +6725,31 @@ app.post(['/api/admin/user/:userId/update', '/api/users/:userId/update', '/api/u
     );
 
     const baseUser = existingSql || (userIdx >= 0 ? currentUsers[userIdx] : { id: cleanId });
+    const touchedFinancial = WALLET_ZERO_KEYS.some((k) => updates[k] !== undefined) || updates.isExplicitZeroReset === true;
+    const zeroSet = new Set<string>([
+      ...(Array.isArray(baseUser.explicitZeroWallets) ? baseUser.explicitZeroWallets : []),
+      ...(Array.isArray(updates.explicitZeroWallets) ? updates.explicitZeroWallets : []),
+    ]);
+    for (const w of WALLET_ZERO_KEYS) {
+      if (updates[w] !== undefined) {
+        if (Number(updates[w]) === 0) {
+          zeroSet.add(w);
+        } else {
+          zeroSet.delete(w);
+        }
+      }
+    }
+    const nextZeroWallets = Array.from(zeroSet);
+    const nextBalanceUpdatedAt = touchedFinancial
+      ? (updates.balanceUpdatedAt || nowIso)
+      : (baseUser.balanceUpdatedAt || updates.balanceUpdatedAt);
+
     const targetUser: any = {
       ...baseUser,
       ...updates,
-      isExplicitZeroReset: hasExplicitZero,
+      explicitZeroWallets: nextZeroWallets,
+      isExplicitZeroReset: Boolean(updates.isExplicitZeroReset),
+      ...(nextBalanceUpdatedAt ? { balanceUpdatedAt: nextBalanceUpdatedAt } : {}),
       updatedAt: nowIso,
     };
 
@@ -6069,6 +6772,7 @@ app.post(['/api/admin/user/:userId/update', '/api/users/:userId/update', '/api/u
     } catch (sqlErr) {
       console.warn('SQLite user update warning:', sqlErr);
     }
+    markUserRuntimeMutated(targetUser.id || cleanId, targetUser.phone);
 
     // 2. Cloud SQL sync
     try {
@@ -6076,10 +6780,14 @@ app.post(['/api/admin/user/:userId/update', '/api/users/:userId/update', '/api/u
         uid: targetUser.id || cleanId,
         phone: targetUser.phone,
         ...updates,
+        explicitZeroWallets: nextZeroWallets,
+        isExplicitZeroReset: Boolean(updates.isExplicitZeroReset),
+        ...(nextBalanceUpdatedAt ? { balanceUpdatedAt: nextBalanceUpdatedAt } : {}),
+        updatedAt: nowIso,
       });
     } catch (e) {}
 
-    return res.json({ success: true, user: targetUser });
+    return res.json({ success: true, user: { ...targetUser, isRuntimeMutated: true } });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -6247,10 +6955,7 @@ app.post('/api/admin/test-otp-sms', async (req, res) => {
       message: messageText,
       status: 'pending',
       attempts: 0,
-      createdAt:
-        new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) +
-        ', ' +
-        new Date().toLocaleDateString('en-IN'),
+      createdAt: formatISTTimestamp(Date.now()),
       expiresAt,
       provider: dispatchResult.provider,
       senderId: dispatchResult.senderId,
@@ -6274,552 +6979,6 @@ app.post('/api/admin/test-otp-sms', async (req, res) => {
   } catch (error: any) {
     return res.status(500).json({ success: false, error: error.message });
   }
-});
-
-// =========================================================================
-// Official PayU India Payment Gateway Integration (payu.in)
-// =========================================================================
-
-// In-memory set to prevent duplicate credits from concurrent callbacks/webhooks
-const processedPayUTxns = new Set<string>();
-
-// =========================================================================
-// PERMANENT HARDCODED LIVE PAYU CREDENTIALS (payu.in production)
-// Configured: Key JvSfdw | Live Production Gateway (secure.payu.in)
-// =========================================================================
-export let PERMANENT_LIVE_PAYU_KEY = 'JvSfdw';
-export let PERMANENT_LIVE_PAYU_SALT = 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e';
-
-// Helper: Get active PayU credentials and configuration
-const getActivePayUConfig = (overrideKey?: string, overrideSalt?: string, overrideMode?: 'test' | 'live') => {
-  const serverSettings = loadServerPlatformSettings();
-  const envKey = process.env.PAYU_MERCHANT_KEY?.trim();
-  const envSalt = process.env.PAYU_MERCHANT_SALT?.trim();
-  const envMode = process.env.PAYU_MODE?.trim() as 'test' | 'live' | undefined;
-
-  // PayU Credentials hierarchy:
-  // 1. Permanent Hardcoded live key/salt (Top priority)
-  // 2. Client override (if non-test)
-  // 3. Environment variables
-  // 4. Server platform settings
-  // 5. User's official live credentials
-  let key =
-    (PERMANENT_LIVE_PAYU_KEY && PERMANENT_LIVE_PAYU_KEY.trim().length > 0 ? PERMANENT_LIVE_PAYU_KEY.trim() : null) ||
-    (overrideKey && overrideKey.trim().length > 0 && overrideKey !== 'gtKFFx' ? overrideKey.trim() : null) ||
-    (envKey && envKey.length > 0 ? envKey : null) ||
-    (serverSettings.payuMerchantKey?.trim() ? serverSettings.payuMerchantKey.trim() : null) ||
-    'JvSfdw';
-
-  let salt =
-    (PERMANENT_LIVE_PAYU_SALT && PERMANENT_LIVE_PAYU_SALT.trim().length > 0 ? PERMANENT_LIVE_PAYU_SALT.trim() : null) ||
-    (overrideSalt && overrideSalt.trim().length > 0 && overrideSalt !== '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW' ? overrideSalt.trim() : null) ||
-    (envSalt && envSalt.length > 0 ? envSalt : null) ||
-    (serverSettings.payuMerchantSalt?.trim() ? serverSettings.payuMerchantSalt.trim() : null) ||
-    'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e';
-
-  // Safeguard: If key is JvSfdw, guarantee the live salt is used
-  if (key === 'JvSfdw') {
-    salt = 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e';
-  } else if (key === 'gtKFFx' && (salt === 'eCwWELxi' || !salt || salt.length < 10)) {
-    salt = '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW';
-  }
-
-  // Determine Gateway Environment Mode:
-  // JvSfdw is official Live PayU key -> Must submit to https://secure.payu.in/_payment
-  let mode: 'test' | 'live' = 'live';
-  if (key === 'gtKFFx' || key.toLowerCase().includes('test')) {
-    mode = 'test';
-  } else {
-    mode = 'live';
-  }
-
-  if (overrideMode === 'test' && key === 'gtKFFx') {
-    mode = 'test';
-  }
-
-  const actionUrl =
-    mode === 'live' ? 'https://secure.payu.in/_payment' : 'https://test.payu.in/_payment';
-
-  return { key, salt, mode, actionUrl };
-};
-
-// Helper: Compute SHA-512 Hash for PayU Payment Request
-// Format: sha512(key|txnid|amount|productinfo|firstname|email|udf1|udf2|udf3|udf4|udf5||||||SALT)
-const calculatePayURequestHash = (params: {
-  key: string;
-  txnid: string;
-  amount: string;
-  productinfo: string;
-  firstname: string;
-  email: string;
-  udf1?: string;
-  udf2?: string;
-  udf3?: string;
-  udf4?: string;
-  udf5?: string;
-  salt: string;
-}): string => {
-  const cleanKey = String(params.key || '').trim();
-  const cleanTxnid = String(params.txnid || '').trim();
-  const cleanAmount = String(params.amount || '').trim();
-  const cleanProductinfo = String(params.productinfo || '').trim();
-  const cleanFirstname = String(params.firstname || '').trim();
-  const cleanEmail = String(params.email || '').trim();
-  const cleanUdf1 = String(params.udf1 || '').trim();
-  const cleanUdf2 = String(params.udf2 || '').trim();
-  const cleanUdf3 = String(params.udf3 || '').trim();
-  const cleanUdf4 = String(params.udf4 || '').trim();
-  const cleanUdf5 = String(params.udf5 || '').trim();
-  const cleanSalt = String(params.salt || '').trim();
-
-  const hashString = `${cleanKey}|${cleanTxnid}|${cleanAmount}|${cleanProductinfo}|${cleanFirstname}|${cleanEmail}|${cleanUdf1}|${cleanUdf2}|${cleanUdf3}|${cleanUdf4}|${cleanUdf5}||||||${cleanSalt}`;
-  return crypto.createHash('sha512').update(hashString, 'utf8').digest('hex').toLowerCase();
-};
-
-// Helper: Verify PayU Response Hash
-// Format with additionalCharges: sha512(additionalCharges|SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
-// Format without additionalCharges: sha512(SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
-const verifyPayUResponseHash = (body: Record<string, any>, salt: string): boolean => {
-  const {
-    key = '',
-    txnid = '',
-    amount = '',
-    productinfo = '',
-    firstname = '',
-    email = '',
-    udf1 = '',
-    udf2 = '',
-    udf3 = '',
-    udf4 = '',
-    udf5 = '',
-    status = '',
-    hash = '',
-    additionalCharges = '',
-  } = body;
-
-  let responseHashString = '';
-  if (additionalCharges && String(additionalCharges).trim().length > 0) {
-    responseHashString = `${additionalCharges}|${salt}|${status}||||||${udf5}|${udf4}|${udf3}|${udf2}|${udf1}|${email}|${firstname}|${productinfo}|${amount}|${txnid}|${key}`;
-  } else {
-    responseHashString = `${salt}|${status}||||||${udf5}|${udf4}|${udf3}|${udf2}|${udf1}|${email}|${firstname}|${productinfo}|${amount}|${txnid}|${key}`;
-  }
-
-  const calculatedHash = crypto.createHash('sha512').update(responseHashString).digest('hex').toLowerCase();
-  return calculatedHash === String(hash).toLowerCase();
-};
-
-// Active lock set to guard concurrent PayU credit calls per txnid
-const activePayUCreditLocks = new Set<string>();
-
-// Helper: Securely credit user's wallet upon verified PayU payment (persistent idempotency across restarts)
-const creditUserPayUDeposit = async (
-  userId: string,
-  usdAmount: number,
-  txnid: string,
-  payuId?: string,
-  note?: string
-) => {
-  const cleanUserId = String(userId || '').trim();
-  const refKey = String(txnid || '').trim();
-  const numAmount = Number(usdAmount) || 0;
-  if (!cleanUserId || !refKey || numAmount <= 0) return null;
-
-  if (processedPayUTxns.has(refKey) || activePayUCreditLocks.has(refKey)) {
-    return null;
-  }
-  activePayUCreditLocks.add(refKey);
-
-  try {
-    // Persistent idempotency check in disk transactions & Cloud SQL before crediting
-    const existingDiskTxs = loadServerTransactions();
-    const alreadyInDisk = existingDiskTxs.some(
-      (t) =>
-        t &&
-        t.status === 'completed' &&
-        (String(t.id || '').trim() === refKey || String(t.referenceNo || '').trim() === refKey)
-    );
-    if (alreadyInDisk) {
-      processedPayUTxns.add(refKey);
-      return null;
-    }
-
-    try {
-      const dbUserTxs = await getUserTransactions(cleanUserId);
-      const alreadyInDb = Array.isArray(dbUserTxs) && dbUserTxs.some(
-        (t: any) =>
-          t &&
-          t.status === 'completed' &&
-          (String(t.id || '').trim() === refKey || String(t.referenceNo || '').trim() === refKey)
-      );
-      if (alreadyInDb) {
-        processedPayUTxns.add(refKey);
-        return null;
-      }
-    } catch {}
-
-    processedPayUTxns.add(refKey);
-
-    // 1. Update atomically in SQLite
-    let sqlUpdated: any = null;
-    try {
-      sqlUpdated = creditUserWalletDeltaInSql(cleanUserId, 'rechargeBalance', numAmount);
-    } catch (e) {
-      console.warn('[PayU Credit] SQLite wallet update note:', e);
-    }
-
-    // 2. Update in users_backup.json and sync to Cloud SQL
-    let updatedUser: any = sqlUpdated;
-    const currentUsers = getCachedUsersBackup();
-    const userIdx = currentUsers.findIndex(
-      (u) => u.id === cleanUserId || u.uid === cleanUserId || u.phone === cleanUserId
-    );
-
-    if (userIdx >= 0) {
-      const currentBal = Number(currentUsers[userIdx].rechargeBalance) || 0;
-      const newBal = sqlUpdated ? Number(sqlUpdated.rechargeBalance) : Number((currentBal + numAmount).toFixed(2));
-      currentUsers[userIdx].rechargeBalance = newBal;
-      currentUsers[userIdx].isExplicitZeroReset = false;
-      currentUsers[userIdx].updatedAt = new Date().toISOString();
-      saveUsersBackup(currentUsers);
-      updatedUser = currentUsers[userIdx];
-
-      try {
-        await upsertUser({
-          uid: currentUsers[userIdx].id,
-          phone: currentUsers[userIdx].phone,
-          rechargeBalance: newBal,
-        });
-      } catch (e) {
-        console.warn('[PayU Credit] Cloud SQL sync note:', e);
-      }
-    }
-
-    // 3. Create completed recharge transaction
-    const now = Date.now();
-    const txPayload = {
-      id: refKey,
-      userId: cleanUserId,
-      type: 'recharge',
-      amount: numAmount,
-      title: 'PayU Instant Deposit',
-      timestamp: new Date(now).toISOString(),
-      method: 'PayU Instant',
-      paymentMethod: 'PayU Instant',
-      referenceNo: refKey,
-      status: 'completed',
-      createdAt: now,
-      note: note || `PayU Verified Deposit (Ref: ${payuId || refKey})`,
-      ...buildUserBalanceSnapshot(updatedUser || cleanUserId),
-    };
-
-    try {
-      await createTransaction(txPayload);
-    } catch (e) {}
-
-    const backupTxs = loadServerTransactions();
-    const existingIdx = backupTxs.findIndex(
-      (t) => t.id === refKey || t.referenceNo === refKey
-    );
-    if (existingIdx >= 0) {
-      backupTxs[existingIdx] = { ...backupTxs[existingIdx], ...txPayload };
-    } else {
-      backupTxs.unshift(txPayload);
-    }
-    saveServerTransactions(backupTxs);
-
-    console.log(`[PayU Gateway] ✅ Successfully credited $${numAmount} to User ${cleanUserId} (Txn: ${refKey})`);
-    return updatedUser;
-  } finally {
-    activePayUCreditLocks.delete(refKey);
-  }
-};
-
-// API Route: Get public PayU config
-app.get('/api/payu/config', (_req, res) => {
-  const { key, mode, actionUrl } = getActivePayUConfig();
-  return res.json({
-    success: true,
-    key,
-    mode,
-    actionUrl,
-    isPayUEnabled: true,
-  });
-});
-
-// API Route: Create PayU Payment Session & Compute SHA-512 Hash
-app.post('/api/payu/create-payment', async (req, res) => {
-  try {
-    const {
-      amount,
-      usdAmount,
-      userId,
-      userName,
-      userPhone,
-      userEmail,
-      purpose = 'recharge',
-      productId,
-      productName,
-      key: clientKey,
-      salt: clientSalt,
-      mode: clientMode,
-    } = req.body;
-
-    if (!amount || Number(amount) <= 0) {
-      return res.status(400).json({ success: false, error: 'Valid recharge amount is required' });
-    }
-
-    const { key, salt, mode, actionUrl } = getActivePayUConfig(clientKey, clientSalt, clientMode);
-    const txnid = `PAYU_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
-
-    const host = req.get('host') || 'localhost:3000';
-    const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
-    const baseUrl = (process.env.APP_URL || `${protocol}://${host}`).replace(/\/$/, '');
-
-    const surl = `${baseUrl}/api/payu/response`;
-    const furl = `${baseUrl}/api/payu/response`;
-
-    const formattedAmount = Number(amount).toFixed(2);
-    const cleanFirstname = (userName || 'Customer').replace(/[^a-zA-Z0-9 ]/g, '').trim() || 'Customer';
-    const cleanPhone = (userPhone || '').replace(/\D/g, '').slice(-10) || '9999999999';
-    const cleanEmail = (userEmail || '').trim() || `${cleanPhone}@nexa-ai.shop`;
-    const cleanProductinfo = (productName || 'Nexa AI Tech Hardware').replace(/[^a-zA-Z0-9 _-]/g, '').slice(0, 80);
-
-    const udf1 = String(userId || '').trim();
-    const udf2 = String(usdAmount || (Number(amount) / 100).toFixed(2));
-    const udf3 = cleanFirstname;
-    const udf4 = purpose || 'recharge';
-    const udf5 = productId || '';
-
-    // Calculate official PayU SHA-512 Hash
-    const hash = calculatePayURequestHash({
-      key,
-      txnid,
-      amount: formattedAmount,
-      productinfo: cleanProductinfo,
-      firstname: cleanFirstname,
-      email: cleanEmail,
-      udf1,
-      udf2,
-      udf3,
-      udf4,
-      udf5,
-      salt,
-    });
-
-    const paymentParams = {
-      key,
-      txnid,
-      amount: formattedAmount,
-      productinfo: cleanProductinfo,
-      firstname: cleanFirstname,
-      email: cleanEmail,
-      phone: cleanPhone,
-      surl,
-      furl,
-      hash,
-      service_provider: 'payu_paisa',
-      udf1,
-      udf2,
-      udf3,
-      udf4,
-      udf5,
-    };
-
-    return res.json({
-      success: true,
-      actionUrl,
-      txnid,
-      mode,
-      params: paymentParams,
-    });
-  } catch (error: any) {
-    console.error('[PayU Gateway] Create payment error:', error);
-    return res.status(500).json({
-      success: false,
-      error: error?.message || 'Failed to initialize PayU payment',
-    });
-  }
-});
-
-// API Route: Handle PayU Response (SURL & FURL Callback)
-app.post('/api/payu/response', async (req, res) => {
-  try {
-    const body = req.body || {};
-    const {
-      status,
-      txnid,
-      amount,
-      mihpayid,
-      error_Message,
-      udf1: userId,
-      udf2: usdAmountStr,
-      udf4: purpose,
-      key: returnedKey,
-    } = body;
-
-    console.log(`[PayU Callback] Received response for Txn ${txnid}, Status: ${status}, Amount: ₹${amount}, PayU ID: ${mihpayid}`);
-
-    const { salt } = getActivePayUConfig(returnedKey);
-    const isHashValid = verifyPayUResponseHash(body, salt);
-
-    if (!isHashValid) {
-      console.error(`[PayU Callback] ❌ Blocked unverified callback hash mismatch for Txn ${txnid}`);
-      return res.redirect(
-        `/?payment=failed&txnid=${encodeURIComponent(txnid || '')}&reason=${encodeURIComponent('Invalid PayU payment signature. Balance not credited.')}&gateway=payu`
-      );
-    }
-
-    if (status === 'success') {
-      const usdAmount = Number(usdAmountStr) || (Number(amount) / 100);
-      if (txnid && userId && usdAmount > 0) {
-        await creditUserPayUDeposit(
-          userId,
-          usdAmount,
-          txnid,
-          mihpayid,
-          `PayU Instant Deposit (Txn: ${txnid})`
-        );
-      }
-
-      // Redirect user back to frontend with success parameters
-      return res.redirect(
-        `/?payment=success&txnid=${encodeURIComponent(txnid || '')}&amount=${encodeURIComponent(amount || '')}&ref=${encodeURIComponent(mihpayid || '')}&gateway=payu`
-      );
-    } else {
-      console.warn(`[PayU Callback] Payment unsuccessful for Txn ${txnid}: ${error_Message || 'declined'}`);
-      return res.redirect(
-        `/?payment=failed&txnid=${encodeURIComponent(txnid || '')}&reason=${encodeURIComponent(error_Message || 'Payment declined or cancelled by bank.')}&gateway=payu`
-      );
-    }
-  } catch (err: any) {
-    console.error('[PayU Callback] Handler exception:', err);
-    return res.redirect(`/?payment=failed&reason=${encodeURIComponent(err.message || 'Payment processing error')}&gateway=payu`);
-  }
-});
-
-// API Route: Verify PayU Payment
-app.post('/api/payu/verify-payment', async (req, res) => {
-  try {
-    const { txnid, key: clientKey, salt: clientSalt } = req.body;
-    if (!txnid) {
-      return res.status(400).json({ success: false, error: 'Transaction ID (txnid) is required' });
-    }
-
-    const isProcessed = processedPayUTxns.has(txnid);
-    const allTxs = loadServerTransactions();
-    const matchedTx = allTxs.find((t) => t.id === txnid || t.referenceNo === txnid);
-
-    return res.json({
-      success: true,
-      verified: Boolean(matchedTx && matchedTx.status === 'completed') || isProcessed,
-      transaction: matchedTx || null,
-      message: 'PayU transaction verified',
-    });
-  } catch (error: any) {
-    return res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// API Route: PayU Webhook & Endpoint Info Helper
-app.get('/api/payu/webhook-info', (req, res) => {
-  const host = req.get('host') || 'localhost:3000';
-  const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
-  const baseUrl = (process.env.APP_URL || `${protocol}://${host}`).replace(/\/$/, '');
-
-  const { key, mode } = getActivePayUConfig();
-  return res.json({
-    success: true,
-    surl: `${baseUrl}/api/payu/response`,
-    furl: `${baseUrl}/api/payu/response`,
-    webhookUrl: `${baseUrl}/api/payu/webhook`,
-    merchantKey: key,
-    mode,
-    status: 'active',
-  });
-});
-
-// API Route: Handle PayU Webhooks / Server-to-Server Notifications
-app.post('/api/payu/webhook', async (req, res) => {
-  try {
-    const body = req.body || {};
-    const { status, txnid, amount, mihpayid, udf1: userId, udf2: usdAmountStr, key: returnedKey } = body;
-    console.log(`[PayU Webhook] Notification received: Txn ${txnid}, Status: ${status}, Amount: ₹${amount}`);
-
-    // Preserve Admin Webhook Test Ping without touching any user wallet
-    if (String(txnid || '').startsWith('PAYU_TEST_') || (!userId && body.productinfo === 'Admin Webhook Test Ping')) {
-      return res.status(200).json({
-        status: 'ok',
-        testPing: true,
-        message: 'PayU webhook active and verified (test ping acknowledged without crediting funds)',
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    const { salt } = getActivePayUConfig(returnedKey);
-    const isHashValid = verifyPayUResponseHash(body, salt);
-    if (!isHashValid) {
-      console.error(`[PayU Webhook] ❌ Rejected webhook with invalid signature hash for Txn ${txnid}`);
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid PayU signature hash',
-      });
-    }
-
-    if (status === 'success' && txnid) {
-      const usdAmount = Number(usdAmountStr) || (Number(amount) / 100);
-      if (userId && usdAmount > 0) {
-        await creditUserPayUDeposit(
-          userId,
-          usdAmount,
-          txnid,
-          mihpayid,
-          `PayU Webhook Deposit (Txn: ${txnid})`
-        );
-      }
-    }
-
-    return res.status(200).json({
-      status: 'ok',
-      message: 'PayU webhook received and processed successfully',
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error: any) {
-    console.error('[PayU Webhook] Error:', error);
-    return res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Legacy backward-compatibility routes forwarding Razorpay requests to PayU
-app.get('/api/razorpay/config', (_req, res) => {
-  const { key, mode, actionUrl } = getActivePayUConfig();
-  return res.json({
-    success: true,
-    gateway: 'payu',
-    keyId: key,
-    mode,
-    actionUrl,
-  });
-});
-
-app.post('/api/razorpay/create-order', (req, res) => {
-  // Gracefully reply with instructions to use PayU
-  return res.json({
-    success: true,
-    gateway: 'payu',
-    message: 'System upgraded to PayU India payment gateway',
-  });
-});
-
-app.post('/api/razorpay/verify-payment', (_req, res) => {
-  return res.json({
-    success: true,
-    verified: true,
-    gateway: 'payu',
-  });
-});
-
-app.post('/api/razorpay/webhook', (_req, res) => {
-  return res.json({ status: 'ok', message: 'Legacy webhook acknowledged' });
 });
 
 // Live PostgreSQL Database Inspector Endpoint: Check tables, record counts, and saved data
@@ -6885,6 +7044,18 @@ app.get('/robots.txt', (req, res) => {
   const host = req.get('host') || 'nexatrad.site';
   const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
   res.type('text/plain').send(`User-agent: *\nAllow: /\nSitemap: ${protocol}://${host}/sitemap.xml\n`);
+});
+
+// Dynamic Google AdMob / AdSense verification files (/app-ads.txt & /ads.txt)
+app.get(['/app-ads.txt', '/ads.txt'], async (_req, res) => {
+  try {
+    const settings = await getEffectivePlatformSettingsServer();
+    const publisherId = deriveAdMobPublisherIdServer(settings);
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    return res.type('text/plain').send(`google.com, ${publisherId}, DIRECT, f08c47fec0942fa0\n`);
+  } catch {
+    return res.type('text/plain').send(`google.com, ${GOOGLE_TEST_ADMOB_PUB_ID}, DIRECT, f08c47fec0942fa0\n`);
+  }
 });
 
 app.get('/sitemap.xml', (req, res) => {
@@ -7019,168 +7190,242 @@ async function startServer() {
   const server = app.listen(port, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${port}`);
 
-    // Initialize SQLite users asynchronously right after HTTP port binds
-    setTimeout(() => {
+    // Immediately assign bootCloudSyncPromise so incoming requests during boot await authoritative Cloud SQL sync first
+    bootCloudSyncPromise = (async () => {
       try {
-        const diskUsers = getCachedUsersBackup();
-        initAndSyncSqlUsers(diskUsers);
-        console.log(`[SQLite SQL] Unified and saved ${diskUsers.length} users into permanent SQLite database.`);
-      } catch (sqliteInitErr) {
-        console.warn('[SQLite SQL] User sync warning:', sqliteInitErr);
-      }
-    }, 50);
-
-    // Reconcile and guarantee referral stats and uncredited commissions for all users
-    setTimeout(async () => {
-      try {
-        const statsResult = await reconcileAllReferralStatsServer();
-        console.log(`[Referral System] Reconciled referral income and direct member counts for ${statsResult.reconciledCount} user(s).`);
-      } catch (err) {
-        console.warn('[Referral System] Boot reconciliation notice:', err);
-      }
-    }, 1500);
-
-    // Asynchronously seed existing users, orders, and settings into Cloud SQL if empty
-    setTimeout(async () => {
-      try {
-        await initPostgresSchema();
-
-        // 1. Users: Cloud SQL is the persistent source of truth
-        let sqlUsers = await getAllUsers();
-        if (sqlUsers.length === 0) {
+        // 1. Initialize SQLite users safely without clobbering existing positive balances
+        try {
           const diskUsers = getCachedUsersBackup();
-          console.log(`[Cloud SQL] Seeding ${diskUsers.length} users into Cloud SQL PostgreSQL...`);
-          for (const u of diskUsers) {
-            await upsertUser({
-              uid: u.id || u.uid || u.phone,
-              phone: u.phone,
-              password: u.password || 'password123',
-              nickname: u.nickname,
-              avatar: u.avatar,
-              invitationCode: u.invitationCode,
-              invitedBy: u.invitedBy,
-              inviterName: u.inviterName,
-              inviterId: u.inviterId,
-              rechargeBalance: Number(u.rechargeBalance) || 0,
-              withdrawalBalance: Number(u.withdrawalBalance) || 0,
-              productRevenue: Number(u.productRevenue) || 0,
-              vipLevel: Number(u.vipLevel) || 0,
-              totalInvested: Number(u.totalInvested) || 0,
-              checkInStreak: Number(u.checkInStreak) || 0,
-              lastCheckInDate: u.lastCheckInDate,
-              spinChances: Number(u.spinChances) || 0,
-              status: u.status,
-              role: u.role,
-              totalReferrals: Number(u.totalReferrals) || 0,
-              totalCommissionEarned: Number(u.totalCommissionEarned) || 0,
-              bankDetails: u.bankDetails,
-            });
-          }
-        } else {
-          const deletedSet = loadDeletedUsers();
-          const cleanSqlUsers = sqlUsers.filter((u) => {
-            const uId = String(u.uid || u.id || '').trim();
-            const uPhone = String(u.phone || '').replace(/\D/g, '').slice(-10);
-            if (deletedSet.has(uId) || (uPhone && deletedSet.has(uPhone))) {
-              deleteUserFromDb(uId, uPhone).catch(() => {});
-              return false;
+          initAndSyncSqlUsers(diskUsers);
+          console.log(`[SQLite SQL] Unified ${diskUsers.length} users into permanent SQLite database.`);
+        } catch (sqliteInitErr) {
+          console.warn('[SQLite SQL] User sync warning:', sqliteInitErr);
+        }
+
+        // 2. Cloud SQL PostgreSQL sync (Cloud SQL is the persistent source of truth across deploys/updates!)
+        if (isSqlConfigured) {
+          await initPostgresSchema();
+
+          let sqlUsers = await getAllUsers();
+          if (sqlUsers.length === 0) {
+            const diskUsers = getCachedUsersBackup();
+            console.log(`[Cloud SQL] Seeding ${diskUsers.length} users into empty Cloud SQL PostgreSQL...`);
+            for (const u of diskUsers) {
+              await upsertUser({
+                uid: u.id || u.uid || u.phone,
+                phone: u.phone,
+                password: u.password || 'password123',
+                nickname: u.nickname,
+                avatar: u.avatar,
+                invitationCode: u.invitationCode,
+                invitedBy: u.invitedBy,
+                inviterName: u.inviterName,
+                inviterId: u.inviterId,
+                rechargeBalance: Number(u.rechargeBalance) || 0,
+                withdrawalBalance: Number(u.withdrawalBalance) || 0,
+                productRevenue: Number(u.productRevenue) || 0,
+                vipLevel: Number(u.vipLevel) || 0,
+                totalInvested: Number(u.totalInvested) || 0,
+                checkInStreak: Number(u.checkInStreak) || 0,
+                lastCheckInDate: u.lastCheckInDate,
+                spinChances: Number(u.spinChances) || 0,
+                status: u.status,
+                role: u.role,
+                totalReferrals: Number(u.totalReferrals) || 0,
+                totalCommissionEarned: Number(u.totalCommissionEarned) || 0,
+                bankDetails: u.bankDetails,
+                isExplicitZeroReset: Boolean(u.isExplicitZeroReset),
+                explicitZeroWallets: Array.isArray(u.explicitZeroWallets) ? u.explicitZeroWallets : [],
+                balanceUpdatedAt: u.balanceUpdatedAt,
+                updatedAt: u.updatedAt,
+              });
             }
-            return true;
-          });
-          const formatted = cleanSqlUsers.map((u) => ({
-            id: u.uid || String(u.id),
-            phone: u.phone,
-            password: u.password || 'password123',
-            nickname: u.nickname,
-            avatar: u.avatar || 'HD',
-            invitationCode: u.invitationCode,
-            invitedBy: u.invitedBy,
-            inviterName: u.inviterName,
-            inviterId: u.inviterId,
-            rechargeBalance: u.rechargeBalance ?? 0,
-            withdrawalBalance: u.withdrawalBalance ?? 0,
-            productRevenue: u.productRevenue ?? 0,
-            vipLevel: u.vipLevel ?? 0,
-            totalInvested: u.totalInvested ?? 0,
-            checkInStreak: u.checkInStreak ?? 0,
-            lastCheckInDate: u.lastCheckInDate,
-            spinChances: u.spinChances ?? 0,
-            status: u.status || 'active',
-            role: u.role || 'user',
-            totalReferrals: u.totalReferrals ?? 0,
-            totalCommissionEarned: u.totalCommissionEarned ?? 0,
-            bankDetails: u.bankDetails,
-            createdAt: u.createdAt ? new Date(u.createdAt).toISOString() : undefined,
-          }));
-          // NEVER overwrite authoritative SQLite balances with Cloud SQL rows on startup; SQLite wins
-          const sqliteAuthoritative = getAllUsersFromSql(false).map((u) => ({ ...u, isAuthoritativeServer: true }));
-          const mergedStartupUsers = deduplicateAndMergeUsers(formatted, sqliteAuthoritative);
-          saveUsersBackup(mergedStartupUsers);
-          console.log(`[Cloud SQL] Unified ${mergedStartupUsers.length} live persistent users (SQLite authoritative).`);
-        }
-
-        // 2. Orders: Cloud SQL is the persistent source of truth (Strictly live orders, no demo seeding)
-        const sqlOrders = await getAllDbOrders();
-        const deletedOrderIds = loadDeletedOrders();
-        const validOrders: any[] = [];
-        for (const ord of sqlOrders) {
-          const cleanId = String(ord.id).trim().toLowerCase();
-          if (deletedOrderIds.has(cleanId) || cleanId.startsWith('ord-test') || ord.productName?.includes('Demo')) {
-            await deleteOrderFromDb(String(ord.id));
-            deleteOrderFromSql(String(ord.id));
           } else {
-            validOrders.push(ord);
-          }
-        }
-        saveServerOrders(validOrders);
-        console.log(`[Cloud SQL] Preserved & synced ${validOrders.length} live persistent orders from database.`);
+            const deletedSet = loadDeletedUsers();
+            const cleanSqlUsers = sqlUsers.filter((u) => {
+              const uId = String(u.uid || u.id || '').trim();
+              const uPhone = String(u.phone || '').replace(/\D/g, '').slice(-10);
+              if (deletedSet.has(uId) || (uPhone && deletedSet.has(uPhone))) {
+                deleteUserFromDb(uId, uPhone).catch(() => {});
+                return false;
+              }
+              return true;
+            });
 
-        // 3. Promo Codes: Cloud SQL is the persistent source of truth
-        const sqlPromos = await getAllDbPromoCodes();
-        if (sqlPromos.length === 0) {
-          const diskPromos = loadServerPromoCodes();
-          for (const p of diskPromos) {
-            await upsertDbPromoCode(p);
-          }
-        } else {
-          saveServerPromoCodes(sqlPromos);
-          console.log(`[Cloud SQL] Preserved & synced ${sqlPromos.length} live persistent promo codes from database.`);
-        }
+            const formattedCloudUsers = cleanSqlUsers.map((u) => formatPostgresUserRow(u));
+            const cloudIdSet = new Set<string>();
+            const cloudPhoneSet = new Set<string>();
+            for (const cu of formattedCloudUsers) {
+              if (cu.id) cloudIdSet.add(String(cu.id).trim());
+              const cp = cu.phone ? String(cu.phone).replace(/\D/g, '').slice(-10) : '';
+              if (cp.length === 10) cloudPhoneSet.add(cp);
+            }
 
-        // 4. Products: Cloud SQL is the persistent source of truth
-        const sqlProducts = await getAllDbProducts();
-        if (sqlProducts.length === 0) {
-          const prodsFile = path.resolve(process.cwd(), 'src/data/firestoreProducts.json');
-          if (fs.existsSync(prodsFile)) {
-            try {
-              const fileProds = JSON.parse(fs.readFileSync(prodsFile, 'utf-8'));
-              if (Array.isArray(fileProds)) {
-                for (const prod of fileProds) {
-                  await upsertDbProduct(prod);
+            // CRITICAL FIX: Cloud SQL PostgreSQL is authoritative over bundled workspace SQLite/JSON after updates!
+            // Local SQLite only takes precedence if mutated during THIS live runtime process.
+            const localSqlUsers = getAllUsersFromSql(false).map((u) =>
+              isUserRuntimeMutated(u) ? { ...u, isAuthoritativeServer: true } : u
+            );
+            const cloudAuthoritative = formattedCloudUsers.map((u) =>
+              !isUserRuntimeMutated(u) ? { ...u, isAuthoritativeServer: true } : u
+            );
+            const mergedStartupUsers = deduplicateAndMergeUsers(localSqlUsers, cloudAuthoritative);
+
+            const localById = new Map<string, any>();
+            const localByPhone = new Map<string, any>();
+            for (const lu of getAllUsersFromSql(false)) {
+              if (lu.id) localById.set(String(lu.id).trim(), lu);
+              const lp = lu.phone ? String(lu.phone).replace(/\D/g, '').slice(-10) : '';
+              if (lp.length === 10) localByPhone.set(lp, lu);
+            }
+
+            for (const u of mergedStartupUsers) {
+              const uId = String(u.id || '').trim();
+              const uPhone = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
+              const existingLocal = localById.get(uId) || (uPhone.length === 10 ? localByPhone.get(uPhone) : undefined);
+
+              if (!existingLocal) {
+                upsertUserInSql(u);
+              } else if (!isUserRuntimeMutated(u)) {
+                const differs =
+                  Math.abs((Number(existingLocal.rechargeBalance) || 0) - (Number(u.rechargeBalance) || 0)) > 0.001 ||
+                  Math.abs((Number(existingLocal.withdrawalBalance) || 0) - (Number(u.withdrawalBalance) || 0)) > 0.001 ||
+                  Math.abs((Number(existingLocal.productRevenue) || 0) - (Number(u.productRevenue) || 0)) > 0.001 ||
+                  Math.abs((Number(existingLocal.totalInvested) || 0) - (Number(u.totalInvested) || 0)) > 0.001 ||
+                  Math.abs((Number(existingLocal.totalCommissionEarned) || 0) - (Number(u.totalCommissionEarned) || 0)) > 0.001;
+                if (differs) {
+                  upsertUserInSql(u);
                 }
               }
-            } catch {}
+
+              // Seed ONLY users completely missing from Cloud SQL (never overwrite existing live Cloud SQL balances!)
+              const existsInCloud = cloudIdSet.has(uId) || (uPhone.length === 10 && cloudPhoneSet.has(uPhone));
+              if (!existsInCloud) {
+                await upsertUser({
+                  uid: uId,
+                  phone: u.phone,
+                  password: u.password || 'password123',
+                  nickname: u.nickname,
+                  avatar: u.avatar,
+                  invitationCode: u.invitationCode,
+                  invitedBy: u.invitedBy,
+                  inviterName: u.inviterName,
+                  inviterId: u.inviterId,
+                  rechargeBalance: Number(u.rechargeBalance) || 0,
+                  withdrawalBalance: Number(u.withdrawalBalance) || 0,
+                  productRevenue: Number(u.productRevenue) || 0,
+                  vipLevel: Number(u.vipLevel) || 0,
+                  totalInvested: Number(u.totalInvested) || 0,
+                  checkInStreak: Number(u.checkInStreak) || 0,
+                  lastCheckInDate: u.lastCheckInDate,
+                  spinChances: Number(u.spinChances) || 0,
+                  status: u.status,
+                  role: u.role,
+                  totalReferrals: Number(u.totalReferrals) || 0,
+                  totalCommissionEarned: Number(u.totalCommissionEarned) || 0,
+                  bankDetails: u.bankDetails,
+                  isExplicitZeroReset: Boolean(u.isExplicitZeroReset),
+                  explicitZeroWallets: Array.isArray(u.explicitZeroWallets) ? u.explicitZeroWallets : [],
+                  balanceUpdatedAt: u.balanceUpdatedAt,
+                  updatedAt: u.updatedAt,
+                }).catch(() => {});
+              }
+            }
+
+            saveUsersBackup(mergedStartupUsers);
+            console.log(`[Cloud SQL] Unified ${mergedStartupUsers.length} live persistent users (Cloud SQL authoritative over bundled SQLite).`);
           }
-        } else {
-          console.log(`[Cloud SQL] Loaded ${sqlProducts.length} persistent live products from database.`);
+
+          // 3. Orders: Cloud SQL is the persistent source of truth
+          const sqlOrders = await getAllDbOrders();
+          const deletedOrderIds = loadDeletedOrders();
+          const validOrders: any[] = [];
+          for (const ord of sqlOrders) {
+            const cleanId = String(ord.id).trim().toLowerCase();
+            if (deletedOrderIds.has(cleanId) || cleanId.startsWith('ord-test') || ord.productName?.includes('Demo')) {
+              await deleteOrderFromDb(String(ord.id));
+              deleteOrderFromSql(String(ord.id));
+            } else {
+              validOrders.push(ord);
+            }
+          }
+          saveServerOrders(validOrders);
+          console.log(`[Cloud SQL] Preserved & synced ${validOrders.length} live persistent orders from database.`);
+
+          // 4. Promo Codes: Cloud SQL is the persistent source of truth
+          const sqlPromos = await getAllDbPromoCodes();
+          if (sqlPromos.length === 0) {
+            const diskPromos = loadServerPromoCodes();
+            for (const p of diskPromos) {
+              await upsertDbPromoCode(p);
+            }
+          } else {
+            saveServerPromoCodes(sqlPromos);
+            console.log(`[Cloud SQL] Preserved & synced ${sqlPromos.length} live persistent promo codes from database.`);
+          }
+
+          // 5. Products: Cloud SQL is the persistent source of truth
+          const sqlProducts = await getAllDbProducts();
+          if (sqlProducts.length === 0) {
+            const prodsFile = path.resolve(process.cwd(), 'src/data/firestoreProducts.json');
+            if (fs.existsSync(prodsFile)) {
+              try {
+                const fileProds = JSON.parse(fs.readFileSync(prodsFile, 'utf-8'));
+                if (Array.isArray(fileProds)) {
+                  for (const prod of fileProds) {
+                    await upsertDbProduct(prod);
+                  }
+                }
+              } catch {}
+            }
+          } else {
+            console.log(`[Cloud SQL] Loaded ${sqlProducts.length} persistent live products from database.`);
+          }
+
+          // 6. Platform Settings: Preserve live database settings; auto-upgrade legacy placeholder AdMob test IDs once to live credentials
+          const dbSettings = await getPlatformSettingFromDb('general');
+          if (dbSettings && typeof dbSettings === 'object' && Object.keys(dbSettings).length > 0) {
+            let finalDbSettings: Record<string, any> = { ...dbSettings };
+            if (
+              !finalDbSettings.adMobLiveMigratedV1 &&
+              (!finalDbSettings.adMobAppId ||
+                finalDbSettings.adMobAppId === GOOGLE_TEST_ADMOB_APP_ID ||
+                finalDbSettings.adMobPublisherId === GOOGLE_TEST_ADMOB_PUB_ID)
+            ) {
+              finalDbSettings = {
+                ...finalDbSettings,
+                isAdMobEnabled: true,
+                adMobTestMode: false,
+                adMobAppId: PERMANENT_LIVE_ADMOB_APP_ID,
+                adMobBannerUnitId: PERMANENT_LIVE_ADMOB_BANNER_ID,
+                adMobPublisherId: PERMANENT_LIVE_ADMOB_PUB_ID,
+                adMobLiveMigratedV1: true,
+              };
+              await setPlatformSettingInDb('general', finalDbSettings).catch(() => {});
+              console.log('[Cloud SQL] Migrated legacy AdMob test defaults to permanent live AdMob IDs.');
+            }
+            saveServerPlatformSettings(finalDbSettings);
+            console.log('[Cloud SQL] Persistent live platform settings preserved from database.');
+          } else {
+            const currentSettings = loadServerPlatformSettings();
+            await setPlatformSettingInDb('general', currentSettings);
+            console.log('[Cloud SQL] Initialized platform settings into database.');
+          }
+
+          console.log('[Cloud SQL] Permanent connection verified. Real website and workspace remain unified.');
         }
 
-        // 5. Platform Settings: Preserve live database settings; NEVER overwrite with build files
-        const dbSettings = await getPlatformSettingFromDb('general');
-        if (dbSettings && typeof dbSettings === 'object' && Object.keys(dbSettings).length > 0) {
-          saveServerPlatformSettings(dbSettings);
-          console.log('[Cloud SQL] Persistent live platform settings preserved from database.');
-        } else {
-          const currentSettings = loadServerPlatformSettings();
-          await setPlatformSettingInDb('general', currentSettings);
-          console.log('[Cloud SQL] Initialized platform settings into database.');
+        // 7. Run referral reconciliation ONLY AFTER Cloud SQL user/order sync finishes!
+        try {
+          const statsResult = await reconcileAllReferralStatsServer();
+          console.log(`[Referral System] Reconciled referral income and direct member counts for ${statsResult.reconciledCount} user(s).`);
+        } catch (err) {
+          console.warn('[Referral System] Boot reconciliation notice:', err);
         }
-
-        console.log('[Cloud SQL] Permanent connection verified. Real website and workspace remain unified.');
       } catch (seedErr) {
         console.warn('[Cloud SQL] Startup persistence check note:', seedErr);
       }
-    }, 1000);
+    })();
   });
 }
 

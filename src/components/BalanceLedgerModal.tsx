@@ -17,7 +17,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useApp, deduplicateTransactions } from '../context/AppContext';
-import { computeUserTotalBalance, enrichTransactionsWithBalanceAfter } from '../services/dbService';
+import { computeUserTotalBalance, enrichTransactionsWithBalanceAfter, formatTransactionTimeIST } from '../services/dbService';
 import { Transaction } from '../types';
 
 export const BalanceLedgerModal: React.FC = () => {
@@ -226,7 +226,7 @@ export const BalanceLedgerModal: React.FC = () => {
                         </div>
                         <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-0.5 font-mono">
                           <Clock className="w-3 h-3 text-slate-400 shrink-0" />
-                          <span>{tx.timestamp}</span>
+                          <span>{formatTransactionTimeIST(tx)}</span>
                         </div>
                       </div>
                     </div>

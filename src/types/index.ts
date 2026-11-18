@@ -44,6 +44,8 @@ export interface User {
     upiId: string;
   };
   isExplicitZeroReset?: boolean;
+  explicitZeroWallets?: string[];
+  balanceUpdatedAt?: string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -103,15 +105,6 @@ export interface PlatformSettings {
   // Configurable Wheel Prizes
   spinPrizes?: SpinPrizeConfig[];
 
-  // PayU India Payment Gateway Settings
-  isPayUEnabled: boolean;
-  payuMerchantKey: string;
-  payuMerchantSalt?: string;
-  payuMode?: 'test' | 'live';
-  payuMerchantName?: string;
-  payuLogoUrl?: string;
-  payuThemeColor?: string;
-
   // Razorpay Gateway Settings (Legacy / Backward Compatibility)
   isRazorpayEnabled?: boolean;
   razorpayKeyId?: string;
@@ -142,6 +135,8 @@ export interface PlatformSettings {
   // OTP & SMS Gateway Templates & Configuration
   registrationOtpTemplate?: string;
   forgotPasswordOtpTemplate?: string;
+  withdrawalOtpTemplate?: string;
+  p2pOtpTemplate?: string;
   smsGatewayProvider?: 'apitxt' | 'fast2sms' | 'custom';
   smsSenderId?: string;
   smsAuthKey?: string;
@@ -199,12 +194,13 @@ export interface OtpLogItem {
   id: string;
   mobile: string;
   otp: string;
-  purpose: 'register' | 'forgot-password' | 'test';
+  purpose: 'register' | 'forgot-password' | 'withdraw' | 'p2p' | 'test';
   message: string;
   status: 'pending' | 'verified' | 'wrong_otp' | 'expired';
   attempts: number;
   createdAt: string;
   expiresAt: number;
+  consumedAt?: number;
   provider?: string;
   senderId?: string;
   gatewayStatus?: string;

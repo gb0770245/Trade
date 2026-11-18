@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import confetti from 'canvas-confetti';
 import { User, InvestmentProduct, InvestmentOrder, Transaction, TeamMember, ThemeMode, PlatformSettings, NoticeItem, CustomPromoCode, SpinPrizeConfig, ShippingAddress, EcommerceOrder, HomeBanner, ReferrerInfo, OrderSuccessData, P2PRecipientPreview } from '../types';
 import { INITIAL_NOTICES, INVESTMENT_PRODUCTS, SPIN_PRIZES, DEFAULT_HOME_BANNERS } from '../data/mockData';
-import { dbService, getTransactionTime, mergeUserSafe, mergeTxListsSafe, buildUserBalanceSnapshot } from '../services/dbService';
+import { dbService, getTransactionTime, mergeUserSafe, mergeTxListsSafe, buildUserBalanceSnapshot, formatISTDateTime } from '../services/dbService';
 import { getOrderClaimStatus, formatCountdownHuman } from '../utils/dividendUtils';
 
 interface SupportMessage {
@@ -46,7 +46,7 @@ interface AppContextType {
   // Financial actions
   recharge: (amount: number, method: string, referenceNo?: string) => Promise<{ success: boolean; message: string }>;
   submitManualRecharge: (amount: number, utrNumber: string, screenshotUrl?: string) => Promise<{ success: boolean; message: string }>;
-  withdraw: (amount: number, details: NonNullable<User['bankDetails']>) => Promise<{ success: boolean; message: string }>;
+  withdraw: (amount: number, details: NonNullable<User['bankDetails']>, otp?: string) => Promise<{ success: boolean; message: string }>;
   lookupP2PRecipient: (query: string) => Promise<{ success: boolean; recipient?: P2PRecipientPreview; error?: string }>;
   transferP2PFunds: (payload: {
     recipientQuery: string;
@@ -54,6 +54,7 @@ interface AppContextType {
     sourceWallet: 'withdrawalBalance' | 'rechargeBalance';
     targetWallet?: 'withdrawalBalance' | 'rechargeBalance';
     note?: string;
+    otp?: string;
   }) => Promise<{
     success: boolean;
     message: string;
@@ -208,6 +209,42 @@ const DEFAULT_USER: User = {
 const INITIAL_ORDERS: InvestmentOrder[] = [];
 const INITIAL_TXS: Transaction[] = [];
 const INITIAL_TEAM: TeamMember[] = [];
+
+const WALLET_ZERO_FIELDS = [
+  'rechargeBalance',
+  'withdrawalBalance',
+  'productRevenue',
+  'totalInvested',
+  'totalCommissionEarned',
+] as const;
+
+const buildZeroWalletFlags = (
+  prevWallets: string[] | undefined,
+  updates: Partial<User>,
+  fullReset?: boolean
+): string[] => {
+  if (fullReset) return [...WALLET_ZERO_FIELDS];
+  const set = new Set<string>([
+    ...(Array.isArray(prevWallets) ? prevWallets : []),
+    ...(Array.isArray(updates.explicitZeroWallets) ? updates.explicitZeroWallets : []),
+  ]);
+  for (const w of WALLET_ZERO_FIELDS) {
+    const val = (updates as any)[w];
+    if (val !== undefined && val !== null && !Number.isNaN(Number(val))) {
+      if (Number(val) === 0) set.add(w);
+      else set.delete(w);
+    }
+  }
+  return Array.from(set);
+};
+
+const mergeIncomingCloudUser = (current: Partial<User> | null | undefined, incoming: User): User => {
+  const isRuntimeMutated = Boolean((incoming as any)?.isRuntimeMutated);
+  return mergeUserSafe(
+    current,
+    isRuntimeMutated ? ({ ...incoming, isAuthoritativeServer: true } as any) : incoming
+  );
+};
 
 export const deduplicateTransactions = (txs: Transaction[]): Transaction[] => {
   return mergeTxListsSafe([txs]);
@@ -429,8 +466,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     isManualUpiEnabled: true,
     autoDynamicQrEnabled: true,
     manualDepositInstructions: '1. Scan this Dynamic QR using PhonePe, Google Pay, Paytm or any UPI App.\n2. Pay the EXACT amount shown on screen.\n3. Enter the 12-digit UPI UTR / Reference number below and tap Submit.\n4. Admin will verify and credit your wallet within 1-5 minutes.',
-    requireAdminRechargeApproval: true, // User request: strict admin verification before fund is added to wallet
-    showUpiVpaDetails: false, // User request: hide UPI ID and intent buttons shown in screenshot
+    requireAdminRechargeApproval: true, // strict admin verification before fund is added to wallet
+    showUpiVpaDetails: true, // enables 1-tap UPI app launch & Copy UPI ID to avoid ₹2,000 gallery QR screenshot limits
     minRecharge: 0.01,
     minWithdrawal: 2,
     withdrawalFeePercent: 5, // Configurable admin fee % (default 5%)
@@ -477,15 +514,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     homeBanners: DEFAULT_HOME_BANNERS,
     bannerAutoPlaySpeedSeconds: 4,
 
-    // PayU India Payment Gateway Settings (Official Production Gateway)
-    isPayUEnabled: false,
-    payuMerchantKey: 'JvSfdw',
-    payuMerchantSalt: 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e',
-    payuMode: 'live',
-    payuMerchantName: 'Nexa AI',
-    payuLogoUrl: '/logo.png',
-    payuThemeColor: '#0f766e',
-
     // Razorpay Gateway Settings (Legacy / Backward Compatibility)
     isRazorpayEnabled: false,
     razorpayKeyId: 'rzp_live_TsxVeW7tusSgjp',
@@ -508,6 +536,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // OTP & SMS Message Templates (Admin Configurable)
     registrationOtpTemplate: 'Dear user, your Nexa AI registration verification code is {OTP}. Valid for 5 minutes. Do not share with anyone.',
     forgotPasswordOtpTemplate: 'Your Nexa AI password reset code is {OTP}. Valid for 5 minutes. If not requested by you, please ignore this SMS.',
+    withdrawalOtpTemplate: 'Your Nexa AI withdrawal verification OTP is {OTP}. Valid for {VALIDITY} minutes. Do not share with anyone.',
+    p2pOtpTemplate: 'Your Nexa AI P2P transfer verification OTP is {OTP}. Valid for {VALIDITY} minutes. Do not share with anyone.',
     smsGatewayProvider: 'apitxt',
     smsSenderId: 'NEXAAI',
     smsAuthKey: 'wSh_e0TCgFj24rsQv3NxX3FVrqYXFUl42bJb1eVNrss',
@@ -524,6 +554,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     minP2PAmount: 1,
     maxP2PAmount: 50000,
     p2pNotice: '',
+
+    // Google AdMob Banner Ads Defaults (Permanent Live Config)
+    isAdMobEnabled: true,
+    adMobTestMode: false,
+    adMobAppId: 'ca-app-pub-6701253514262817~4453946322',
+    adMobBannerUnitId: 'ca-app-pub-6701253514262817/2657487227',
+    adMobPublisherId: 'pub-6701253514262817',
+    adSenseBannerSlot: '',
+    adMobBannerSize: 'ADAPTIVE_BANNER',
+    adMobPosition: 'inline',
+    adMobPlacements: {
+      home: true,
+      invest: true,
+      notice: true,
+      blog: true,
+      account: true,
+    },
+    adMobRefreshSeconds: 60,
   };
 
   const [platformSettings, setPlatformSettings] = useState<PlatformSettings>(() => {
@@ -533,17 +581,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (cached) {
           const parsed = JSON.parse(cached);
           if (parsed && typeof parsed === 'object') {
-            parsed.isPayUEnabled = false;
-            // Auto-heal outdated test sandbox credentials if present in browser localStorage
+            delete parsed.isPayUEnabled;
+            delete parsed.payuMerchantKey;
+            delete parsed.payuMerchantSalt;
+            delete parsed.payuMode;
+            delete parsed.payuMerchantName;
+            delete parsed.payuLogoUrl;
+            delete parsed.payuThemeColor;
+            // Auto-upgrade legacy sample AdMob test IDs once to live publisher credentials
             if (
-              !parsed.payuMerchantKey ||
-              parsed.payuMerchantKey === 'gtKFFx' ||
-              parsed.payuMerchantSalt === 'eCwWELxi' ||
-              parsed.payuMerchantSalt === '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW'
+              !parsed.adMobLiveMigratedV1 &&
+              (!parsed.adMobAppId ||
+                parsed.adMobAppId === 'ca-app-pub-3940256099942544~3347511713' ||
+                parsed.adMobPublisherId === 'pub-3940256099942544')
             ) {
-              parsed.payuMerchantKey = 'JvSfdw';
-              parsed.payuMerchantSalt = 'k6p3rBFHCPis1t4xFkAWd11TCtjkB26e';
-              parsed.payuMode = 'live';
+              parsed.isAdMobEnabled = true;
+              parsed.adMobTestMode = false;
+              parsed.adMobAppId = 'ca-app-pub-6701253514262817~4453946322';
+              parsed.adMobBannerUnitId = 'ca-app-pub-6701253514262817/2657487227';
+              parsed.adMobPublisherId = 'pub-6701253514262817';
+              parsed.adMobLiveMigratedV1 = true;
             }
             localStorage.setItem('nexa_platform_settings', JSON.stringify({ ...DEFAULT_PLATFORM_SETTINGS, ...parsed }));
             return { ...DEFAULT_PLATFORM_SETTINGS, ...parsed };
@@ -982,6 +1039,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               ...prev,
               ...orderedSettings,
               ...serverOtp,
+              adMobPlacements: {
+                home: true,
+                invest: true,
+                notice: true,
+                blog: true,
+                account: true,
+                ...(prev.adMobPlacements || {}),
+                ...((orderedSettings as any)?.adMobPlacements || {}),
+              },
               spinPrizes:
                 (orderedSettings as any)?.spinPrizes && (orderedSettings as any).spinPrizes.length > 0
                   ? (orderedSettings as any).spinPrizes
@@ -1040,6 +1106,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ...prev,
           ...cloudSettings,
           ...latestServerOtp,
+          adMobPlacements: {
+            home: true,
+            invest: true,
+            notice: true,
+            blog: true,
+            account: true,
+            ...(prev.adMobPlacements || {}),
+            ...(cloudSettings.adMobPlacements || {}),
+          },
           spinPrizes:
             cloudSettings.spinPrizes && cloudSettings.spinPrizes.length > 0
               ? cloudSettings.spinPrizes
@@ -1104,7 +1179,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (needsUpdate) {
             await dbService.saveUser(cloudUser);
           }
-          const merged = mergeUserSafe(userRef.current, { ...cloudUser, isAuthoritativeServer: true } as any);
+          const merged = mergeIncomingCloudUser(userRef.current, cloudUser);
           const isRecentAction = userRef.current && (Date.now() - lastUserActionTimestampRef.current < 30000 || lastUserActionTimestampRef.current > Date.now());
           if (isRecentAction && userRef.current) {
             merged.rechargeBalance = userRef.current.rechargeBalance;
@@ -1170,7 +1245,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Subscribe to real-time user changes
     const unsubUser = dbService.subscribeToUser(user.id, (updated) => {
       if (isMounted && updated) {
-        const merged: User = mergeUserSafe(userRef.current, { ...updated, isAuthoritativeServer: true } as any);
+        const merged: User = mergeIncomingCloudUser(userRef.current, updated);
         // If a local balance change happened recently, protect local balance from stale network reversion
         const isRecentAction = userRef.current && (Date.now() - lastUserActionTimestampRef.current < 30000 || lastUserActionTimestampRef.current > Date.now());
         if (isRecentAction && userRef.current) {
@@ -1256,7 +1331,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setTeamMembers(freshTeam);
 
       if (freshUser) {
-        const merged = mergeUserSafe(userRef.current, { ...freshUser, isAuthoritativeServer: true } as any);
+        const merged = mergeIncomingCloudUser(userRef.current, freshUser);
         userRef.current = merged;
         setUser(merged);
         try {
@@ -1441,13 +1516,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         // If balances changed or new commission/P2P transfer was added (including admin zero/deduction resets)
         if (newW !== prevW || newR !== prevR) {
-          const merged = mergeUserSafe(current, { ...fresh, isAuthoritativeServer: true } as any);
+          const merged = mergeIncomingCloudUser(current, fresh);
           userRef.current = merged;
           setUser(merged);
           localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(merged));
 
-          const addedW = Math.max(0, newW - prevW);
-          const addedR = Math.max(0, newR - prevR);
+          const addedW = Math.max(0, Number(merged.withdrawalBalance || 0) - prevW);
+          const addedR = Math.max(0, Number(merged.rechargeBalance || 0) - prevR);
           const totalAdded = addedW + addedR;
           if (totalAdded > 0) {
             showToast(`Wallet Balance Updated! +$${totalAdded.toFixed(2)} added to your account`, 'success');
@@ -1761,13 +1836,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await dbService.saveUser(inviterUser);
 
       if (extraSpins > 0) {
+        const invTxNow = Date.now();
         const inviterTx: Transaction = {
-          id: `tx-inv-${Date.now()}`,
+          id: `tx-inv-${invTxNow}`,
           userId: inviterUser.id,
           type: 'bonus',
           amount: 0,
           title: `Referral Joined: ${newUser.nickname} (+${extraSpins} Lucky Spin)`,
-          timestamp: new Date().toLocaleString(),
+          timestamp: formatISTDateTime(invTxNow),
+          createdAt: invTxNow,
           status: 'completed',
           referenceNo: `INV${newUser.id}`,
           ...buildUserBalanceSnapshot(inviterUser),
@@ -1912,20 +1989,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // STRICT ADMIN VERIFICATION: If requireAdminRechargeApproval is enabled, do NOT auto-credit wallet!
       if (platformSettings.requireAdminRechargeApproval !== false) {
         const inrAmount = Math.round(amount * 100);
+        const recNow = Date.now();
         const newTx: Transaction = {
-          id: `tx-${Date.now()}`,
+          id: `tx-${recNow}`,
           userId: currentUser.id,
           type: 'recharge',
           amount,
           amountInr: inrAmount,
           title: `${method} Deposit ($${amount.toFixed(2)} / ₹${inrAmount.toLocaleString()})`,
-          timestamp: new Date().toLocaleString(),
+          timestamp: formatISTDateTime(recNow),
           status: 'processing', // Awaiting Admin verification & manual approval
           referenceNo: referenceNo || `DEP${Math.floor(10000000 + Math.random() * 90000000)}`,
           utrNumber: referenceNo || '',
           paymentMethod: method,
           payeeUpi: platformSettings.merchantUpiId || 'nexaai.pay@icici',
-          createdAt: Date.now(),
+          createdAt: recNow,
           ...buildUserBalanceSnapshot(currentUser),
         };
         await dbService.saveTransaction(newTx, currentUser.id);
@@ -1943,12 +2021,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         platformSettings.extraSpinOnRecharge && threshold > 0 ? Math.floor(amount / threshold) : 0;
 
       lastUserActionTimestampRef.current = Date.now() + 30000;
+      const balNow = new Date().toISOString();
+      const nextRechargeBal = Number((currentUser.rechargeBalance + amount).toFixed(2));
       const updatedUser: User = {
         ...currentUser,
-        rechargeBalance: Number((currentUser.rechargeBalance + amount).toFixed(2)),
+        rechargeBalance: nextRechargeBal,
         spinChances: (currentUser.spinChances || 0) + extraSpinsAwarded,
+        explicitZeroWallets: buildZeroWalletFlags(currentUser.explicitZeroWallets, { rechargeBalance: nextRechargeBal }),
         isExplicitZeroReset: false,
-        updatedAt: new Date().toISOString(),
+        balanceUpdatedAt: balNow,
+        updatedAt: balNow,
       };
       userRef.current = updatedUser;
       setUser(updatedUser);
@@ -1958,13 +2040,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await dbService.saveUser(updatedUser);
 
       // Record transaction
+      const recAutoNow = Date.now();
       const newTx: Transaction = {
-        id: `tx-${Date.now()}`,
+        id: `tx-${recAutoNow}`,
         userId: currentUser.id,
         type: 'recharge',
         amount,
         title: `${method} Add Money${extraSpinsAwarded > 0 ? ` (+${extraSpinsAwarded} Lucky Spins)` : ''}`,
-        timestamp: new Date().toLocaleString(),
+        timestamp: formatISTDateTime(recAutoNow),
+        createdAt: recAutoNow,
         status: 'completed',
         referenceNo: referenceNo || `REC${Math.floor(10000000 + Math.random() * 90000000)}`,
         paymentMethod: method,
@@ -2024,21 +2108,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const inrAmount = Math.round(amount * 100);
+    const manNow = Date.now();
     const newTx: Transaction = {
-      id: `tx-${Date.now()}`,
+      id: `tx-${manNow}`,
       userId: user.id,
       type: 'recharge',
       amount,
       amountInr: inrAmount,
       title: `UPI Fast Deposit ($${amount.toFixed(2)} / ₹${inrAmount.toLocaleString()})`,
-      timestamp: new Date().toLocaleString(),
+      timestamp: formatISTDateTime(manNow),
       status: 'processing',
       referenceNo: cleanUtr,
       utrNumber: cleanUtr,
       paymentMethod: 'Manual UPI (QR)',
       payeeUpi: platformSettings.merchantUpiId || 'nexaai.pay@icici',
       screenshotUrl: screenshotUrl || '',
-      createdAt: Date.now(),
+      createdAt: manNow,
       ...buildUserBalanceSnapshot(user),
     };
 
@@ -2059,7 +2144,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Withdraw (Authoritative Server Atomic Transaction)
-  const withdraw = async (amount: number, details: NonNullable<User['bankDetails']>): Promise<{ success: boolean; message: string }> => {
+  const withdraw = async (amount: number, details: NonNullable<User['bankDetails']>, otp?: string): Promise<{ success: boolean; message: string }> => {
     const currentUser = userRef.current || user;
     if (!currentUser) {
       openModal('auth');
@@ -2070,6 +2155,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'Withdrawal is already in progress. Please wait.' };
     }
     isWithdrawalLockRef.current = true;
+    let succeeded = false;
 
     try {
       if (currentUser.status === 'frozen') {
@@ -2101,6 +2187,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         userId: currentUser.id,
         amount,
         bankDetails: cleanBankDetails,
+        ...(otp !== undefined ? { otp: otp.trim() } : {}),
       });
 
       if (!res.success || !res.user) {
@@ -2109,6 +2196,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: errMsg };
       }
 
+      succeeded = true;
       const updatedUser: User = {
         ...currentUser,
         ...res.user,
@@ -2147,9 +2235,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       closeModal();
       return { success: true, message: res.message || 'Withdrawal submitted' };
     } finally {
-      setTimeout(() => {
+      if (succeeded) {
+        setTimeout(() => {
+          isWithdrawalLockRef.current = false;
+        }, 5000);
+      } else {
         isWithdrawalLockRef.current = false;
-      }, 5000);
+      }
     }
   };
 
@@ -2166,6 +2258,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     sourceWallet: 'withdrawalBalance' | 'rechargeBalance';
     targetWallet?: 'withdrawalBalance' | 'rechargeBalance';
     note?: string;
+    otp?: string;
   }) => {
     const currentUser = userRef.current || user;
     if (!currentUser) {
@@ -2176,6 +2269,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'A P2P transfer is already in progress. Please wait.' };
     }
     isP2PTransferLockRef.current = true;
+    let succeeded = false;
 
     try {
       const result = await dbService.executeP2PTransfer({
@@ -2185,6 +2279,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sourceWallet: payload.sourceWallet,
         targetWallet: payload.targetWallet,
         note: payload.note,
+        ...(payload.otp !== undefined ? { otp: payload.otp.trim() } : {}),
       });
 
       if (!result.success || !result.sender) {
@@ -2193,6 +2288,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: errMsg };
       }
 
+      succeeded = true;
       const updatedSender: User = {
         ...currentUser,
         ...result.sender,
@@ -2246,9 +2342,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         transaction: result.senderTransaction,
       };
     } finally {
-      setTimeout(() => {
+      if (succeeded) {
+        setTimeout(() => {
+          isP2PTransferLockRef.current = false;
+        }, 1500);
+      } else {
         isP2PTransferLockRef.current = false;
-      }, 1500);
+      }
     }
   };
 
@@ -2289,13 +2389,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     else if (newTotalInvested >= 1500) newVip = Math.max(newVip, 2);
     else if (newTotalInvested >= 280) newVip = Math.max(newVip, 1);
 
+    const balNow = new Date().toISOString();
+    const nextZeroWallets = buildZeroWalletFlags(currentUser.explicitZeroWallets, {
+      rechargeBalance: nextBalance,
+      totalInvested: newTotalInvested,
+    });
     const updatedUser: User = {
       ...currentUser,
       rechargeBalance: nextBalance,
       totalInvested: newTotalInvested,
       vipLevel: newVip,
       spinChances: (currentUser.spinChances || 0) + 1, // Bonus spin per investment
-      isExplicitZeroReset: nextBalance === 0,
+      explicitZeroWallets: nextZeroWallets,
+      isExplicitZeroReset: false,
+      balanceUpdatedAt: balNow,
+      updatedAt: balNow,
     };
 
     // Synchronously update the ref, timestamp shield (30s), state, and localStorage BEFORE any async work
@@ -2340,7 +2448,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           totalInvested: newTotalInvested,
           vipLevel: newVip,
           spinChances: (currentUser.spinChances || 0) + 1,
-          isExplicitZeroReset: nextBalance === 0,
+          explicitZeroWallets: nextZeroWallets,
+          isExplicitZeroReset: false,
+          balanceUpdatedAt: balNow,
         }),
       }).catch(() => {});
     } catch {}
@@ -2378,13 +2488,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setOrders((prev) => [newOrder, ...prev]);
     setAdminOrders((prev) => [newOrder, ...prev]);
 
+    const invTxNow = Date.now();
     const investTx: Transaction = {
-      id: `tx-${Date.now()}`,
+      id: `tx-${invTxNow}`,
       userId: currentUser.id,
       type: 'recharge',
       amount: -product.price,
       title: `Contract Purchased: ${product.name}${requiresApproval ? ' (Pending Admin Approval)' : ''}`,
-      timestamp: new Date().toLocaleString(),
+      timestamp: formatISTDateTime(invTxNow),
+      createdAt: invTxNow,
       status: 'completed',
       referenceNo: `INV${Math.floor(10000000 + Math.random() * 90000000)}`,
       ...buildUserBalanceSnapshot(updatedUser),
@@ -2418,7 +2530,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       totalRevenue: product.totalRevenue,
       category: product.category,
       status: newOrder.status,
-      timestamp: new Date().toLocaleTimeString(),
+      timestamp: formatISTDateTime(invTxNow),
     });
 
     if (requiresApproval) {
@@ -2453,7 +2565,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       status: 'confirmed',
       trackingNumber,
       courierPartner: 'Delhivery Surface Express',
-      createdAt: new Date().toLocaleString(),
+      createdAt: formatISTDateTime(Date.now()),
       estimatedDelivery: new Date(Date.now() + 4 * 24 * 60 * 60 * 1000).toLocaleDateString(),
       invoiceNumber,
     };
@@ -2507,13 +2619,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Save transaction
+    const ecomTxNow = Date.now();
     const tx: Transaction = {
-      id: `tx-${Date.now()}`,
+      id: `tx-${ecomTxNow}`,
       userId: user?.id,
       type: 'recharge',
       amount: product.price,
       title: `E-Commerce Store Order #${orderNumber} (${product.sku || 'HD-HW'})`,
-      timestamp: new Date().toLocaleString(),
+      timestamp: formatISTDateTime(ecomTxNow),
+      createdAt: ecomTxNow,
       status: 'completed',
       referenceNo: paymentId,
       paymentMethod: 'Razorpay E-Commerce',
@@ -2712,15 +2826,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } catch {}
       await dbService.saveUser(updatedUser);
 
+      const divTxNow = Date.now();
       const divTx: Transaction = {
-        id: `tx-${Date.now()}`,
+        id: `tx-${divTxNow}`,
         userId: activeUser.id,
         type: 'earnings',
         amount: totalClaim,
         title: `Daily 24-Hour Dividend Settled (${eligibleOrders.length} contracts)`,
-        timestamp: new Date().toLocaleString(),
+        timestamp: formatISTDateTime(divTxNow),
+        createdAt: divTxNow,
         status: 'completed',
-        referenceNo: `DIV${Date.now()}`,
+        referenceNo: `DIV${divTxNow}`,
         ...buildUserBalanceSnapshot(updatedUser),
       };
       await dbService.saveTransaction(divTx, activeUser.id);
@@ -2787,14 +2903,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         : 0;
 
       lastUserActionTimestampRef.current = Date.now() + 30000;
+      const balNow = new Date().toISOString();
+      const nextW = Number((currentUser.withdrawalBalance + bonus).toFixed(2));
       const updatedUser: User = {
         ...currentUser,
-        withdrawalBalance: Number((currentUser.withdrawalBalance + bonus).toFixed(2)),
+        withdrawalBalance: nextW,
         checkInStreak: newStreak,
         lastCheckInDate: todayStr,
         spinChances: (currentUser.spinChances || 0) + extraSpinsToAdd,
+        explicitZeroWallets: buildZeroWalletFlags(currentUser.explicitZeroWallets, { withdrawalBalance: nextW }),
         isExplicitZeroReset: false,
-        updatedAt: new Date().toISOString(),
+        balanceUpdatedAt: balNow,
+        updatedAt: balNow,
       };
       userRef.current = updatedUser;
       setUser(updatedUser);
@@ -2803,15 +2923,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } catch {}
       await dbService.saveUser(updatedUser);
 
+      const chkTxNow = Date.now();
       const checkInTx: Transaction = {
-        id: `tx-${Date.now()}`,
+        id: `tx-${chkTxNow}`,
         userId: currentUser.id,
         type: 'bonus',
         amount: bonus,
         title: `Daily Check-In Dividend (Day ${dayNumber} Streak) + ${extraSpinsToAdd} Free Spin`,
-        timestamp: new Date().toLocaleString(),
+        timestamp: formatISTDateTime(chkTxNow),
+        createdAt: chkTxNow,
         status: 'completed',
-        referenceNo: `CHK${Date.now()}`,
+        referenceNo: `CHK${chkTxNow}`,
         ...buildUserBalanceSnapshot(updatedUser),
       };
       await dbService.saveTransaction(checkInTx, currentUser.id);
@@ -2875,12 +2997,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const nextRecharge = Math.max(0, Number((currentUser.rechargeBalance - cost).toFixed(2)));
       lastUserActionTimestampRef.current = Date.now() + 30000;
+      const balNow = new Date().toISOString();
       const updatedUser: User = {
         ...currentUser,
         rechargeBalance: nextRecharge,
         spinChances: (currentUser.spinChances || 0) + 1,
-        isExplicitZeroReset: nextRecharge === 0,
-        updatedAt: new Date().toISOString(),
+        explicitZeroWallets: buildZeroWalletFlags(currentUser.explicitZeroWallets, { rechargeBalance: nextRecharge }),
+        isExplicitZeroReset: false,
+        balanceUpdatedAt: balNow,
+        updatedAt: balNow,
       };
       userRef.current = updatedUser;
       setUser(updatedUser);
@@ -2889,15 +3014,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } catch {}
       await dbService.saveUser(updatedUser);
 
+      const spnTktNow = Date.now();
       const spinPurchaseTx: Transaction = {
-        id: `tx-${Date.now()}`,
+        id: `tx-${spnTktNow}`,
         userId: currentUser.id,
         type: 'recharge',
         amount: -cost,
         title: 'Purchased +1 Lucky Spin Ticket',
-        timestamp: new Date().toLocaleString(),
+        timestamp: formatISTDateTime(spnTktNow),
+        createdAt: spnTktNow,
         status: 'completed',
-        referenceNo: `SPNTKT${Date.now()}`,
+        referenceNo: `SPNTKT${spnTktNow}`,
         ...buildUserBalanceSnapshot(updatedUser),
       };
       await dbService.saveTransaction(spinPurchaseTx, currentUser.id);
@@ -2931,15 +3058,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         prev.map((u) => (u.id === userId ? { ...u, spinChances: newSpins } : u))
       );
 
+      const grantTxNow = Date.now();
       const grantTx: Transaction = {
-        id: `tx-${Date.now()}`,
+        id: `tx-${grantTxNow}`,
         userId,
         type: 'bonus',
         amount: 0,
         title: `Admin Granted +${count} Extra Lucky Spins (${reason})`,
-        timestamp: new Date().toLocaleString(),
+        timestamp: formatISTDateTime(grantTxNow),
+        createdAt: grantTxNow,
         status: 'completed',
-        referenceNo: `ADM-SPN-${Date.now()}`,
+        referenceNo: `ADM-SPN-${grantTxNow}`,
         ...buildUserBalanceSnapshot(targetUser),
       };
       await dbService.saveTransaction(grantTx, userId);
@@ -3021,6 +3150,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       lastUserActionTimestampRef.current = Date.now() + 30000;
+      const balNow = new Date().toISOString();
       const updatedUser: User = {
         ...currentUser,
         rechargeBalance: newRechargeBalance,
@@ -3028,8 +3158,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         spinChances: updatedBonus,
         lastSpinDate: today,
         dailySpinsUsedToday: updatedUsedToday,
-        isExplicitZeroReset: newRechargeBalance === 0,
-        updatedAt: new Date().toISOString(),
+        explicitZeroWallets: buildZeroWalletFlags(currentUser.explicitZeroWallets, {
+          rechargeBalance: newRechargeBalance,
+          withdrawalBalance: newWithdrawalBalance,
+        }),
+        isExplicitZeroReset: false,
+        balanceUpdatedAt: balNow,
+        updatedAt: balNow,
       };
 
       userRef.current = updatedUser;
@@ -3040,15 +3175,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await dbService.saveUser(updatedUser);
 
       if (prizeValue > 0 && (type === 'cash' || type === 'vip_points')) {
+        const spinTxNow = Date.now();
         const spinTx: Transaction = {
-          id: `tx-${Date.now()}`,
+          id: `tx-${spinTxNow}`,
           userId: currentUser.id,
           type: 'spin_win',
           amount: prizeValue,
           title: `Lucky Wheel Prize: ${prizeLabel}`,
-          timestamp: new Date().toLocaleString(),
+          timestamp: formatISTDateTime(spinTxNow),
+          createdAt: spinTxNow,
           status: 'completed',
-          referenceNo: `SPN${Date.now()}`,
+          referenceNo: `SPN${spinTxNow}`,
           ...buildUserBalanceSnapshot(updatedUser),
         };
         await dbService.saveTransaction(spinTx, currentUser.id);
@@ -3169,12 +3306,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const latestUser = userRef.current || currentUser;
       const updatedRedeemed = Array.from(new Set([...(latestUser.redeemedCodes || []), cleanCode]));
       lastUserActionTimestampRef.current = Date.now() + 30000;
+      const balNow = new Date().toISOString();
+      const nextW = Number((latestUser.withdrawalBalance + giftValue).toFixed(2));
       const updatedUser: User = {
         ...latestUser,
-        withdrawalBalance: Number((latestUser.withdrawalBalance + giftValue).toFixed(2)),
+        withdrawalBalance: nextW,
         redeemedCodes: updatedRedeemed,
+        explicitZeroWallets: buildZeroWalletFlags(latestUser.explicitZeroWallets, { withdrawalBalance: nextW }),
         isExplicitZeroReset: false,
-        updatedAt: new Date().toISOString(),
+        balanceUpdatedAt: balNow,
+        updatedAt: balNow,
       };
       userRef.current = updatedUser;
       setUser(updatedUser);
@@ -3183,15 +3324,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } catch {}
       await dbService.saveUser(updatedUser);
 
+      const giftTxNow = Date.now();
       const giftTx: Transaction = {
-        id: `tx-${Date.now()}`,
+        id: `tx-${giftTxNow}`,
         userId: latestUser.id,
         type: 'bonus',
         amount: giftValue,
         title: `Redeemed Gift Card: ${cleanCode}`,
-        timestamp: new Date().toLocaleString(),
+        timestamp: formatISTDateTime(giftTxNow),
+        createdAt: giftTxNow,
         status: 'completed',
-        referenceNo: `GIFT${Date.now()}`,
+        referenceNo: `GIFT${giftTxNow}`,
         ...buildUserBalanceSnapshot(updatedUser),
       };
       await dbService.saveTransaction(giftTx, latestUser.id);
@@ -3371,14 +3514,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       // Record initial balance ledger entry if Admin gave starting balance
       if (rechargeBal > 0) {
+        const admInitNow = Date.now();
         const initTx: Transaction = {
-          id: `tx-adm-init-${Date.now()}`,
+          id: `tx-adm-init-${admInitNow}`,
           userId: createdUser.id,
           type: 'recharge',
           amount: rechargeBal,
           title: 'Initial Deposit Balance Added by Admin',
-          timestamp: new Date().toLocaleString(),
-          createdAt: Date.now(),
+          timestamp: formatISTDateTime(admInitNow),
+          createdAt: admInitNow,
           status: 'completed',
           referenceNo: `ADM-INIT-${createdUser.id}`,
           paymentMethod: 'Admin Direct Setup',
@@ -3399,14 +3543,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const adminUpdateUser = async (userId: string, data: Partial<User>) => {
     try {
-      const hasZero =
-        data.isExplicitZeroReset === true ||
-        data.rechargeBalance === 0 ||
-        data.withdrawalBalance === 0;
+      const nowIso = new Date().toISOString();
+      const existingTarget = adminUsers.find((u) => u.id === userId) || (userRef.current?.id === userId ? userRef.current : null);
+      const touchedFinancial =
+        WALLET_ZERO_FIELDS.some((k) => (data as any)[k] !== undefined) || data.isExplicitZeroReset === true;
+      const explicitZeroWallets = buildZeroWalletFlags(
+        existingTarget?.explicitZeroWallets,
+        data,
+        data.isExplicitZeroReset === true
+      );
       const payload: Partial<User> = {
         ...data,
-        isExplicitZeroReset: hasZero,
-        updatedAt: new Date().toISOString(),
+        explicitZeroWallets,
+        isExplicitZeroReset: Boolean(data.isExplicitZeroReset),
+        ...(touchedFinancial ? { balanceUpdatedAt: data.balanceUpdatedAt || nowIso } : {}),
+        updatedAt: nowIso,
       };
       await dbService.updateUser(userId, payload);
       setAdminUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, ...payload } : u)));
@@ -3510,20 +3661,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? Number(res.user[wallet])
         : Math.max(0, Number(((target[wallet] || 0) + (type === 'add' ? amount : -amount)).toFixed(2)));
 
-      // 2. Sync to Firestore with explicit zero flag if 0
+      // 2. Sync per-wallet explicit zero flags & balanceUpdatedAt cleanly (without blanket reset leaking across wallets)
       const nowIso = new Date().toISOString();
+      const nextZeroWallets =
+        res.user?.explicitZeroWallets ||
+        buildZeroWalletFlags(target.explicitZeroWallets, { [wallet]: nextVal });
       await dbService.updateUser(userId, {
         [wallet]: nextVal,
-        ...(nextVal === 0 ? { isExplicitZeroReset: true } : {}),
+        explicitZeroWallets: nextZeroWallets,
+        isExplicitZeroReset: false,
+        balanceUpdatedAt: res.user?.balanceUpdatedAt || nowIso,
       });
 
+      const adjTxNow = Date.now();
       const adjTx: Transaction = res.transaction || {
-        id: `tx-adj-${Date.now()}`,
+        id: `tx-adj-${adjTxNow}`,
         userId,
         type: type === 'add' ? 'bonus' : 'earnings',
         amount,
         title: `Admin ${type === 'add' ? 'Credit' : 'Debit'}: ${note}`,
-        timestamp: new Date().toLocaleString(),
+        timestamp: formatISTDateTime(adjTxNow),
+        createdAt: adjTxNow,
         status: 'completed',
         referenceNo: `ADM${Math.floor(100000 + Math.random() * 900000)}`,
         ...buildUserBalanceSnapshot(
@@ -3541,7 +3699,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setAdminUsers((prev) =>
         prev.map((u) =>
           u.id === userId
-            ? { ...u, [wallet]: nextVal, ...(nextVal === 0 ? { isExplicitZeroReset: true } : {}), updatedAt: nowIso }
+            ? {
+                ...u,
+                [wallet]: nextVal,
+                explicitZeroWallets: nextZeroWallets,
+                isExplicitZeroReset: false,
+                balanceUpdatedAt: res.user?.balanceUpdatedAt || nowIso,
+                updatedAt: nowIso,
+              }
             : u
         )
       );
@@ -3551,7 +3716,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const nextUser = {
           ...curUser,
           [wallet]: nextVal,
-          ...(nextVal === 0 ? { isExplicitZeroReset: true } : {}),
+          explicitZeroWallets: nextZeroWallets,
+          isExplicitZeroReset: false,
+          balanceUpdatedAt: res.user?.balanceUpdatedAt || nowIso,
           updatedAt: nowIso,
         };
         userRef.current = nextUser;
@@ -4076,6 +4243,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           masterFallbackOtp: merged.masterFallbackOtp || '888999',
           registrationOtpTemplate: merged.registrationOtpTemplate || '',
           forgotPasswordOtpTemplate: merged.forgotPasswordOtpTemplate || '',
+          withdrawalOtpTemplate: merged.withdrawalOtpTemplate || '',
+          p2pOtpTemplate: merged.p2pOtpTemplate || '',
           helpCenterUrl: merged.helpCenterUrl ?? '',
           helpCenterLinks: Array.isArray(merged.helpCenterLinks) ? merged.helpCenterLinks : [],
         }),

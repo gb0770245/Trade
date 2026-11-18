@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import {
   X,
   ArrowLeftRight,
@@ -16,9 +16,10 @@ import {
   Share2,
   ArrowRight,
   Users,
+  Smartphone,
 } from 'lucide-react';
 import { useApp, deduplicateTransactions } from '../context/AppContext';
-import { computeUserTotalBalance, enrichTransactionsWithBalanceAfter } from '../services/dbService';
+import { computeUserTotalBalance, enrichTransactionsWithBalanceAfter, formatTransactionTimeIST } from '../services/dbService';
 import { P2PRecipientPreview, Transaction } from '../types';
 
 const QUICK_AMOUNTS = [5, 10, 25, 50, 100];
@@ -45,6 +46,11 @@ export const P2PTransferModal: React.FC = () => {
 
   const [amount, setAmount] = useState('10');
   const [note, setNote] = useState('');
+  const [otp, setOtp] = useState('');
+  const [otpCountdown, setOtpCountdown] = useState(0);
+  const [isSendingOtp, setIsSendingOtp] = useState(false);
+  const [otpSentToPhone, setOtpSentToPhone] = useState(false);
+  const [otpError, setOtpError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = useRef(false);
 
@@ -61,6 +67,56 @@ export const P2PTransferModal: React.FC = () => {
 
   const isDarkTheme = theme === 'obsidian-gold' || theme === 'cyber-hydrogen';
   const isP2PEnabled = platformSettings?.isP2PEnabled !== false;
+  const isOtpRequired = platformSettings?.smsGatewayActive !== false;
+  const senderCleanPhone = String(user?.phone || '').replace(/\D/g, '').slice(-10);
+
+  useEffect(() => {
+    if (otpCountdown <= 0) return;
+    const timer = setTimeout(() => setOtpCountdown((prev) => prev - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [otpCountdown]);
+
+  const handleSendOtp = async () => {
+    if (!senderCleanPhone || senderCleanPhone.length !== 10) {
+      const msg = 'Valid 10-digit registered mobile number not found on your profile.';
+      setOtpError(msg);
+      showToast(msg, 'error');
+      return;
+    }
+
+    setOtpError(null);
+    setIsSendingOtp(true);
+    try {
+      const res = await fetch('/api/send-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mobile: senderCleanPhone,
+          purpose: 'p2p',
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setOtpCountdown(60);
+        setOtpSentToPhone(true);
+        setOtp('');
+        showToast(
+          `OTP sent to +91 ${senderCleanPhone}. Please enter the 6-digit code received.`,
+          'success'
+        );
+      } else {
+        const msg = data.error || 'Failed to send OTP. Please try again.';
+        setOtpError(msg);
+        showToast(msg, 'error');
+      }
+    } catch {
+      const msg = 'Connection error while sending OTP. Please try again.';
+      setOtpError(msg);
+      showToast(msg, 'error');
+    } finally {
+      setIsSendingOtp(false);
+    }
+  };
   const minP2PAmount = Math.max(0.01, Number(platformSettings?.minP2PAmount) || 1);
   const maxP2PAmount = Math.max(minP2PAmount, Number(platformSettings?.maxP2PAmount) || 50000);
 
@@ -217,8 +273,17 @@ export const P2PTransferModal: React.FC = () => {
       return;
     }
 
+    if (isOtpRequired && otp.trim().length !== 6) {
+      const msg = 'Please enter the 6-digit verification code (OTP). Click "Send OTP" first.';
+      setOtpError(msg);
+      showToast(msg, 'error');
+      return;
+    }
+
+    setOtpError(null);
     isSubmittingRef.current = true;
     setIsSubmitting(true);
+    let transferOk = false;
     try {
       const res = await transferP2PFunds({
         recipientQuery: verifiedRecipient.id,
@@ -226,9 +291,14 @@ export const P2PTransferModal: React.FC = () => {
         sourceWallet,
         targetWallet: 'rechargeBalance', // Always credits receiver's Charged Balance
         note: note.trim(),
+        ...(isOtpRequired ? { otp: otp.trim() } : {}),
       });
 
       if (res.success && res.recipientPreview) {
+        transferOk = true;
+        setOtp('');
+        setOtpCountdown(0);
+        setOtpSentToPhone(false);
         setReceipt({
           referenceNo: res.referenceNo || res.transaction?.referenceNo || `P2P-${Date.now()}`,
           amount: Number(numAmount.toFixed(2)),
@@ -236,12 +306,18 @@ export const P2PTransferModal: React.FC = () => {
           sourceWallet,
           tx: res.transaction,
         });
+      } else if (res.message && res.message.toLowerCase().includes('otp')) {
+        setOtpError(res.message);
       }
     } finally {
       setIsSubmitting(false);
-      setTimeout(() => {
+      if (transferOk) {
+        setTimeout(() => {
+          isSubmittingRef.current = false;
+        }, 1200);
+      } else {
         isSubmittingRef.current = false;
-      }, 1200);
+      }
     }
   };
 
@@ -252,6 +328,10 @@ export const P2PTransferModal: React.FC = () => {
     setLookupError(null);
     setAmount('10');
     setNote('');
+    setOtp('');
+    setOtpCountdown(0);
+    setOtpSentToPhone(false);
+    setOtpError(null);
   };
 
   const containerClasses =
@@ -735,6 +815,71 @@ export const P2PTransferModal: React.FC = () => {
                   </div>
                 </div>
 
+                {/* 4. Mobile OTP Verification (Required when SMS OTP Verification is ON) */}
+                {isOtpRequired && (
+                  <div className={`p-3.5 rounded-2xl border space-y-2.5 ${subtleSurface}`}>
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <span className="font-bold flex items-center gap-1.5">
+                        <ShieldCheck className="w-4 h-4 text-teal-500 shrink-0" />
+                        <span>4. Verification Code (OTP)</span>
+                      </span>
+                      <span className="text-[11px] font-mono text-slate-400 flex items-center gap-1 tabular-nums">
+                        <Smartphone className="w-3 h-3 text-teal-500" />
+                        +91 {senderCleanPhone || 'Registered'}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <div
+                        className={`flex-1 flex items-center min-h-[44px] rounded-xl border px-3 transition-colors ${inputClasses}`}
+                      >
+                        <ShieldCheck className="w-4 h-4 text-slate-400 mr-2 shrink-0" />
+                        <input
+                          type="text"
+                          value={otp}
+                          onChange={(e) => {
+                            setOtp(e.target.value.replace(/\D/g, '').slice(0, 6));
+                            if (otpError) setOtpError(null);
+                          }}
+                          placeholder="6-digit OTP"
+                          className="w-full text-xs outline-none bg-transparent font-mono tracking-widest tabular-nums placeholder:normal-case placeholder:tracking-normal"
+                          maxLength={6}
+                          inputMode="numeric"
+                          autoComplete="one-time-code"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleSendOtp}
+                        disabled={otpCountdown > 0 || isSendingOtp || !isP2PEnabled}
+                        className="min-h-[44px] px-4 rounded-xl text-xs font-bold bg-teal-600/15 text-teal-700 dark:text-teal-300 border border-teal-500/35 hover:bg-teal-600/25 transition-colors disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer tabular-nums"
+                      >
+                        {isSendingOtp
+                          ? 'Sending...'
+                          : otpCountdown > 0
+                          ? `Resend (${otpCountdown}s)`
+                          : otpSentToPhone
+                          ? 'Resend OTP'
+                          : 'Send OTP'}
+                      </button>
+                    </div>
+
+                    {otpError ? (
+                      <p className="text-[11px] text-rose-500 dark:text-rose-400 font-medium leading-snug">
+                        {otpError}
+                      </p>
+                    ) : otpSentToPhone ? (
+                      <p className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium leading-snug">
+                        OTP dispatched to +91 {senderCleanPhone}. Enter the 6-digit code to send funds.
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-slate-400 leading-snug">
+                        Click "Send OTP" to verify this P2P transfer on your registered mobile.
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 <button
                   type="submit"
                   disabled={!isP2PEnabled || isSubmitting || isLookingUp || (Boolean(verifiedRecipient) && !isAmountValid)}
@@ -922,7 +1067,7 @@ export const P2PTransferModal: React.FC = () => {
                       <div className="min-w-0">
                         <div className="font-bold truncate">{tx.title}</div>
                         <div className="text-[10px] text-slate-400 truncate">
-                          {tx.paymentMethod || (isSent ? 'Sent P2P' : 'Received in Charged Balance')} · {tx.timestamp}
+                          {tx.paymentMethod || (isSent ? 'Sent P2P' : 'Received in Charged Balance')} · {formatTransactionTimeIST(tx)}
                         </div>
                       </div>
                     </div>

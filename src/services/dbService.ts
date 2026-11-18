@@ -27,19 +27,104 @@ export const isProductionHost = (): boolean => {
   );
 };
 
-export const getTransactionTime = (tx: Transaction): number => {
-  if (typeof tx.createdAt === 'number' && !isNaN(tx.createdAt) && tx.createdAt > 0) {
-    return tx.createdAt;
+export const formatISTDateTime = (dateInput: number | string | Date = Date.now()): string => {
+  let d: Date;
+  if (dateInput instanceof Date) {
+    d = dateInput;
+  } else {
+    const parsedMs = parseTxTimestampMs(dateInput);
+    d = parsedMs > 0 ? new Date(parsedMs) : new Date();
   }
-  if (tx.id && tx.id.startsWith('tx-')) {
-    const num = parseInt(tx.id.replace('tx-', ''), 10);
-    if (!isNaN(num) && num > 1600000000000) return num;
+  if (Number.isNaN(d.getTime())) {
+    d = new Date();
   }
-  if (tx.timestamp) {
-    const parsed = Date.parse(tx.timestamp);
-    if (!isNaN(parsed)) return parsed;
+  return (
+    d
+      .toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+      })
+      .replace(/[\u202f\u00a0]/g, ' ')
+      .replace(/\b(am|pm)\b/i, (m) => m.toUpperCase()) + ' IST'
+  );
+};
+
+export const parseTxTimestampMs = (raw: any): number => {
+  if (typeof raw === 'number') {
+    if (!Number.isNaN(raw) && raw > 1600000000000) return raw;
+    if (!Number.isNaN(raw) && raw > 1600000000) return raw * 1000;
+    return 0;
+  }
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (!s) return 0;
+    if (/^\d{13}$/.test(s)) return Number(s);
+    if (/\bIST$/i.test(s)) {
+      const istParsed = Date.parse(s.replace(/\s*IST$/i, ' +05:30'));
+      if (!Number.isNaN(istParsed)) return istParsed;
+    }
+    if (/(Z|UTC|GMT|[+-]\d{2}:?\d{2})$/i.test(s) || /^\d{4}-\d{2}-\d{2}T/.test(s)) {
+      const parsed = Date.parse(s);
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+    // Historical server timestamps without timezone were formatted in UTC (e.g. "11/8/2026, 11:23:17 AM")
+    const utcParsed = Date.parse(`${s} UTC`);
+    if (!Number.isNaN(utcParsed)) return utcParsed;
+    // Handle DD/MM/YYYY, HH:MM:SS AM/PM if present
+    const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})[,\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i);
+    if (dmy) {
+      const [, dd, mm, yyyy, hh, min, sec = '00', ampm = ''] = dmy;
+      const normalized = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')} ${hh.padStart(2, '0')}:${min}:${sec}${ampm ? ` ${ampm.toUpperCase()}` : ''} UTC`;
+      const dmyParsed = Date.parse(normalized);
+      if (!Number.isNaN(dmyParsed)) return dmyParsed;
+    }
+    const fallback = Date.parse(s);
+    if (!Number.isNaN(fallback)) return fallback;
   }
   return 0;
+};
+
+export const getTransactionTime = (tx: any): number => {
+  if (!tx) return 0;
+  const createdMs = parseTxTimestampMs(tx.createdAt);
+  if (createdMs > 1600000000000) return createdMs;
+
+  for (const field of [tx.id, tx.referenceNo]) {
+    if (field) {
+      const match = String(field).match(/(1[6-9]\d{11}|20\d{11})/);
+      if (match) {
+        const num = Number(match[1]);
+        if (!Number.isNaN(num) && num > 1600000000000) return num;
+      }
+    }
+  }
+
+  if (tx.timestamp) {
+    const tsMs = parseTxTimestampMs(tx.timestamp);
+    if (tsMs > 1600000000000) return tsMs;
+  }
+  return 0;
+};
+
+export const formatTransactionTimeIST = (txOrRaw: any): string => {
+  if (!txOrRaw) return '—';
+  if (typeof txOrRaw === 'object' && !(txOrRaw instanceof Date)) {
+    const ms = getTransactionTime(txOrRaw);
+    if (ms > 0) return formatISTDateTime(ms);
+    return txOrRaw.timestamp ? String(txOrRaw.timestamp) : '—';
+  }
+  if (txOrRaw instanceof Date) {
+    return formatISTDateTime(txOrRaw);
+  }
+  const ms = parseTxTimestampMs(txOrRaw);
+  if (ms > 0) return formatISTDateTime(ms);
+  return String(txOrRaw);
 };
 
 const getTxStatusRank = (status: any): number => {
@@ -217,6 +302,14 @@ export const mergeTxListsSafe = (lists: Transaction[][]): Transaction[] => {
   return Array.from(mapById.values()).sort((a, b) => getTransactionTime(b) - getTransactionTime(a));
 };
 
+const WALLET_ZERO_KEYS = [
+  'rechargeBalance',
+  'withdrawalBalance',
+  'productRevenue',
+  'totalInvested',
+  'totalCommissionEarned',
+] as const;
+
 const parseTimestampMs = (val: any): number => {
   if (!val) return 0;
   if (typeof val === 'number' && !Number.isNaN(val)) return val;
@@ -228,24 +321,79 @@ const parseTimestampMs = (val: any): number => {
   return Number.isNaN(ms) ? 0 : ms;
 };
 
+const getFinancialTimestampMs = (u: any): number => {
+  if (!u) return 0;
+  const balTs = parseTimestampMs(u.balanceUpdatedAt);
+  if (balTs > 0) return balTs;
+  const zeroArr = Array.isArray(u.explicitZeroWallets) ? u.explicitZeroWallets : [];
+  const hasAnyNonZero =
+    (Number(u.rechargeBalance) || 0) > 0 ||
+    (Number(u.withdrawalBalance) || 0) > 0 ||
+    (Number(u.productRevenue) || 0) > 0 ||
+    (Number(u.totalInvested) || 0) > 0 ||
+    (Number(u.totalCommissionEarned) || 0) > 0;
+  if (hasAnyNonZero || u.isExplicitZeroReset || zeroArr.length > 0) {
+    return parseTimestampMs(u.updatedAt) || parseTimestampMs(u.createdAt);
+  }
+  return 0;
+};
+
+const buildExplicitZeroWallets = (
+  prevWallets: string[] | undefined,
+  updates: Partial<User>,
+  fullReset?: boolean
+): string[] => {
+  if (fullReset) return [...WALLET_ZERO_KEYS];
+  const set = new Set<string>([
+    ...(Array.isArray(prevWallets) ? prevWallets : []),
+    ...(Array.isArray(updates.explicitZeroWallets) ? updates.explicitZeroWallets : []),
+  ]);
+  for (const w of WALLET_ZERO_KEYS) {
+    const val = (updates as any)[w];
+    if (val !== undefined && val !== null && !Number.isNaN(Number(val))) {
+      if (Number(val) === 0) set.add(w);
+      else set.delete(w);
+    }
+  }
+  return Array.from(set);
+};
+
 export const mergeUserSafe = (existing: Partial<User> | undefined | null, incoming: Partial<User>): User => {
-  const base: any = { ...(existing || {}) };
+  if (!existing) {
+    const clean: any = { ...incoming };
+    delete clean.isAuthoritativeServer;
+    delete clean.isRuntimeMutated;
+    return clean as User;
+  }
+
+  const base: any = { ...existing };
   const isAuthIncoming = Boolean((incoming as any)?.isAuthoritativeServer);
   const existingTs = parseTimestampMs(existing?.updatedAt);
   const incomingTs = parseTimestampMs(incoming?.updatedAt);
-  const existingStrictlyNewer =
+  const existingBalTs = getFinancialTimestampMs(existing);
+  const incomingBalTs = getFinancialTimestampMs(incoming);
+
+  const existingStrictlyNewerMeta =
     !isAuthIncoming &&
     existingTs > 0 &&
     incomingTs > 0 &&
     existingTs > incomingTs + 1000;
-  const incomingIsNewerOrEqual =
-    isAuthIncoming ||
-    (incomingTs > 0 && (existingTs === 0 || incomingTs >= existingTs)) ||
-    (Boolean((incoming as any).isExplicitZeroReset) && (incomingTs === 0 || existingTs === 0 || incomingTs >= existingTs - 1000));
+
+  const existingStrictlyNewerBal =
+    !isAuthIncoming &&
+    existingBalTs > 0 &&
+    (incomingBalTs === 0 || existingBalTs > incomingBalTs + 1000);
+
+  const existingZeroSet = new Set<string>(
+    Array.isArray(existing?.explicitZeroWallets) ? existing.explicitZeroWallets : []
+  );
+  const incomingZeroSet = new Set<string>(
+    Array.isArray(incoming?.explicitZeroWallets) ? incoming.explicitZeroWallets : []
+  );
 
   for (const [k, v] of Object.entries(incoming)) {
-    if (k === 'isAuthoritativeServer') continue;
-    if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'vipLevel', 'spinChances', 'totalReferrals', 'totalCommissionEarned', 'checkInStreak'].includes(k)) {
+    if (k === 'isAuthoritativeServer' || k === 'isRuntimeMutated') continue;
+    if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'totalCommissionEarned'].includes(k)) {
       const existingNum = Number(base[k]) || 0;
       const incomingNum = Number(v) || 0;
 
@@ -253,11 +401,34 @@ export const mergeUserSafe = (existing: Partial<User> | undefined | null, incomi
         continue;
       }
 
-      if (existingStrictlyNewer) {
+      if (existingStrictlyNewerBal) {
         continue;
       }
 
-      if (existingNum > 0 && incomingNum === 0 && !incomingIsNewerOrEqual) {
+      const allowedZero =
+        isAuthIncoming ||
+        (Boolean((incoming as any).isExplicitZeroReset) && (incomingBalTs === 0 || existingBalTs === 0 || incomingBalTs >= existingBalTs - 1000)) ||
+        (incomingZeroSet.has(k) && (incomingBalTs === 0 || existingBalTs === 0 || incomingBalTs >= existingBalTs - 1000));
+
+      if (existingNum > 0 && incomingNum === 0 && !allowedZero) {
+        continue;
+      }
+    } else if (['vipLevel', 'spinChances', 'totalReferrals', 'checkInStreak'].includes(k)) {
+      const existingNum = Number(base[k]) || 0;
+      const incomingNum = Number(v) || 0;
+
+      if (base[k] !== undefined && (v === null || v === undefined || Number.isNaN(Number(v)))) {
+        continue;
+      }
+
+      if (existingStrictlyNewerMeta) {
+        continue;
+      }
+
+      const incomingMetaNewerOrAuth =
+        isAuthIncoming || (incomingTs > 0 && (existingTs === 0 || incomingTs >= existingTs));
+
+      if (existingNum > 0 && incomingNum === 0 && !incomingMetaNewerOrAuth) {
         continue;
       }
     }
@@ -277,7 +448,11 @@ export const mergeUserSafe = (existing: Partial<User> | undefined | null, incomi
       }
     } else if (((v as any) === 0 || (v as any) === false) && typeof v === typeof base[k]) {
       if (['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'totalCommissionEarned'].includes(k)) {
-        if ((Number(base[k]) || 0) > 0 && !incomingIsNewerOrEqual) {
+        const allowedZero =
+          isAuthIncoming ||
+          (Boolean((incoming as any).isExplicitZeroReset) && (incomingBalTs === 0 || existingBalTs === 0 || incomingBalTs >= existingBalTs - 1000)) ||
+          (incomingZeroSet.has(k) && (incomingBalTs === 0 || existingBalTs === 0 || incomingBalTs >= existingBalTs - 1000));
+        if ((Number(base[k]) || 0) > 0 && !allowedZero) {
           continue;
         }
       }
@@ -318,11 +493,27 @@ export const mergeUserSafe = (existing: Partial<User> | undefined | null, incomi
   }
 
   base.totalReferrals = Math.max(Number(base.totalReferrals) || 0, Number(existing?.totalReferrals) || 0);
-  if (isAuthIncoming || ((incoming as any).isExplicitZeroReset && !existingStrictlyNewer)) {
+  if (
+    isAuthIncoming ||
+    ((Boolean((incoming as any).isExplicitZeroReset) || incomingZeroSet.has('totalCommissionEarned')) && !existingStrictlyNewerBal)
+  ) {
     base.totalCommissionEarned = Number(incoming.totalCommissionEarned ?? base.totalCommissionEarned) || 0;
-  } else if (!existingStrictlyNewer) {
+  } else if (!existingStrictlyNewerBal) {
     base.totalCommissionEarned = Math.max(Number(existing?.totalCommissionEarned) || 0, Number(base.totalCommissionEarned) || 0);
   }
+
+  // Maintain per-wallet explicitZeroWallets & full-reset flag accurately
+  const nextZeroSet = new Set<string>([...existingZeroSet, ...incomingZeroSet]);
+  for (const w of WALLET_ZERO_KEYS) {
+    if ((Number(base[w]) || 0) > 0) {
+      nextZeroSet.delete(w);
+    } else if (incoming.isExplicitZeroReset && !existingStrictlyNewerBal) {
+      nextZeroSet.add(w);
+    }
+  }
+  base.explicitZeroWallets = Array.from(nextZeroSet);
+  const anyPositiveMerged = WALLET_ZERO_KEYS.some((w) => (Number(base[w]) || 0) > 0);
+  base.isExplicitZeroReset = Boolean(base.isExplicitZeroReset) && !anyPositiveMerged;
 
   if (incoming.password && String(incoming.password).trim().length > 0) {
     base.password = String(incoming.password).trim();
@@ -334,12 +525,18 @@ export const mergeUserSafe = (existing: Partial<User> | undefined | null, incomi
   if (!base.createdAt) {
     base.createdAt = existing?.createdAt || incoming?.createdAt || new Date().toISOString();
   }
+  if (existingBalTs > incomingBalTs && !isAuthIncoming) {
+    base.balanceUpdatedAt = existing?.balanceUpdatedAt;
+  } else if (incoming?.balanceUpdatedAt || existing?.balanceUpdatedAt) {
+    base.balanceUpdatedAt = incoming?.balanceUpdatedAt || existing?.balanceUpdatedAt;
+  }
   if (existingTs > incomingTs && !isAuthIncoming) {
     base.updatedAt = existing?.updatedAt || new Date().toISOString();
   } else {
     base.updatedAt = incoming?.updatedAt || existing?.updatedAt || new Date().toISOString();
   }
   delete base.isAuthoritativeServer;
+  delete base.isRuntimeMutated;
   return base as User;
 };
 
@@ -486,18 +683,23 @@ export const dbService = {
   // Save or update user permanently in SQLite SQL & persistent backup & Firestore
   async saveUser(user: User, forceSave: boolean = true): Promise<void> {
     const path = `users/${user.id}`;
-    const hasExplicitZero =
-      user.isExplicitZeroReset === true ||
-      user.rechargeBalance === 0 ||
-      user.withdrawalBalance === 0;
+    const nowIso = new Date().toISOString();
+    const explicitZeroWallets = buildExplicitZeroWallets(
+      user.explicitZeroWallets,
+      user,
+      user.isExplicitZeroReset === true
+    );
     const stampedUser: User = {
       ...user,
-      isExplicitZeroReset: hasExplicitZero,
-      updatedAt: new Date().toISOString(),
+      explicitZeroWallets,
+      isExplicitZeroReset: Boolean(user.isExplicitZeroReset),
+      updatedAt: nowIso,
     };
     delete (stampedUser as any).isAuthoritativeServer;
+    delete (stampedUser as any).isRuntimeMutated;
     // Ensure we merge with any existing record so password/bankDetails/etc. are never lost
     let completeUser = { ...stampedUser };
+    let financialChanged = Boolean(user.balanceUpdatedAt);
     try {
       if (typeof window !== 'undefined') {
         const local = localStorage.getItem('nexa_users_backup_v2');
@@ -509,15 +711,42 @@ export const dbService = {
               (u: any) => u.id === stampedUser.id || (cleanPhone && String(u.phone || '').replace(/\D/g, '').slice(-10) === cleanPhone)
             );
             if (existing) {
-              completeUser = mergeUserSafe(existing, stampedUser);
+              financialChanged =
+                WALLET_ZERO_KEYS.some(
+                  (w) =>
+                    (stampedUser as any)[w] !== undefined &&
+                    Math.abs((Number((stampedUser as any)[w]) || 0) - (Number(existing[w]) || 0)) > 0.0001
+                ) || Boolean(user.isExplicitZeroReset);
+              const nextBalUpdated = financialChanged
+                ? (user.balanceUpdatedAt || nowIso)
+                : (existing.balanceUpdatedAt || user.balanceUpdatedAt);
+
+              completeUser = mergeUserSafe(existing, {
+                ...stampedUser,
+                ...(nextBalUpdated ? { balanceUpdatedAt: nextBalUpdated } : {}),
+              });
               if (stampedUser.rechargeBalance !== undefined) completeUser.rechargeBalance = stampedUser.rechargeBalance;
               if (stampedUser.withdrawalBalance !== undefined) completeUser.withdrawalBalance = stampedUser.withdrawalBalance;
               if (stampedUser.totalInvested !== undefined) completeUser.totalInvested = stampedUser.totalInvested;
               if (stampedUser.productRevenue !== undefined) completeUser.productRevenue = stampedUser.productRevenue;
               if (stampedUser.totalCommissionEarned !== undefined) completeUser.totalCommissionEarned = stampedUser.totalCommissionEarned;
               if (stampedUser.spinChances !== undefined) completeUser.spinChances = stampedUser.spinChances;
-              completeUser.isExplicitZeroReset = stampedUser.isExplicitZeroReset;
-              completeUser.updatedAt = stampedUser.updatedAt;
+              completeUser.explicitZeroWallets = buildExplicitZeroWallets(
+                existing.explicitZeroWallets,
+                stampedUser,
+                stampedUser.isExplicitZeroReset === true
+              );
+              completeUser.isExplicitZeroReset = Boolean(stampedUser.isExplicitZeroReset);
+              if (nextBalUpdated) completeUser.balanceUpdatedAt = nextBalUpdated;
+              completeUser.updatedAt = nowIso;
+            } else {
+              const hasNonZeroOrExplicit =
+                WALLET_ZERO_KEYS.some((w) => (Number((stampedUser as any)[w]) || 0) > 0) ||
+                explicitZeroWallets.length > 0 ||
+                Boolean(stampedUser.isExplicitZeroReset);
+              if (hasNonZeroOrExplicit && !completeUser.balanceUpdatedAt) {
+                completeUser.balanceUpdatedAt = nowIso;
+              }
             }
           }
         }
@@ -657,11 +886,34 @@ export const dbService = {
       (snap) => {
         if (snap.exists()) {
           const fsUser = snap.data() as User;
-          // Always defer to authoritative SQLite/server user so stale Firestore snapshots never resurrect old balances
           this.getUser(userId)
             .then((sqlUser) => {
               if (sqlUser) {
-                onUpdate({ ...sqlUser, isAuthoritativeServer: true } as any);
+                const isRuntimeMutated = Boolean((sqlUser as any).isRuntimeMutated);
+                if (isRuntimeMutated) {
+                  // Server mutated this user in THIS live runtime (dividend claim, P2P, admin adjust): server wins!
+                  const mergedAuth = mergeUserSafe(fsUser, { ...sqlUser, isAuthoritativeServer: true } as any);
+                  onUpdate({ ...mergedAuth, isRuntimeMutated: true } as any);
+                } else {
+                  // Bundled container seed vs live Firestore: never let an unmutated $0 seed clobber live Firestore!
+                  const sqlBalTs = getFinancialTimestampMs(sqlUser);
+                  const fsBalTs = getFinancialTimestampMs(fsUser);
+                  const merged = mergeUserSafe(fsUser, sqlUser);
+                  const fsHadBetterBal =
+                    fsBalTs > sqlBalTs &&
+                    WALLET_ZERO_KEYS.some(
+                      (w) => Math.abs((Number((merged as any)[w]) || 0) - (Number((sqlUser as any)[w]) || 0)) > 0.001
+                    );
+                  if (fsHadBetterBal && typeof window !== 'undefined') {
+                    // Hydrate fresh container SQLite from live Firestore so server & client match after AI Studio update
+                    fetch('/api/user/save', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ user: merged }),
+                    }).catch(() => {});
+                  }
+                  onUpdate(merged);
+                }
               } else {
                 onUpdate(fsUser);
               }
@@ -708,6 +960,7 @@ export const dbService = {
     };
 
     const missingFromBackup: User[] = [];
+    const fsUsersList: User[] = [];
     if (!isProductionHost()) {
       try {
         const querySnapshot = await getDocs(collection(db, 'users'));
@@ -721,6 +974,7 @@ export const dbService = {
             return;
           }
 
+          fsUsersList.push(data);
           addOrMerge(data);
           if (!backupIdSet.has(uId) && (!uPhone || !backupIdSet.has(uPhone))) {
             missingFromBackup.push(data);
@@ -731,8 +985,15 @@ export const dbService = {
       }
     }
 
-    // Apply authoritative SQLite backupUsers LAST so SQLite always overrides stale Firestore balances
-    backupUsers.forEach((u) => addOrMerge({ ...u, isAuthoritativeServer: true } as any));
+    // Apply SQLite backupUsers LAST: ONLY force isAuthoritativeServer for users mutated in THIS live runtime,
+    // so an unmutated bundled $0 seed after an AI Studio update NEVER overwrites live Firestore balances!
+    backupUsers.forEach((u) => {
+      if ((u as any).isRuntimeMutated) {
+        addOrMerge({ ...u, isAuthoritativeServer: true } as any);
+      } else {
+        addOrMerge(u);
+      }
+    });
 
     const combined = Array.from(byId.values()).filter((u) => {
       const cleanPhone = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
@@ -740,8 +1001,26 @@ export const dbService = {
       return !deletedBlacklist.has(rawId) && (!cleanPhone || !deletedBlacklist.has(cleanPhone));
     });
 
-    if (missingFromBackup.length > 0) {
-      this.syncUsersToBackup(missingFromBackup, false).catch((err) =>
+    // Hydrate container SQLite for any user where live Firestore had fresher financial state than unmutated SQLite
+    const backupById = new Map<string, User>();
+    const backupByPhone = new Map<string, User>();
+    backupUsers.forEach((bu) => {
+      if (bu?.id) backupById.set(String(bu.id).trim(), bu);
+      const bp = bu?.phone ? String(bu.phone).replace(/\D/g, '').slice(-10) : '';
+      if (bp.length === 10) backupByPhone.set(bp, bu);
+    });
+    const toHydrateServer = combined.filter((cu) => {
+      const cuPhone = cu.phone ? String(cu.phone).replace(/\D/g, '').slice(-10) : '';
+      const bu = backupById.get(String(cu.id).trim()) || (cuPhone.length === 10 ? backupByPhone.get(cuPhone) : undefined);
+      if (!bu) return true;
+      if ((bu as any).isRuntimeMutated) return false;
+      return WALLET_ZERO_KEYS.some(
+        (w) => Math.abs((Number((cu as any)[w]) || 0) - (Number((bu as any)[w]) || 0)) > 0.001
+      );
+    });
+
+    if (missingFromBackup.length > 0 || toHydrateServer.length > 0) {
+      this.syncUsersToBackup(toHydrateServer.length > 0 ? toHydrateServer : missingFromBackup, false).catch((err) =>
         console.warn('Background backup sync failed:', err)
       );
     }
@@ -934,9 +1213,15 @@ export const dbService = {
             byId.set(canonicalId, merged);
             if (cleanPhone) phoneToId.set(cleanPhone, canonicalId);
           };
-          // Merge Firestore first, then authoritative SQLite backupUsers LAST so stale Firestore docs never overwrite SQLite
+          // Merge Firestore first, then SQLite backupUsers: only force authoritative for runtime-mutated server rows!
           fsUsers.forEach(addOrMerge);
-          backupUsers.forEach((u) => addOrMerge({ ...u, isAuthoritativeServer: true } as any));
+          backupUsers.forEach((u) => {
+            if ((u as any).isRuntimeMutated) {
+              addOrMerge({ ...u, isAuthoritativeServer: true } as any);
+            } else {
+              addOrMerge(u);
+            }
+          });
           const merged = Array.from(byId.values()).filter((u) => {
             const cleanPhone = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
             const rawId = String(u.id || cleanPhone).trim();
@@ -944,13 +1229,24 @@ export const dbService = {
           });
           onUpdate(merged);
 
-          const missingFromSql = fsUsers.filter((u) => {
-            const rawId = String(u.id || '').trim();
-            const cleanP = u.phone ? String(u.phone).replace(/\D/g, '').slice(-10) : '';
-            return rawId && !backupIdSet.has(rawId) && (!cleanP || !backupIdSet.has(cleanP));
+          const backupById = new Map<string, User>();
+          const backupByPhone = new Map<string, User>();
+          backupUsers.forEach((bu) => {
+            if (bu?.id) backupById.set(String(bu.id).trim(), bu);
+            const bp = bu?.phone ? String(bu.phone).replace(/\D/g, '').slice(-10) : '';
+            if (bp.length === 10) backupByPhone.set(bp, bu);
           });
-          if (missingFromSql.length > 0) {
-            this.syncUsersToBackup(missingFromSql, false).catch(() => {});
+          const hydrateFromFs = merged.filter((cu) => {
+            const cuPhone = cu.phone ? String(cu.phone).replace(/\D/g, '').slice(-10) : '';
+            const bu = backupById.get(String(cu.id).trim()) || (cuPhone.length === 10 ? backupByPhone.get(cuPhone) : undefined);
+            if (!bu) return true;
+            if ((bu as any).isRuntimeMutated) return false;
+            return WALLET_ZERO_KEYS.some(
+              (w) => Math.abs((Number((cu as any)[w]) || 0) - (Number((bu as any)[w]) || 0)) > 0.001
+            );
+          });
+          if (hydrateFromFs.length > 0) {
+            this.syncUsersToBackup(hydrateFromFs, false).catch(() => {});
           }
         },
         (error) => {
@@ -967,18 +1263,25 @@ export const dbService = {
   // Admin: Update user partial permanently
   async updateUser(userId: string, data: Partial<User>): Promise<void> {
     const cleanId = String(userId).trim();
-    const hasZeroBalance =
-      (data as any).isExplicitZeroReset === true ||
-      data.rechargeBalance === 0 ||
-      data.withdrawalBalance === 0;
+    const nowIso = new Date().toISOString();
+    const touchedFinancial =
+      WALLET_ZERO_KEYS.some((k) => (data as any)[k] !== undefined) ||
+      Boolean((data as any).isExplicitZeroReset);
+    const existing = await this.getUser(cleanId).catch(() => null);
+    const explicitZeroWallets = buildExplicitZeroWallets(
+      existing?.explicitZeroWallets,
+      data,
+      Boolean((data as any).isExplicitZeroReset)
+    );
     const payload: Partial<User> = {
       ...data,
-      isExplicitZeroReset: hasZeroBalance,
-      updatedAt: new Date().toISOString(),
+      explicitZeroWallets,
+      isExplicitZeroReset: Boolean((data as any).isExplicitZeroReset),
+      ...(touchedFinancial ? { balanceUpdatedAt: (data as any).balanceUpdatedAt || nowIso } : {}),
+      updatedAt: nowIso,
     };
 
     try {
-      const existing = await this.getUser(cleanId);
       const merged: User = mergeUserSafe(existing || { id: cleanId }, payload);
       await this.syncUsersToBackup([merged], true);
     } catch (e) {}
@@ -1009,6 +1312,7 @@ export const dbService = {
   // Admin: Zero all Firestore & localStorage cached user balances after a server-wide balance reset
   async resetAllUsersBalancesInFirestore(): Promise<void> {
     const nowIso = new Date().toISOString();
+    const zeroWallets = [...WALLET_ZERO_KEYS];
     if (typeof window !== 'undefined') {
       try {
         const local = localStorage.getItem('nexa_users_backup_v2');
@@ -1022,7 +1326,9 @@ export const dbService = {
               productRevenue: 0,
               totalInvested: 0,
               totalCommissionEarned: 0,
+              explicitZeroWallets: zeroWallets,
               isExplicitZeroReset: true,
+              balanceUpdatedAt: nowIso,
               updatedAt: nowIso,
             }));
             localStorage.setItem('nexa_users_backup_v2', JSON.stringify(zeroed));
@@ -1046,7 +1352,9 @@ export const dbService = {
               productRevenue: 0,
               totalInvested: 0,
               totalCommissionEarned: 0,
+              explicitZeroWallets: zeroWallets,
               isExplicitZeroReset: true,
+              balanceUpdatedAt: nowIso,
               updatedAt: nowIso,
             },
             { merge: true }
@@ -1136,13 +1444,17 @@ export const dbService = {
     } catch {}
   },
 
-  // Save transaction to cloud & backend with guaranteed numeric epoch createdAt
+  // Save transaction to cloud & backend with guaranteed numeric epoch createdAt & IST timestamp
   async saveTransaction(tx: Transaction, userId: string): Promise<void> {
-    const createdAt = tx.createdAt || (tx.id && tx.id.startsWith('tx-') ? parseInt(tx.id.replace('tx-', ''), 10) : 0) || Date.now();
+    const createdAt = getTransactionTime(tx) || Date.now();
+    const istTimestamp = /\bIST$/i.test(String(tx.timestamp || '').trim())
+      ? String(tx.timestamp).trim()
+      : formatISTDateTime(createdAt);
     const payload: Transaction = {
       ...tx,
       userId,
       createdAt,
+      timestamp: istTimestamp,
     };
 
     // 1. Sync to Cloud SQL and local backend backup
@@ -3320,6 +3632,7 @@ export const dbService = {
     sourceWallet: 'withdrawalBalance' | 'rechargeBalance';
     targetWallet?: 'withdrawalBalance' | 'rechargeBalance';
     note?: string;
+    otp?: string;
   }): Promise<{
     success: boolean;
     sender?: User;
@@ -3350,7 +3663,12 @@ export const dbService = {
             {
               rechargeBalance: Number(json.sender.rechargeBalance) || 0,
               withdrawalBalance: Number(json.sender.withdrawalBalance) || 0,
-              updatedAt: nowIso,
+              explicitZeroWallets: Array.isArray(json.sender.explicitZeroWallets)
+                ? json.sender.explicitZeroWallets
+                : [],
+              isExplicitZeroReset: false,
+              balanceUpdatedAt: json.sender.balanceUpdatedAt || nowIso,
+              updatedAt: json.sender.updatedAt || nowIso,
             },
             { merge: true }
           ).catch(() => {});
@@ -3361,7 +3679,12 @@ export const dbService = {
             {
               rechargeBalance: Number(json.recipientWalletUpdate.rechargeBalance) || 0,
               withdrawalBalance: Number(json.recipientWalletUpdate.withdrawalBalance) || 0,
-              updatedAt: nowIso,
+              explicitZeroWallets: Array.isArray(json.recipientWalletUpdate.explicitZeroWallets)
+                ? json.recipientWalletUpdate.explicitZeroWallets
+                : [],
+              isExplicitZeroReset: false,
+              balanceUpdatedAt: json.recipientWalletUpdate.balanceUpdatedAt || nowIso,
+              updatedAt: json.recipientWalletUpdate.updatedAt || nowIso,
             },
             { merge: true }
           ).catch(() => {});
@@ -3444,7 +3767,12 @@ export const dbService = {
             {
               rechargeBalance: Number(json.sender.rechargeBalance) || 0,
               withdrawalBalance: Number(json.sender.withdrawalBalance) || 0,
-              updatedAt: nowIso,
+              explicitZeroWallets: Array.isArray(json.sender.explicitZeroWallets)
+                ? json.sender.explicitZeroWallets
+                : [],
+              isExplicitZeroReset: false,
+              balanceUpdatedAt: json.sender.balanceUpdatedAt || nowIso,
+              updatedAt: json.sender.updatedAt || nowIso,
             },
             { merge: true }
           ).catch(() => {});
@@ -3455,7 +3783,12 @@ export const dbService = {
             {
               rechargeBalance: Number(json.recipient.rechargeBalance) || 0,
               withdrawalBalance: Number(json.recipient.withdrawalBalance) || 0,
-              updatedAt: nowIso,
+              explicitZeroWallets: Array.isArray(json.recipient.explicitZeroWallets)
+                ? json.recipient.explicitZeroWallets
+                : [],
+              isExplicitZeroReset: false,
+              balanceUpdatedAt: json.recipient.balanceUpdatedAt || nowIso,
+              updatedAt: json.recipient.updatedAt || nowIso,
             },
             { merge: true }
           ).catch(() => {});
@@ -3479,6 +3812,7 @@ export const dbService = {
     userId: string;
     amount: number;
     bankDetails: NonNullable<User['bankDetails']>;
+    otp?: string;
   }): Promise<{
     success: boolean;
     message?: string;
@@ -3503,12 +3837,19 @@ export const dbService = {
       if (!isProductionHost()) {
         const nowIso = new Date().toISOString();
         if (json.user?.id) {
+          const explicitZeros = Array.isArray(json.user.explicitZeroWallets)
+            ? json.user.explicitZeroWallets
+            : Number(json.user.withdrawalBalance) === 0
+            ? ['withdrawalBalance']
+            : [];
           setDoc(
             doc(db, 'users', String(json.user.id)),
             {
               withdrawalBalance: Number(json.user.withdrawalBalance) || 0,
               bankDetails: json.user.bankDetails || payload.bankDetails,
-              isExplicitZeroReset: Number(json.user.withdrawalBalance) === 0,
+              explicitZeroWallets: explicitZeros,
+              isExplicitZeroReset: false,
+              balanceUpdatedAt: json.user.balanceUpdatedAt || nowIso,
               updatedAt: json.user.updatedAt || nowIso,
             },
             { merge: true }

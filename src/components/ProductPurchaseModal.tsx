@@ -4,14 +4,10 @@ import {
   Sparkles,
   ShieldCheck,
   AlertCircle,
-  CreditCard,
-  TrendingUp,
   Wallet,
   Clock,
-  CheckCircle2,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { triggerOfficialPayUPayment } from '../services/payuService';
 
 export const ProductPurchaseModal: React.FC = () => {
   const {
@@ -20,9 +16,6 @@ export const ProductPurchaseModal: React.FC = () => {
     openModal,
     selectedProductForInvest: selectedProduct,
     setSelectedProductForInvest: setSelectedProduct,
-    platformSettings,
-    showToast,
-    showPaymentFailedModal,
   } = useApp();
 
   const [isInvesting, setIsInvesting] = useState(false);
@@ -46,78 +39,6 @@ export const ProductPurchaseModal: React.FC = () => {
       }
     } finally {
       setIsInvesting(false);
-    }
-  };
-
-  // Direct PayU Payment Gateway (Supports logged-in users & guest shoppers)
-  const handleDirectPayU = async () => {
-    setIsInvesting(true);
-    try {
-      const guestPhone = user?.phone || (typeof window !== 'undefined' ? localStorage.getItem('hd_last_phone') || '7307112738' : '7307112738');
-      const guestName = user?.nickname || 'Guest Customer';
-      const guestId = user?.id || `guest_${guestPhone.slice(-6)}`;
-
-      // 1 USD = 100 INR in payment gateway
-      const paymentInrAmount = Math.round(selectedProduct.price * 100);
-      const merchantKey = platformSettings.payuMerchantKey?.trim();
-      const isCustomLiveKey = Boolean(merchantKey && merchantKey !== 'gtKFFx' && !merchantKey.toLowerCase().includes('test'));
-      const merchantMode = (isCustomLiveKey || platformSettings.payuMode === 'live') ? 'live' : 'test';
-
-      const res = await triggerOfficialPayUPayment({
-        key: merchantKey,
-        salt: platformSettings.payuMerchantSalt,
-        mode: merchantMode,
-        amount: paymentInrAmount,
-        usdAmount: selectedProduct.price,
-        merchantName: platformSettings.storeName || 'Nexa AI Tech Store',
-        themeColor: platformSettings.payuThemeColor || '#0f766e',
-        userName: guestName,
-        userPhone: guestPhone,
-        userId: guestId,
-        purpose: 'product_purchase',
-        productId: selectedProduct.id,
-        productName: selectedProduct.retailName || selectedProduct.name,
-        onSuccess: async (paymentId: string) => {
-          showToast(`PayU payment verified for ${selectedProduct.retailName || selectedProduct.name}!`, 'success');
-          if (user) {
-            await investInProduct(selectedProduct);
-          }
-          setSelectedProduct(null);
-          setIsInvesting(false);
-        },
-        onFailure: (reason: string) => {
-          setIsInvesting(false);
-          showPaymentFailedModal({
-            reason: reason || 'Transaction declined by bank or user.',
-            amountUsd: selectedProduct.price,
-            amountInr: paymentInrAmount,
-            productName: selectedProduct.name,
-            onRetry: () => {
-              handleDirectPayU();
-            },
-          });
-        },
-        onDismiss: () => {
-          setIsInvesting(false);
-          showPaymentFailedModal({
-            reason: 'Payment window was closed before completion.',
-            amountUsd: selectedProduct.price,
-            amountInr: paymentInrAmount,
-            productName: selectedProduct.name,
-            onRetry: () => {
-              handleDirectPayU();
-            },
-          });
-        },
-      });
-
-      if (!res.success && res.message) {
-        setIsInvesting(false);
-        showToast(res.message, 'error');
-      }
-    } catch (err: any) {
-      setIsInvesting(false);
-      showToast(`Payment error: ${err.message}`, 'error');
     }
   };
 
@@ -210,7 +131,7 @@ export const ProductPurchaseModal: React.FC = () => {
           <div className="flex items-start gap-2 text-[11px] text-amber-700 dark:text-amber-300 bg-amber-500/10 border border-amber-500/30 p-2.5 rounded-xl mt-3">
             <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
             <div>
-              <span>Charged balance is ${userBalance.toFixed(2)}. You can buy directly using Razorpay or Add Money to wallet.</span>
+              <span>Charged balance is ${userBalance.toFixed(2)}. Please add money to your wallet via UPI QR to purchase.</span>
             </div>
           </div>
         )}
@@ -246,41 +167,25 @@ export const ProductPurchaseModal: React.FC = () => {
               </button>
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="flex gap-2">
               <button
                 type="button"
-                onClick={handleDirectPayU}
-                disabled={isInvesting}
-                className="w-full py-3.5 rounded-xl font-bold text-white bg-gradient-to-r from-teal-600 via-emerald-600 to-teal-700 hover:from-teal-700 hover:via-emerald-700 hover:to-teal-800 text-xs transition-all shadow-lg shadow-teal-600/20 active:scale-[0.99] flex items-center justify-center gap-2 cursor-pointer"
+                onClick={() => setSelectedProduct(null)}
+                className="py-3 px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
               >
-                <CreditCard className="w-4 h-4" />
-                <span>
-                  {isInvesting
-                    ? 'Connecting to PayU...'
-                    : `Direct Buy with PayU ($${selectedProduct.price.toFixed(2)})`}
-                </span>
+                Cancel
               </button>
-
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setSelectedProduct(null)}
-                  className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedProduct(null);
-                    openModal('recharge');
-                  }}
-                  className="flex-1 py-2.5 rounded-xl font-bold text-teal-700 dark:text-teal-300 border border-teal-600 hover:bg-teal-50 dark:hover:bg-teal-950/40 text-xs transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Wallet className="w-3.5 h-3.5" />
-                  <span>Add Money</span>
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedProduct(null);
+                  openModal('recharge');
+                }}
+                className="flex-1 py-3 rounded-xl font-bold text-white bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-700 hover:to-teal-800 text-xs transition-all shadow-md shadow-emerald-600/20 flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Wallet className="w-4 h-4" />
+                <span>Add Money to Wallet</span>
+              </button>
             </div>
           )}
         </div>

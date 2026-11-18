@@ -17,9 +17,18 @@ import { useApp } from '../context/AppContext';
 import { AdMobPlacementConfig, PlatformSettings } from '../types';
 import { AdMobBanner, deriveAdMobPublisherId } from './AdMobBanner';
 
+const PERMANENT_LIVE_APP_ID = 'ca-app-pub-6701253514262817~4453946322';
+const PERMANENT_LIVE_BANNER_UNIT_ID = 'ca-app-pub-6701253514262817/2657487227';
+const PERMANENT_LIVE_PUB_ID = 'pub-6701253514262817';
+
 const GOOGLE_TEST_APP_ID = 'ca-app-pub-3940256099942544~3347511713';
 const GOOGLE_TEST_BANNER_UNIT_ID = 'ca-app-pub-3940256099942544/6300978111';
 const GOOGLE_TEST_PUB_ID = 'pub-3940256099942544';
+
+function extractPubIdFromAdMobInput(val: string): string {
+  const match = String(val || '').trim().match(/(pub-\d{8,20})/i);
+  return match?.[1] ? match[1].toLowerCase() : '';
+}
 
 export const AdminAdMobManager: React.FC = () => {
   const { platformSettings, updatePlatformSettings, showToast } = useApp();
@@ -28,16 +37,16 @@ export const AdminAdMobManager: React.FC = () => {
     platformSettings.isAdMobEnabled !== false
   );
   const [adMobTestMode, setAdMobTestMode] = useState<boolean>(
-    platformSettings.adMobTestMode !== false
+    platformSettings.adMobTestMode === true
   );
   const [adMobAppId, setAdMobAppId] = useState<string>(
-    platformSettings.adMobAppId || GOOGLE_TEST_APP_ID
+    platformSettings.adMobAppId || PERMANENT_LIVE_APP_ID
   );
   const [adMobBannerUnitId, setAdMobBannerUnitId] = useState<string>(
-    platformSettings.adMobBannerUnitId || GOOGLE_TEST_BANNER_UNIT_ID
+    platformSettings.adMobBannerUnitId || PERMANENT_LIVE_BANNER_UNIT_ID
   );
   const [adMobPublisherId, setAdMobPublisherId] = useState<string>(
-    platformSettings.adMobPublisherId || GOOGLE_TEST_PUB_ID
+    platformSettings.adMobPublisherId || PERMANENT_LIVE_PUB_ID
   );
   const [adSenseBannerSlot, setAdSenseBannerSlot] = useState<string>(
     platformSettings.adSenseBannerSlot || ''
@@ -59,10 +68,12 @@ export const AdminAdMobManager: React.FC = () => {
     account: platformSettings.adMobPlacements?.account !== false,
   });
   const [isSaving, setIsSaving] = useState(false);
+  const [liveAppAdsCheck, setLiveAppAdsCheck] = useState<string | null>(null);
+  const [isCheckingAppAds, setIsCheckingAppAds] = useState(false);
 
   useEffect(() => {
     setIsAdMobEnabled(platformSettings.isAdMobEnabled !== false);
-    setAdMobTestMode(platformSettings.adMobTestMode !== false);
+    setAdMobTestMode(platformSettings.adMobTestMode === true);
     if (platformSettings.adMobAppId !== undefined) setAdMobAppId(platformSettings.adMobAppId);
     if (platformSettings.adMobBannerUnitId !== undefined)
       setAdMobBannerUnitId(platformSettings.adMobBannerUnitId);
@@ -88,8 +99,8 @@ export const AdminAdMobManager: React.FC = () => {
   const draftPreviewSettings: Partial<PlatformSettings> = {
     isAdMobEnabled,
     adMobTestMode,
-    adMobAppId: adMobAppId.trim() || GOOGLE_TEST_APP_ID,
-    adMobBannerUnitId: adMobBannerUnitId.trim() || GOOGLE_TEST_BANNER_UNIT_ID,
+    adMobAppId: adMobAppId.trim() || PERMANENT_LIVE_APP_ID,
+    adMobBannerUnitId: adMobBannerUnitId.trim() || PERMANENT_LIVE_BANNER_UNIT_ID,
     adMobPublisherId: adMobPublisherId.trim(),
     adSenseBannerSlot: adSenseBannerSlot.trim(),
     adMobBannerSize,
@@ -100,6 +111,45 @@ export const AdminAdMobManager: React.FC = () => {
 
   const derivedPubId = deriveAdMobPublisherId(draftPreviewSettings);
   const appAdsTxtLine = `google.com, ${derivedPubId}, DIRECT, f08c47fec0942fa0`;
+
+  const trimmedAppId = adMobAppId.trim();
+  const trimmedUnitId = adMobBannerUnitId.trim();
+  const isAppIdFormatValid = /^ca-app-pub-\d{10,20}~\d{6,14}$/i.test(trimmedAppId);
+  const isUnitIdFormatValid = /^ca-app-pub-\d{10,20}\/\d{6,14}$/i.test(trimmedUnitId);
+  const hasRealNonTestIds =
+    (Boolean(trimmedAppId) && trimmedAppId !== GOOGLE_TEST_APP_ID && isAppIdFormatValid) ||
+    (Boolean(trimmedUnitId) && trimmedUnitId !== GOOGLE_TEST_BANNER_UNIT_ID && isUnitIdFormatValid) ||
+    (Boolean(derivedPubId) && derivedPubId !== GOOGLE_TEST_PUB_ID);
+
+  const handleAppIdChange = (val: string) => {
+    setAdMobAppId(val);
+    const extracted = extractPubIdFromAdMobInput(val);
+    if (extracted) {
+      setAdMobPublisherId(extracted);
+    }
+  };
+
+  const handleBannerUnitChange = (val: string) => {
+    setAdMobBannerUnitId(val);
+    const extracted = extractPubIdFromAdMobInput(val);
+    if (extracted && (!adMobPublisherId.trim() || adMobPublisherId.trim() === GOOGLE_TEST_PUB_ID)) {
+      setAdMobPublisherId(extracted);
+    }
+  };
+
+  const handleVerifyAppAdsEndpoint = async () => {
+    setIsCheckingAppAds(true);
+    try {
+      const res = await fetch(`/app-ads.txt?t=${Date.now()}`);
+      const text = await res.text();
+      setLiveAppAdsCheck(text.trim());
+      showToast('Verified live /app-ads.txt response from server!', 'success');
+    } catch {
+      showToast('Could not reach /app-ads.txt endpoint', 'error');
+    } finally {
+      setIsCheckingAppAds(false);
+    }
+  };
 
   const handleLoadGoogleTestIds = () => {
     setAdMobTestMode(true);
@@ -115,8 +165,8 @@ export const AdminAdMobManager: React.FC = () => {
       const payload: Partial<PlatformSettings> = {
         isAdMobEnabled,
         adMobTestMode,
-        adMobAppId: adMobAppId.trim(),
-        adMobBannerUnitId: adMobBannerUnitId.trim(),
+        adMobAppId: trimmedAppId || PERMANENT_LIVE_APP_ID,
+        adMobBannerUnitId: trimmedUnitId || PERMANENT_LIVE_BANNER_UNIT_ID,
         adMobPublisherId: derivedPubId,
         adSenseBannerSlot: adSenseBannerSlot.trim(),
         adMobBannerSize,
@@ -126,7 +176,8 @@ export const AdminAdMobManager: React.FC = () => {
         ...override,
       };
       await updatePlatformSettings(payload);
-      showToast('Google AdMob Banner Ads settings saved & synced live!', 'success');
+      setLiveAppAdsCheck(null);
+      showToast('Google AdMob Banner Ads settings saved permanently across server & database!', 'success');
     } catch (err: any) {
       showToast(`Failed to save AdMob settings: ${err?.message || 'Error'}`, 'error');
     } finally {
@@ -262,15 +313,42 @@ export const AdminAdMobManager: React.FC = () => {
             </div>
           </div>
 
+          {hasRealNonTestIds && adMobTestMode && (
+            <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-2">
+              <div className="text-[11px] text-amber-200">
+                Real AdMob ID detected while <strong className="text-amber-300">Test Mode</strong> is active.
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setAdMobTestMode(false);
+                  handleSaveAdMobSettings({ adMobTestMode: false });
+                }}
+                className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[10px] font-black shrink-0 cursor-pointer"
+              >
+                Go Live Now
+              </button>
+            </div>
+          )}
+
           <div className="space-y-3">
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">
-                Google AdMob App ID
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-semibold text-slate-300">
+                  Google AdMob App ID
+                </label>
+                <span
+                  className={`text-[10px] font-mono ${
+                    isAppIdFormatValid ? 'text-emerald-400' : 'text-amber-400'
+                  }`}
+                >
+                  {isAppIdFormatValid ? 'Valid format (~)' : 'Format: ca-app-pub-XXXX~YYYY'}
+                </span>
+              </div>
               <input
                 type="text"
                 value={adMobAppId}
-                onChange={(e) => setAdMobAppId(e.target.value)}
+                onChange={(e) => handleAppIdChange(e.target.value)}
                 placeholder="ca-app-pub-xxxxxxxxxxxxxxxx~yyyyyyyyyy"
                 className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs font-mono text-emerald-300 focus:outline-none focus:border-emerald-500"
               />
@@ -280,13 +358,22 @@ export const AdminAdMobManager: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">
-                Banner Ad Unit ID
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-semibold text-slate-300">
+                  Banner Ad Unit ID
+                </label>
+                <span
+                  className={`text-[10px] font-mono ${
+                    isUnitIdFormatValid ? 'text-cyan-400' : 'text-amber-400'
+                  }`}
+                >
+                  {isUnitIdFormatValid ? 'Valid format (/)' : 'Format: ca-app-pub-XXXX/ZZZZ'}
+                </span>
+              </div>
               <input
                 type="text"
                 value={adMobBannerUnitId}
-                onChange={(e) => setAdMobBannerUnitId(e.target.value)}
+                onChange={(e) => handleBannerUnitChange(e.target.value)}
                 placeholder="ca-app-pub-xxxxxxxxxxxxxxxx/zzzzzzzzzz"
                 className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs font-mono text-cyan-300 focus:outline-none focus:border-cyan-500"
               />
@@ -308,16 +395,29 @@ export const AdminAdMobManager: React.FC = () => {
 
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  Web AdSense Slot ID (Optional PWA)
+                  Web AdSense Display Slot ID (Chrome / Website)
                 </label>
                 <input
                   type="text"
                   value={adSenseBannerSlot}
                   onChange={(e) => setAdSenseBannerSlot(e.target.value)}
-                  placeholder="e.g. 1234567890"
+                  placeholder="10-digit AdSense slot e.g. 1234567890"
                   className="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs font-mono text-amber-300 focus:outline-none focus:border-amber-500"
                 />
               </div>
+            </div>
+
+            <div className="p-3 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-1.5 text-[11px]">
+              <div className="font-bold text-slate-200 flex items-center justify-between gap-2">
+                <span>Live Ad Delivery Status (Android APK vs Website)</span>
+                <span className="text-[10px] font-mono text-emerald-400">{derivedPubId}</span>
+              </div>
+              <p className="text-slate-400">
+                <strong className="text-emerald-300">Android APK / WebView:</strong> Uses your AdMob Unit ID ({adMobBannerUnitId || PERMANENT_LIVE_BANNER_UNIT_ID}) directly.
+              </p>
+              <p className="text-slate-400">
+                <strong className="text-amber-300">Web Browser (Chrome/PWA):</strong> Google AdMob mobile units do not run in browsers; Auto Ads (<span className="font-mono text-slate-200">ca-{derivedPubId}</span>) are active in HTML, and pasting a <strong className="text-white">Web AdSense Display Slot ID</strong> from <span className="font-mono text-slate-200">adsense.google.com</span> renders fixed Google AdSense banners inside every screen slot.
+              </p>
             </div>
           </div>
         </div>
@@ -465,18 +565,35 @@ export const AdminAdMobManager: React.FC = () => {
             <code className="text-xs font-mono text-emerald-300 break-all">
               {appAdsTxtLine}
             </code>
-            <button
-              type="button"
-              onClick={() => {
-                navigator.clipboard?.writeText(appAdsTxtLine);
-                showToast('Copied /app-ads.txt line!', 'success');
-              }}
-              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1 shrink-0 cursor-pointer"
-            >
-              <Copy className="w-3.5 h-3.5" />
-              <span>Copy</span>
-            </button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                disabled={isCheckingAppAds}
+                onClick={handleVerifyAppAdsEndpoint}
+                className="px-2.5 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/30 text-cyan-300 text-xs font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isCheckingAppAds ? 'animate-spin' : ''}`} />
+                <span>Test</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard?.writeText(appAdsTxtLine);
+                  showToast('Copied /app-ads.txt line!', 'success');
+                }}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1 cursor-pointer"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy</span>
+              </button>
+            </div>
           </div>
+
+          {liveAppAdsCheck && (
+            <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[11px] font-mono text-emerald-300">
+              Live Server /app-ads.txt: {liveAppAdsCheck}
+            </div>
+          )}
 
           <div className="flex items-start gap-2 text-[11px] text-slate-400">
             <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />

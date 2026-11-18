@@ -88,8 +88,17 @@ export async function initPostgresSchema() {
         total_referrals INTEGER DEFAULT 0,
         total_commission_earned DOUBLE PRECISION DEFAULT 0,
         bank_details JSONB,
+        is_explicit_zero_reset BOOLEAN DEFAULT FALSE,
+        explicit_zero_wallets JSONB,
+        balance_updated_at TEXT,
+        updated_at TEXT,
         created_at TIMESTAMP DEFAULT NOW()
       );
+
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_explicit_zero_reset BOOLEAN DEFAULT FALSE;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS explicit_zero_wallets JSONB;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS balance_updated_at TEXT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TEXT;
 
       CREATE TABLE IF NOT EXISTS transactions (
         id SERIAL PRIMARY KEY,

@@ -14,11 +14,9 @@ import {
   Star,
   FileText,
   BadgePercent,
-  CreditCard,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { InvestmentProduct } from '../types';
-import { triggerOfficialPayUPayment } from '../services/payuService';
 import { AdMobBanner } from './AdMobBanner';
 
 export const InvestView: React.FC = () => {
@@ -31,8 +29,6 @@ export const InvestView: React.FC = () => {
     selectedProductForInvest: selectedProduct,
     setSelectedProductForInvest: setSelectedProduct,
     platformSettings,
-    showToast,
-    showPaymentFailedModal,
   } = useApp();
 
   const [viewMode, setViewMode] = useState<'store' | 'yield'>('store');
@@ -45,74 +41,6 @@ export const InvestView: React.FC = () => {
 
   const handleInvestClick = (product: InvestmentProduct) => {
     setSelectedProduct(product);
-  };
-
-  const handleDirectPayUForProduct = async (product: InvestmentProduct) => {
-    if (!user) {
-      openModal('auth');
-      return;
-    }
-    setIsInvesting(true);
-    try {
-      const paymentInrAmount = Math.round(product.price * 100);
-      const merchantKey = platformSettings.payuMerchantKey?.trim();
-      const isCustomLiveKey = Boolean(merchantKey && merchantKey !== 'gtKFFx' && !merchantKey.toLowerCase().includes('test'));
-      const merchantMode = (isCustomLiveKey || platformSettings.payuMode === 'live') ? 'live' : 'test';
-
-      const res = await triggerOfficialPayUPayment({
-        key: merchantKey,
-        salt: platformSettings.payuMerchantSalt,
-        mode: merchantMode,
-        amount: paymentInrAmount,
-        usdAmount: product.price,
-        merchantName: platformSettings.payuMerchantName?.trim() || 'Nexa AI',
-        themeColor: platformSettings.payuThemeColor || '#0f766e',
-        userName: user.nickname || 'Member',
-        userPhone: user.phone || '9999999999',
-        userId: user.id,
-        purpose: 'product_purchase',
-        productId: product.id,
-        productName: product.retailName || product.name,
-        onSuccess: async (paymentId: string) => {
-          showToast(`PayU payment verified! Activating ${product.name}...`, 'success');
-          await investInProduct(product);
-          setSelectedProduct(null);
-          setIsInvesting(false);
-        },
-        onFailure: (reason: string) => {
-          setIsInvesting(false);
-          showPaymentFailedModal({
-            reason: reason || 'Transaction declined by bank or user.',
-            amountUsd: product.price,
-            amountInr: paymentInrAmount,
-            productName: product.name,
-            onRetry: () => {
-              handleDirectPayUForProduct(product);
-            },
-          });
-        },
-        onDismiss: () => {
-          setIsInvesting(false);
-          showPaymentFailedModal({
-            reason: 'Payment window was closed before completion.',
-            amountUsd: product.price,
-            amountInr: paymentInrAmount,
-            productName: product.name,
-            onRetry: () => {
-              handleDirectPayUForProduct(product);
-            },
-          });
-        },
-      });
-
-      if (!res.success && res.message) {
-        setIsInvesting(false);
-        showToast(res.message, 'error');
-      }
-    } catch (err: any) {
-      setIsInvesting(false);
-      showToast(`Payment error: ${err.message}`, 'error');
-    }
   };
 
   const handleConfirmInvestment = async () => {

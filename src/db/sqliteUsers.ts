@@ -34,6 +34,7 @@ export function initSqliteUsersTable(): void {
       bank_details_json TEXT,
       raw_json TEXT,
       is_deleted INTEGER NOT NULL DEFAULT 0,
+      balance_updated_at TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -41,6 +42,9 @@ export function initSqliteUsersTable(): void {
     CREATE INDEX IF NOT EXISTS idx_users_invite ON platform_users(invitation_code);
     CREATE INDEX IF NOT EXISTS idx_users_status ON platform_users(status);
   `);
+  try {
+    db.exec(`ALTER TABLE platform_users ADD COLUMN balance_updated_at TEXT;`);
+  } catch {}
 }
 
 export interface SqlUserRecord {
@@ -74,6 +78,8 @@ export interface SqlUserRecord {
   } | null;
   isDeleted?: boolean;
   isExplicitZeroReset?: boolean;
+  explicitZeroWallets?: string[];
+  balanceUpdatedAt?: string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -124,13 +130,41 @@ export function mapSqlRowToUser(r: any): SqlUserRecord {
     inviterId = '406332';
   }
 
-  let isExplicitZeroReset = false;
+  let parsedRaw: any = {};
   if (r.raw_json) {
     try {
-      const parsedRaw = JSON.parse(r.raw_json);
-      isExplicitZeroReset = Boolean(parsedRaw?.isExplicitZeroReset);
+      parsedRaw = JSON.parse(r.raw_json) || {};
     } catch {}
   }
+
+  const rechargeBalance = Number(r.recharge_balance) || 0;
+  const withdrawalBalance = Number(r.withdrawal_balance) || 0;
+  const productRevenue = Number(r.product_revenue) || 0;
+  const totalInvested = Number(r.total_invested) || 0;
+  const totalCommissionEarned = Number(r.total_commission_earned) || 0;
+  const valByWallet: Record<string, number> = {
+    rechargeBalance,
+    withdrawalBalance,
+    productRevenue,
+    totalInvested,
+    totalCommissionEarned,
+  };
+  const explicitZeroWallets: string[] = Array.isArray(parsedRaw?.explicitZeroWallets)
+    ? parsedRaw.explicitZeroWallets.filter((w: any) => typeof w === 'string' && (valByWallet[w] ?? 0) === 0)
+    : [];
+  const hasAnyPositiveWallet =
+    rechargeBalance > 0 ||
+    withdrawalBalance > 0 ||
+    productRevenue > 0 ||
+    totalInvested > 0 ||
+    totalCommissionEarned > 0;
+  const isExplicitZeroReset = Boolean(parsedRaw?.isExplicitZeroReset) && !hasAnyPositiveWallet;
+  const balanceUpdatedAt: string | undefined =
+    r.balance_updated_at ||
+    parsedRaw?.balanceUpdatedAt ||
+    (hasAnyPositiveWallet || isExplicitZeroReset || explicitZeroWallets.length > 0
+      ? r.updated_at || r.created_at || undefined
+      : undefined);
 
   return {
     id: String(r.id),
@@ -142,21 +176,23 @@ export function mapSqlRowToUser(r: any): SqlUserRecord {
     invitedBy,
     inviterName,
     inviterId,
-    rechargeBalance: Number(r.recharge_balance) || 0,
-    withdrawalBalance: Number(r.withdrawal_balance) || 0,
-    productRevenue: Number(r.product_revenue) || 0,
+    rechargeBalance,
+    withdrawalBalance,
+    productRevenue,
     vipLevel: Number(r.vip_level) || 0,
-    totalInvested: Number(r.total_invested) || 0,
+    totalInvested,
     checkInStreak: Number(r.check_in_streak) || 0,
     lastCheckInDate: r.last_check_in_date || null,
     spinChances: Number(r.spin_chances) || 0,
     status: r.status || 'active',
     role: r.role || 'user',
     totalReferrals: Number(r.total_referrals) || 0,
-    totalCommissionEarned: Number(r.total_commission_earned) || 0,
+    totalCommissionEarned,
     bankDetails,
     isDeleted: Boolean(r.is_deleted === 1),
     isExplicitZeroReset,
+    explicitZeroWallets,
+    balanceUpdatedAt,
     createdAt: r.created_at || new Date().toISOString(),
     updatedAt: r.updated_at || new Date().toISOString(),
   };
@@ -221,26 +257,85 @@ export function upsertUserInSql(user: any): SqlUserRecord {
     finalInviterId = '406332';
   }
 
-  // Resolve Balances safely: accept any valid numeric balance (including 0 when deducted or withdrawn)
-  const rechargeBalance = user.rechargeBalance !== undefined && user.rechargeBalance !== null && !isNaN(Number(user.rechargeBalance))
-    ? Math.max(0, Number(user.rechargeBalance))
-    : Number(existingRow?.recharge_balance || 0);
+  let existingRaw: any = {};
+  if (existingRow?.raw_json) {
+    try {
+      existingRaw = JSON.parse(existingRow.raw_json) || {};
+    } catch {}
+  }
 
-  const withdrawalBalance = user.withdrawalBalance !== undefined && user.withdrawalBalance !== null && !isNaN(Number(user.withdrawalBalance))
-    ? Math.max(0, Number(user.withdrawalBalance))
-    : Number(existingRow?.withdrawal_balance || 0);
+  const parseTsSafe = (val: any): number => {
+    if (!val) return 0;
+    let s = String(val).trim();
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) s = s.replace(' ', 'T') + 'Z';
+    const ms = Date.parse(s);
+    return Number.isNaN(ms) ? 0 : ms;
+  };
 
-  const productRevenue = user.productRevenue !== undefined && user.productRevenue !== null && !isNaN(Number(user.productRevenue))
-    ? Number(user.productRevenue)
-    : Number(existingRow?.product_revenue || 0);
+  const existingZeros: string[] = Array.isArray(existingRaw?.explicitZeroWallets)
+    ? existingRaw.explicitZeroWallets
+    : [];
+  const incomingZeros: string[] = Array.isArray(user.explicitZeroWallets)
+    ? user.explicitZeroWallets
+    : [];
+  const zeroWalletSet = new Set<string>([...existingZeros, ...incomingZeros]);
+
+  const incomingHasExplicitReset = Boolean(user.isExplicitZeroReset);
+  const existingPositive =
+    existingRow &&
+    ((Number(existingRow.recharge_balance) || 0) > 0 ||
+      (Number(existingRow.withdrawal_balance) || 0) > 0 ||
+      (Number(existingRow.product_revenue) || 0) > 0 ||
+      (Number(existingRow.total_invested) || 0) > 0 ||
+      (Number(existingRow.total_commission_earned) || 0) > 0);
+  const existingBalTs = existingRow
+    ? parseTsSafe(existingRow.balance_updated_at || existingRaw?.balanceUpdatedAt) ||
+      (existingPositive ? parseTsSafe(existingRow.updated_at || existingRow.created_at) : 0)
+    : 0;
+  const incomingBalTs = parseTsSafe(user.balanceUpdatedAt);
+  const blockZeroOverwrite = (field: string, existingVal: number, incomingVal: number): boolean => {
+    if (existingVal <= 0 || incomingVal !== 0) return false;
+    if (incomingHasExplicitReset || incomingZeros.includes(field)) return false;
+    if (incomingBalTs > 0 && (existingBalTs === 0 || incomingBalTs >= existingBalTs - 1000)) return false;
+    return true;
+  };
+
+  // Resolve Balances safely: accept any valid numeric balance (including 0 when explicitly deducted or reset)
+  const rawRecharge =
+    user.rechargeBalance !== undefined && user.rechargeBalance !== null && !isNaN(Number(user.rechargeBalance))
+      ? Math.max(0, Number(user.rechargeBalance))
+      : Number(existingRow?.recharge_balance || 0);
+  const rechargeBalance = blockZeroOverwrite('rechargeBalance', Number(existingRow?.recharge_balance || 0), rawRecharge)
+    ? Number(existingRow?.recharge_balance || 0)
+    : rawRecharge;
+
+  const rawWithdrawal =
+    user.withdrawalBalance !== undefined && user.withdrawalBalance !== null && !isNaN(Number(user.withdrawalBalance))
+      ? Math.max(0, Number(user.withdrawalBalance))
+      : Number(existingRow?.withdrawal_balance || 0);
+  const withdrawalBalance = blockZeroOverwrite('withdrawalBalance', Number(existingRow?.withdrawal_balance || 0), rawWithdrawal)
+    ? Number(existingRow?.withdrawal_balance || 0)
+    : rawWithdrawal;
+
+  const rawProductRevenue =
+    user.productRevenue !== undefined && user.productRevenue !== null && !isNaN(Number(user.productRevenue))
+      ? Number(user.productRevenue)
+      : Number(existingRow?.product_revenue || 0);
+  const productRevenue = blockZeroOverwrite('productRevenue', Number(existingRow?.product_revenue || 0), rawProductRevenue)
+    ? Number(existingRow?.product_revenue || 0)
+    : rawProductRevenue;
 
   const vipLevel = user.vipLevel !== undefined && user.vipLevel !== null && !isNaN(Number(user.vipLevel))
     ? Number(user.vipLevel)
     : Number(existingRow?.vip_level || 0);
 
-  const totalInvested = user.totalInvested !== undefined && user.totalInvested !== null && !isNaN(Number(user.totalInvested))
-    ? Number(user.totalInvested)
-    : Number(existingRow?.total_invested || 0);
+  const rawTotalInvested =
+    user.totalInvested !== undefined && user.totalInvested !== null && !isNaN(Number(user.totalInvested))
+      ? Number(user.totalInvested)
+      : Number(existingRow?.total_invested || 0);
+  const totalInvested = blockZeroOverwrite('totalInvested', Number(existingRow?.total_invested || 0), rawTotalInvested)
+    ? Number(existingRow?.total_invested || 0)
+    : rawTotalInvested;
 
   const checkInStreak = user.checkInStreak !== undefined && user.checkInStreak !== null && !isNaN(Number(user.checkInStreak))
     ? Number(user.checkInStreak)
@@ -260,12 +355,38 @@ export function upsertUserInSql(user: any): SqlUserRecord {
     Number(existingRow?.total_referrals) || 0
   );
 
-  const totalCommissionEarned = user.isExplicitZeroReset
+  const allowCommissionZero =
+    Boolean(user.isExplicitZeroReset) || incomingZeros.includes('totalCommissionEarned');
+  const totalCommissionEarned = allowCommissionZero
     ? Math.max(0, Number(user.totalCommissionEarned) || 0)
     : Math.max(
         Number(user.totalCommissionEarned) || 0,
         Number(existingRow?.total_commission_earned) || 0
       );
+
+  // Maintain clean per-wallet explicit zero markers (clear marker whenever wallet > 0)
+  const finalWalletVals: Record<string, number> = {
+    rechargeBalance,
+    withdrawalBalance,
+    productRevenue,
+    totalInvested,
+    totalCommissionEarned,
+  };
+  for (const [wName, wVal] of Object.entries(finalWalletVals)) {
+    if (wVal > 0) {
+      zeroWalletSet.delete(wName);
+    } else if (incomingHasExplicitReset) {
+      zeroWalletSet.add(wName);
+    }
+  }
+  const finalExplicitZeroWallets = Array.from(zeroWalletSet);
+  const anyPositiveFinal =
+    rechargeBalance > 0 ||
+    withdrawalBalance > 0 ||
+    productRevenue > 0 ||
+    totalInvested > 0 ||
+    totalCommissionEarned > 0;
+  const finalIsExplicitZeroReset = Boolean(user.isExplicitZeroReset) && !anyPositiveFinal;
 
   // Resolve Bank Details: NEVER clear existing valid bank details with null or blank
   const existingBank = existingRow ? parseBankDetails(existingRow) : null;
@@ -291,8 +412,26 @@ export function upsertUserInSql(user: any): SqlUserRecord {
 
   const nowIso = new Date().toISOString();
   const createdAt = user.createdAt || existingRow?.created_at || nowIso;
+  const updatedAt = user.updatedAt || nowIso;
+
+  const financialChanged = !existingRow
+    ? anyPositiveFinal || finalIsExplicitZeroReset || finalExplicitZeroWallets.length > 0
+    : Math.abs(rechargeBalance - (Number(existingRow.recharge_balance) || 0)) > 0.0001 ||
+      Math.abs(withdrawalBalance - (Number(existingRow.withdrawal_balance) || 0)) > 0.0001 ||
+      Math.abs(productRevenue - (Number(existingRow.product_revenue) || 0)) > 0.0001 ||
+      Math.abs(totalInvested - (Number(existingRow.total_invested) || 0)) > 0.0001 ||
+      Math.abs(totalCommissionEarned - (Number(existingRow.total_commission_earned) || 0)) > 0.0001;
+
+  let balanceUpdatedAt: string | null =
+    existingRow?.balance_updated_at || existingRaw?.balanceUpdatedAt || null;
+  if (incomingBalTs > existingBalTs && user.balanceUpdatedAt) {
+    balanceUpdatedAt = String(user.balanceUpdatedAt);
+  } else if (financialChanged) {
+    balanceUpdatedAt = user.balanceUpdatedAt || nowIso;
+  }
 
   const rawJson = JSON.stringify({
+    ...existingRaw,
     ...user,
     id: cleanId,
     phone: cleanPhone,
@@ -308,8 +447,10 @@ export function upsertUserInSql(user: any): SqlUserRecord {
     productRevenue,
     totalInvested,
     totalCommissionEarned,
-    isExplicitZeroReset: Boolean(user.isExplicitZeroReset),
-    updatedAt: nowIso,
+    isExplicitZeroReset: finalIsExplicitZeroReset,
+    explicitZeroWallets: finalExplicitZeroWallets,
+    ...(balanceUpdatedAt ? { balanceUpdatedAt } : {}),
+    updatedAt,
   });
 
   const stmt = db.prepare(`
@@ -321,7 +462,7 @@ export function upsertUserInSql(user: any): SqlUserRecord {
       role, total_referrals, total_commission_earned,
       bank_account_holder, bank_account_number, bank_ifsc_code,
       bank_name, bank_upi_id, bank_details_json, raw_json,
-      is_deleted, created_at, updated_at
+      is_deleted, balance_updated_at, created_at, updated_at
     ) VALUES (
       ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?,
@@ -330,7 +471,7 @@ export function upsertUserInSql(user: any): SqlUserRecord {
       ?, ?, ?,
       ?, ?, ?,
       ?, ?, ?, ?,
-      0, ?, ?
+      0, ?, ?, ?
     )
     ON CONFLICT(id) DO UPDATE SET
       phone = excluded.phone,
@@ -361,6 +502,7 @@ export function upsertUserInSql(user: any): SqlUserRecord {
       bank_details_json = COALESCE(excluded.bank_details_json, platform_users.bank_details_json),
       raw_json = excluded.raw_json,
       is_deleted = 0,
+      balance_updated_at = COALESCE(excluded.balance_updated_at, platform_users.balance_updated_at),
       updated_at = excluded.updated_at
   `);
 
@@ -372,7 +514,7 @@ export function upsertUserInSql(user: any): SqlUserRecord {
     role, totalReferrals, totalCommissionEarned,
     bankHolder, bankNumber, bankIfsc,
     bankName, bankUpi, bankDetailsJson, rawJson,
-    createdAt, nowIso
+    balanceUpdatedAt, createdAt, updatedAt
   );
 
   return {
@@ -399,9 +541,11 @@ export function upsertUserInSql(user: any): SqlUserRecord {
     totalCommissionEarned,
     bankDetails: finalBank,
     isDeleted: false,
-    isExplicitZeroReset: Boolean(user.isExplicitZeroReset),
+    isExplicitZeroReset: finalIsExplicitZeroReset,
+    explicitZeroWallets: finalExplicitZeroWallets,
+    balanceUpdatedAt: balanceUpdatedAt || undefined,
     createdAt,
-    updatedAt: nowIso,
+    updatedAt,
   };
 }
 
@@ -556,24 +700,55 @@ export function initAndSyncSqlUsers(initialUsers: any[]): void {
         continue;
       }
 
-      // Check existing SQLite row: NEVER overwrite a newer SQLite balance with an older disk backup record
+      // Check existing SQLite row: NEVER overwrite a newer SQLite balance with an older or $0 disk backup record
       const existingRow = db.prepare(`
-        SELECT id, updated_at, raw_json FROM platform_users
+        SELECT id, updated_at, balance_updated_at, recharge_balance, withdrawal_balance, product_revenue, total_invested, total_commission_earned, raw_json FROM platform_users
         WHERE id = ? OR (phone = ? AND length(?) = 10)
         LIMIT 1
       `).get(uId, uPhone, uPhone) as any;
 
       if (existingRow) {
-        let existingTs = existingRow.updated_at ? Date.parse(String(existingRow.updated_at).replace(' ', 'T')) : 0;
-        if (!existingTs && existingRow.raw_json) {
-          try {
-            const parsedRaw = JSON.parse(existingRow.raw_json);
-            if (parsedRaw?.updatedAt) existingTs = Date.parse(String(parsedRaw.updatedAt)) || 0;
-          } catch {}
+        const parseDate = (v: any) => {
+          if (!v) return 0;
+          const ms = Date.parse(String(v).replace(' ', 'T'));
+          return Number.isNaN(ms) ? 0 : ms;
+        };
+        let parsedExistingRaw: any = {};
+        if (existingRow.raw_json) {
+          try { parsedExistingRaw = JSON.parse(existingRow.raw_json) || {}; } catch {}
         }
-        const incomingTs = u.updatedAt ? Date.parse(String(u.updatedAt)) || 0 : 0;
-        if (existingTs > 0 && (incomingTs === 0 || existingTs >= incomingTs)) {
-          continue; // SQLite already has authoritative newer or equal record
+        const existingPos =
+          (Number(existingRow.recharge_balance) || 0) > 0 ||
+          (Number(existingRow.withdrawal_balance) || 0) > 0 ||
+          (Number(existingRow.product_revenue) || 0) > 0 ||
+          (Number(existingRow.total_invested) || 0) > 0 ||
+          (Number(existingRow.total_commission_earned) || 0) > 0;
+        const incomingPos =
+          (Number(u.rechargeBalance) || 0) > 0 ||
+          (Number(u.withdrawalBalance) || 0) > 0 ||
+          (Number(u.productRevenue) || 0) > 0 ||
+          (Number(u.totalInvested) || 0) > 0 ||
+          (Number(u.totalCommissionEarned) || 0) > 0;
+
+        const existingBalTs =
+          parseDate(existingRow.balance_updated_at || parsedExistingRaw?.balanceUpdatedAt) ||
+          (existingPos ? parseDate(existingRow.updated_at) : 0);
+        const incomingBalTs =
+          parseDate(u.balanceUpdatedAt) ||
+          (incomingPos || u.isExplicitZeroReset || (Array.isArray(u.explicitZeroWallets) && u.explicitZeroWallets.length > 0)
+            ? parseDate(u.updatedAt)
+            : 0);
+
+        if (existingPos && !incomingPos && !u.isExplicitZeroReset && incomingBalTs <= existingBalTs) {
+          continue;
+        }
+        if (existingBalTs > 0 && (incomingBalTs === 0 || existingBalTs >= incomingBalTs)) {
+          continue; // SQLite already has authoritative newer or equal financial record
+        }
+        const existingTs = parseDate(existingRow.updated_at || parsedExistingRaw?.updatedAt);
+        const incomingTs = parseDate(u.updatedAt);
+        if (existingTs > 0 && (incomingTs === 0 || existingTs >= incomingTs) && incomingBalTs <= existingBalTs) {
+          continue;
         }
       }
 
@@ -669,15 +844,22 @@ export function creditUserCommissionInSql(
     UPDATE platform_users
     SET withdrawal_balance = ?,
         total_commission_earned = ?,
+        balance_updated_at = ?,
         updated_at = ?
     WHERE id = ?
-  `).run(newWithdrawal, newComm, nowIso, target.id);
+  `).run(newWithdrawal, newComm, nowIso, nowIso, target.id);
 
   try {
     const parsed = JSON.parse(target.raw_json || '{}');
     parsed.withdrawalBalance = newWithdrawal;
     parsed.totalCommissionEarned = newComm;
     parsed.isExplicitZeroReset = false;
+    if (Array.isArray(parsed.explicitZeroWallets)) {
+      parsed.explicitZeroWallets = parsed.explicitZeroWallets.filter(
+        (w: string) => w !== 'withdrawalBalance' && w !== 'totalCommissionEarned'
+      );
+    }
+    parsed.balanceUpdatedAt = nowIso;
     parsed.updatedAt = nowIso;
     db.prepare(`UPDATE platform_users SET raw_json = ? WHERE id = ?`).run(
       JSON.stringify(parsed),
@@ -720,14 +902,21 @@ export function updateUserWalletBalanceInSql(
   db.prepare(`
     UPDATE platform_users
     SET ${col} = ?,
+        balance_updated_at = ?,
         updated_at = ?
     WHERE id = ?
-  `).run(finalVal, nowIso, target.id);
+  `).run(finalVal, nowIso, nowIso, target.id);
 
   try {
     const parsed = JSON.parse(target.raw_json || '{}');
     parsed[wallet] = finalVal;
-    parsed.isExplicitZeroReset = finalVal === 0;
+    const prevZeros: string[] = Array.isArray(parsed.explicitZeroWallets) ? parsed.explicitZeroWallets : [];
+    const zeroSet = new Set<string>(prevZeros);
+    if (finalVal === 0) zeroSet.add(wallet);
+    else zeroSet.delete(wallet);
+    parsed.explicitZeroWallets = Array.from(zeroSet);
+    parsed.isExplicitZeroReset = false;
+    parsed.balanceUpdatedAt = nowIso;
     parsed.updatedAt = nowIso;
     db.prepare(`UPDATE platform_users SET raw_json = ? WHERE id = ?`).run(
       JSON.stringify(parsed),
@@ -780,6 +969,12 @@ export function creditUserDividendInSql(
   parsed.withdrawalBalance = newWithdrawal;
   parsed.productRevenue = newRevenue;
   parsed.isExplicitZeroReset = false;
+  if (Array.isArray(parsed.explicitZeroWallets)) {
+    parsed.explicitZeroWallets = parsed.explicitZeroWallets.filter(
+      (w: string) => w !== 'withdrawalBalance' && w !== 'productRevenue'
+    );
+  }
+  parsed.balanceUpdatedAt = nowIso;
   parsed.updatedAt = nowIso;
 
   db.prepare(`
@@ -787,9 +982,10 @@ export function creditUserDividendInSql(
     SET withdrawal_balance = ?,
         product_revenue = ?,
         raw_json = ?,
+        balance_updated_at = ?,
         updated_at = ?
     WHERE id = ?
-  `).run(newWithdrawal, newRevenue, JSON.stringify(parsed), nowIso, target.id);
+  `).run(newWithdrawal, newRevenue, JSON.stringify(parsed), nowIso, nowIso, target.id);
 
   const updated = db.prepare(`SELECT * FROM platform_users WHERE id = ?`).get(target.id) as any;
   return updated ? mapSqlRowToUser(updated) : null;
@@ -845,9 +1041,17 @@ export function creditUserWalletDeltaInSql(
   if (extraUpdates?.totalInvestedDelta) {
     parsed.totalInvested = nextInvested;
   }
-  if (wallet === 'withdrawalBalance' || wallet === 'rechargeBalance') {
-    parsed.isExplicitZeroReset = nextVal === 0;
+  const prevZeros: string[] = Array.isArray(parsed.explicitZeroWallets) ? parsed.explicitZeroWallets : [];
+  const zeroSet = new Set<string>(prevZeros);
+  if (nextVal === 0) zeroSet.add(wallet);
+  else zeroSet.delete(wallet);
+  if (extraUpdates?.totalInvestedDelta) {
+    if (nextInvested === 0) zeroSet.add('totalInvested');
+    else zeroSet.delete('totalInvested');
   }
+  parsed.explicitZeroWallets = Array.from(zeroSet);
+  parsed.isExplicitZeroReset = false;
+  parsed.balanceUpdatedAt = nowIso;
   parsed.updatedAt = nowIso;
 
   db.prepare(`
@@ -855,15 +1059,16 @@ export function creditUserWalletDeltaInSql(
     SET ${col} = ?,
         total_invested = ?,
         raw_json = ?,
+        balance_updated_at = ?,
         updated_at = ?
     WHERE id = ?
-  `).run(nextVal, nextInvested, JSON.stringify(parsed), nowIso, target.id);
+  `).run(nextVal, nextInvested, JSON.stringify(parsed), nowIso, nowIso, target.id);
 
   const updated = db.prepare(`SELECT * FROM platform_users WHERE id = ?`).get(target.id) as any;
   return updated ? mapSqlRowToUser(updated) : null;
 }
 
-// Dedicated function to update total referrals count for a user in SQLite
+// Dedicated function to update total referrals count for a user in SQLite (NEVER bump updated_at or balance_updated_at)
 export function updateUserReferralsInSql(
   userIdOrPhone: string,
   referralCount: number
@@ -873,21 +1078,19 @@ export function updateUserReferralsInSql(
   const raw = String(userIdOrPhone || '').trim();
   const cleanPhone = raw.replace(/\D/g, '').slice(-10);
   const count = Math.max(0, Number(referralCount) || 0);
-  const nowIso = new Date().toISOString();
 
   db.prepare(`
     UPDATE platform_users
-    SET total_referrals = ?,
-        updated_at = ?
+    SET total_referrals = ?
     WHERE id = ? OR (phone = ? AND length(?) = 10)
-  `).run(count, nowIso, raw, cleanPhone, cleanPhone);
+  `).run(count, raw, cleanPhone, cleanPhone);
 }
 
 // Reset all users' balances to 0 in SQLite
-export function resetAllUsersBalancesInSql(): void {
+export function resetAllUsersBalancesInSql(resetIso?: string): void {
   const db = getSqliteDb();
   initSqliteUsersTable();
-  const nowIso = new Date().toISOString();
+  const nowIso = resetIso || new Date().toISOString();
   db.prepare(`
     UPDATE platform_users
     SET recharge_balance = 0,
@@ -895,8 +1098,9 @@ export function resetAllUsersBalancesInSql(): void {
         product_revenue = 0,
         total_invested = 0,
         total_commission_earned = 0,
+        balance_updated_at = ?,
         updated_at = ?
-  `).run(nowIso);
+  `).run(nowIso, nowIso);
 
   const rows = db.prepare('SELECT id, raw_json FROM platform_users').all() as any[];
   const updateRawStmt = db.prepare('UPDATE platform_users SET raw_json = ? WHERE id = ?');
@@ -909,6 +1113,8 @@ export function resetAllUsersBalancesInSql(): void {
       parsed.totalInvested = 0;
       parsed.totalCommissionEarned = 0;
       parsed.isExplicitZeroReset = true;
+      parsed.explicitZeroWallets = ['rechargeBalance', 'withdrawalBalance', 'productRevenue', 'totalInvested', 'totalCommissionEarned'];
+      parsed.balanceUpdatedAt = nowIso;
       parsed.updatedAt = nowIso;
       updateRawStmt.run(JSON.stringify(parsed), r.id);
     } catch {}
